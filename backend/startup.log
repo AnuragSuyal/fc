@@ -1,0 +1,4 @@
+[dotenv@17.3.1] injecting env (20) from .env -- tip: ⚙️  load multiple .env files with { path: ['.env.local', '.env'] }
+🚀 Server running on port 5000
+🔍 Environment: development
+âŒ MongoDB Connection Error: The `uri` parameter to `openUri()` must be a string, got "undefined". Make sure the first parameter to `mongoose.connect()` or `mongoose.createConnection()` is a string.

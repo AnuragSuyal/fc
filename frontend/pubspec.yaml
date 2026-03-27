@@ -1,0 +1,76 @@
+name: frontend
+description: Friend Circle - Voice Chat & Social App
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  
+  # UI
+  cupertino_icons: ^1.0.6
+  google_fonts: ^8.0.2
+  shimmer: ^3.0.0
+  cached_network_image: ^3.3.0
+  
+  # State Management
+  provider: ^6.1.1
+  
+  # Navigation
+  go_router: ^17.1.0
+  
+  # Networking
+  http: ^1.1.0
+  socket_io_client: ^3.1.4
+  
+  # Storage
+  shared_preferences: ^2.2.2
+  
+  # Images
+  image_picker: ^1.0.7
+  
+  # Mini-Apps
+  youtube_player_flutter: ^9.0.1
+  youtube_explode_dart: ^2.5.1
+  just_audio: ^0.10.5
+  file_picker: ^10.3.2
+  
+  # Utils
+  intl: ^0.20.2
+  permission_handler: ^12.0.1
+  geolocator: ^14.0.2
+  http_parser: ^4.0.2
+  
+  # Auth Upgrade
+  pinput: ^6.0.2
+  url_launcher: ^6.2.4
+  flutter_web_auth_2: ^5.0.1
+  haptic_feedback: ^0.6.4+3
+  lottie: ^3.3.2
+  livekit_client: ^2.6.5
+  flutter_background_service: ^5.0.5
+  audio_session: ^0.2.2
+  dio: ^5.4.1
+  emoji_picker_flutter: ^4.4.0
+  flutter_secure_storage: ^10.0.0
+  flutter_dotenv: ^6.0.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+  
+  assets:
+    - assets/images/
+    - assets/animations/
+
+
+
+
+
