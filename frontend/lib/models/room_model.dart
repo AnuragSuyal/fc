@@ -203,6 +203,8 @@ class RoomModel {
   final String announcement;
   final int fans;
   final bool isVipRoom;
+  final bool isRallyActive;
+  final DateTime? rallyExpiresAt;
 
   final DateTime createdAt;
   final DateTime? endedAt;
@@ -244,6 +246,8 @@ class RoomModel {
     required this.announcement,
     required this.fans,
     this.isVipRoom = false,
+    this.isRallyActive = false,
+    this.rallyExpiresAt,
     required this.createdAt,
     this.endedAt,
   });
@@ -269,6 +273,11 @@ class RoomModel {
         : <String, dynamic>{};
 
     final announcementValue = json['announcement'];
+    final rallyExpiresAt = json['rallyExpiresAt'] != null
+        ? DateTime.tryParse(json['rallyExpiresAt'].toString())
+        : null;
+    final isRallyActive = json['rallyActive'] == true ||
+        (rallyExpiresAt != null && rallyExpiresAt.isAfter(DateTime.now()));
 
     return RoomModel(
       id: json['_id']?.toString() ?? json['id']?.toString() ?? '',
@@ -314,6 +323,8 @@ class RoomModel {
           : (announcementValue?.toString() ?? ''),
       fans: json['metrics']?['followers'] ?? 0,
       isVipRoom: json['featured'] ?? false,
+      isRallyActive: isRallyActive,
+      rallyExpiresAt: rallyExpiresAt,
       createdAt: json['createdAt'] != null
           ? DateTime.parse(json['createdAt'].toString())
           : DateTime.now(),
@@ -343,6 +354,8 @@ class RoomModel {
     String? musicUrl,
     String? musicTitle,
     bool? musicLoop,
+    bool? isRallyActive,
+    DateTime? rallyExpiresAt,
   }) {
     return RoomModel(
       id: id,
@@ -381,6 +394,8 @@ class RoomModel {
       announcement: announcement ?? this.announcement,
       fans: fans ?? this.fans,
       isVipRoom: isVipRoom,
+      isRallyActive: isRallyActive ?? this.isRallyActive,
+      rallyExpiresAt: rallyExpiresAt ?? this.rallyExpiresAt,
       createdAt: createdAt,
       endedAt: endedAt,
     );

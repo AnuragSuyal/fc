@@ -382,13 +382,19 @@ class RoomCard extends StatelessWidget {
   }
 
   String? _normalizeImageUrl(String? value) {
-    final normalized = value?.trim();
-    if (normalized == null ||
-        normalized.isEmpty ||
-        normalized.toLowerCase() == 'null') {
+    final rawValue = value?.trim();
+    if (rawValue == null ||
+        rawValue.isEmpty ||
+        rawValue.toLowerCase() == 'null') {
       return null;
     }
-    return normalized;
+
+    if (rawValue.startsWith('http://') || rawValue.startsWith('https://')) {
+      return AppConfig.normalizeBackendUrl(rawValue);
+    }
+
+    final normalizedPath = rawValue.startsWith('/') ? rawValue : '/$rawValue';
+    return '${AppConfig.socketUrl}$normalizedPath';
   }
 
   Color _getTypeColor(String type) {

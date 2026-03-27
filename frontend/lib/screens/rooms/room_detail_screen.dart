@@ -2095,7 +2095,7 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
         }
         break;
       case 'rally_fans':
-        return;
+        break;
     }
 
     _scheduleRoomRefresh();

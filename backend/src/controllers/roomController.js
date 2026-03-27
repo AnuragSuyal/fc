@@ -17,6 +17,79 @@ const {
 
 const roomCacheKey = (roomId) => `cache:room:${roomId}`;
 const escapeRegex = (value = '') => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const RALLY_DURATION_MS = 5 * 60 * 1000;
+
+const cleanupExpiredRallies = async () => {
+    await Room.updateMany(
+        {
+            rallyActive: true,
+            rallyExpiresAt: { $lte: new Date() }
+        },
+        {
+            $set: { rallyActive: false }
+        }
+    );
+};
+
+const buildRoomQuery = ({
+    category,
+    type,
+    search,
+    tag
+}) => {
+    const filters = [{ endedAt: null }];
+
+    if (category && category !== 'all') {
+        const categoryMatchers = [
+            { category },
+            { type: category }
+        ];
+
+        if (category === 'battle') {
+            categoryMatchers.push({ type: 'game' });
+        }
+
+        filters.push({ $or: categoryMatchers });
+    }
+
+    if (type) {
+        filters.push({ type });
+    }
+
+    if (search) {
+        const normalizedSearch = escapeRegex(String(search).trim());
+        if (normalizedSearch) {
+            filters.push({
+                $or: [
+                    { name: { $regex: normalizedSearch, $options: 'i' } },
+                    { roomId: { $regex: normalizedSearch, $options: 'i' } }
+                ]
+            });
+        }
+    }
+
+    if (tag) {
+        filters.push({ tags: tag });
+    }
+
+    return filters.length === 1 ? filters[0] : { $and: filters };
+};
+
+const buildRoomSortOptions = (sort = 'onlineCount') => {
+    const sortOptions = {
+        rallyActive: -1,
+        rallyExpiresAt: -1
+    };
+
+    if (sort === 'newest') sortOptions.createdAt = -1;
+    else if (sort === 'oldest') sortOptions.createdAt = 1;
+    else {
+        sortOptions.onlineCount = -1;
+        sortOptions.participantCount = -1;
+    }
+
+    return sortOptions;
+};
 
 const invalidateRoomCache = async (redis, roomId) => {
     if (!redis || !redis.isReady) return;
@@ -47,8 +120,13 @@ const emitLobbyUpdate = (io, room, action = 'updated') => {
         name: room.name,
         category: room.category,
         type: room.type,
+        hostAvatar: room.hostId?.avatar || room.hostAvatar || '',
+        coverImage: room.theme?.coverImage || room.coverImage || '',
         participantCount: room.participantCount ?? room.participants?.length ?? 0,
         onlineCount: room.onlineCount ?? 0,
+        rallyActive: room.rallyActive === true &&
+            (!room.rallyExpiresAt || new Date(room.rallyExpiresAt) > new Date()),
+        rallyExpiresAt: room.rallyExpiresAt || null,
         endedAt: room.endedAt || null,
         updatedAt: new Date().toISOString()
     });
@@ -172,25 +250,9 @@ exports.getRooms = async (req, res, next) => {
             sort = 'onlineCount'
         } = req.query;
 
-        const query = { endedAt: null };
-
-        if (category && category !== 'all') query.category = category;
-        if (type) query.type = type;
-        if (search) {
-            const normalizedSearch = escapeRegex(String(search).trim());
-            if (normalizedSearch) {
-                query.$or = [
-                    { name: { $regex: normalizedSearch, $options: 'i' } },
-                    { roomId: { $regex: normalizedSearch, $options: 'i' } }
-                ];
-            }
-        }
-        if (tag) query.tags = tag;
-
-        const sortOptions = {};
-        if (sort === 'onlineCount') sortOptions.onlineCount = -1;
-        else if (sort === 'newest') sortOptions.createdAt = -1;
-        else if (sort === 'oldest') sortOptions.createdAt = 1;
+        await cleanupExpiredRallies();
+        const query = buildRoomQuery({ category, type, search, tag });
+        const sortOptions = buildRoomSortOptions(sort);
 
         const rooms = await Room.find(query)
             .populate('hostId', 'username avatar level vipLevel')
@@ -711,9 +773,10 @@ exports.leaveSeat = async (req, res, next) => {
 
 exports.getTrendingRooms = async (req, res, next) => {
     try {
+        await cleanupExpiredRallies();
         const rooms = await Room.find({ endedAt: null })
             .populate('hostId', 'username avatar level')
-            .sort({ onlineCount: -1, participantCount: -1 })
+            .sort({ rallyActive: -1, rallyExpiresAt: -1, onlineCount: -1, participantCount: -1 })
             .limit(10);
         res.json(rooms);
     } catch (error) {
@@ -751,9 +814,10 @@ exports.deleteRoom = async (req, res, next) => {
 
 exports.getMyRooms = async (req, res, next) => {
     try {
+        await cleanupExpiredRallies();
         const rooms = await Room.find({ 'participants.userId': req.userId, endedAt: null })
             .populate('hostId', 'username avatar level')
-            .sort({ updatedAt: -1 });
+            .sort({ rallyActive: -1, rallyExpiresAt: -1, updatedAt: -1 });
         res.json(rooms);
     } catch (error) {
         next(error);

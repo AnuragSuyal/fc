@@ -328,6 +328,11 @@ const roomSchema = new mongoose.Schema({
         default: false
     },
     featuredUntil: Date,
+    rallyActive: {
+        type: Boolean,
+        default: false
+    },
+    rallyExpiresAt: Date,
 
     // Timestamps
     createdAt: {
@@ -360,6 +365,9 @@ roomSchema.pre('validate', async function () {
 // Update timestamps and participant counts before save
 roomSchema.pre('save', async function () {
     this.updatedAt = Date.now();
+    if (this.rallyActive && this.rallyExpiresAt && this.rallyExpiresAt <= new Date()) {
+        this.rallyActive = false;
+    }
     this.participantCount = this.participants.length;
     this.onlineCount = this.participants.filter(p =>
         p.lastActive > new Date(Date.now() - 5 * 60 * 1000) // Active in last 5 minutes
@@ -373,6 +381,7 @@ roomSchema.index({ type: 1 });
 roomSchema.index({ category: 1 });
 roomSchema.index({ createdAt: -1 });
 roomSchema.index({ featured: -1 });
+roomSchema.index({ rallyActive: -1, rallyExpiresAt: -1 });
 roomSchema.index({ onlineCount: -1 });
 roomSchema.index({ roomId: 1 }, { unique: true });
 

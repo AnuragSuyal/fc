@@ -1,9 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../../models/room_model.dart';
 import '../../providers/auth_provider.dart';
 import '../../services/room_service.dart';
+import '../../services/socket_service.dart';
 import '../../theme/app_theme.dart';
 import '../../utils/constants.dart';
 import '../../widgets/room_card.dart';
@@ -26,16 +29,67 @@ class _HomeScreenState extends State<HomeScreen> {
   List<RoomModel> _trendingRooms = [];
   List<RoomModel> _myRooms = [];
   bool _isLoading = true;
+  bool _isDisposed = false;
+  Timer? _realtimeDebounce;
+  Timer? _rallyExpiryTimer;
+  StreamSubscription<Map<String, dynamic>>? _roomRealtimeSubscription;
+  StreamSubscription<Map<String, dynamic>>? _socketResyncSubscription;
 
   @override
   void initState() {
     super.initState();
+    _subscribeToRealtime();
     _loadData();
   }
 
-  Future<void> _loadData() async {
+  @override
+  void dispose() {
+    _isDisposed = true;
+    _realtimeDebounce?.cancel();
+    _rallyExpiryTimer?.cancel();
+    _roomRealtimeSubscription?.cancel();
+    _socketResyncSubscription?.cancel();
+    super.dispose();
+  }
+
+  void _subscribeToRealtime() {
+    _roomRealtimeSubscription = SocketService.roomUpdateStream.listen((data) {
+      final eventType = data['_eventType']?.toString();
+      if (!{
+        'room_created',
+        'room_deleted',
+        'room_updated',
+        'lobby_update',
+        'participant_joined',
+        'participant_left',
+        'rally_fans',
+      }.contains(eventType)) {
+        return;
+      }
+
+      _realtimeDebounce?.cancel();
+      _realtimeDebounce = Timer(const Duration(milliseconds: 500), () {
+        if (!_isDisposed && mounted) {
+          _loadData(showLoader: false);
+        }
+      });
+    });
+
+    _socketResyncSubscription = SocketService.resyncStream.listen((_) {
+      _realtimeDebounce?.cancel();
+      _realtimeDebounce = Timer(const Duration(milliseconds: 500), () {
+        if (!_isDisposed && mounted) {
+          _loadData(showLoader: false);
+        }
+      });
+    });
+  }
+
+  Future<void> _loadData({bool showLoader = true}) async {
     if (!mounted) return;
-    setState(() => _isLoading = true);
+    if (showLoader) {
+      setState(() => _isLoading = true);
+    }
 
     try {
       final results = await Future.wait<List<RoomModel>>([
@@ -49,10 +103,34 @@ class _HomeScreenState extends State<HomeScreen> {
         _myRooms = results[1];
         _isLoading = false;
       });
+      _scheduleRallyRefresh([...results[0], ...results[1]]);
     } catch (_) {
       if (!mounted) return;
       setState(() => _isLoading = false);
     }
+  }
+
+  void _scheduleRallyRefresh(List<RoomModel> rooms) {
+    _rallyExpiryTimer?.cancel();
+
+    final now = DateTime.now();
+    DateTime? nearestExpiry;
+    for (final room in rooms) {
+      final expiry = room.rallyExpiresAt;
+      if (expiry == null || !expiry.isAfter(now)) continue;
+      if (nearestExpiry == null || expiry.isBefore(nearestExpiry)) {
+        nearestExpiry = expiry;
+      }
+    }
+
+    if (nearestExpiry == null) return;
+
+    final duration = nearestExpiry.difference(now) + const Duration(seconds: 1);
+    _rallyExpiryTimer = Timer(duration, () {
+      if (!_isDisposed && mounted) {
+        _loadData(showLoader: false);
+      }
+    });
   }
 
   @override
@@ -438,7 +516,7 @@ class _HomeScreenState extends State<HomeScreen> {
     }
 
     return SizedBox(
-      height: 190,
+      height: 252,
       child: ListView.separated(
         scrollDirection: Axis.horizontal,
         itemCount: _myRooms.length,
@@ -480,8 +558,19 @@ class _HomeScreenState extends State<HomeScreen> {
                         background: Colors.white,
                         foreground: AppColors.textSecondary,
                       ),
+                      if (room.isRallyActive) ...[
+                        const SizedBox(width: 8),
+                        _pill(
+                          'RALLY ON',
+                          background:
+                              AppColors.warningOrange.withValues(alpha: 0.18),
+                          foreground: AppColors.warningOrange,
+                        ),
+                      ],
                     ],
                   ),
+                  const SizedBox(height: 14),
+                  _buildRoomPreview(room, accent),
                   const Spacer(),
                   Text(
                     room.name,
@@ -528,6 +617,75 @@ class _HomeScreenState extends State<HomeScreen> {
         },
       ),
     );
+  }
+
+  Widget _buildRoomPreview(RoomModel room, Color accent) {
+    final imageUrl = _normalizeRoomImage(room.coverImage) ??
+        _normalizeRoomImage(room.hostAvatar);
+
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(20),
+      child: Container(
+        height: 72,
+        width: double.infinity,
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [
+              accent.withValues(alpha: 0.16),
+              Colors.white,
+            ],
+          ),
+        ),
+        child: imageUrl == null
+            ? Center(
+                child: Icon(
+                  _roomIcon(room.type),
+                  color: accent,
+                  size: 28,
+                ),
+              )
+            : Image.network(
+                imageUrl,
+                fit: BoxFit.cover,
+                errorBuilder: (_, __, ___) => Center(
+                  child: Icon(
+                    _roomIcon(room.type),
+                    color: accent,
+                    size: 28,
+                  ),
+                ),
+              ),
+      ),
+    );
+  }
+
+  String? _normalizeRoomImage(String? value) {
+    final raw = value?.trim();
+    if (raw == null || raw.isEmpty || raw.toLowerCase() == 'null') {
+      return null;
+    }
+    if (raw.startsWith('http://') || raw.startsWith('https://')) {
+      return AppConfig.normalizeBackendUrl(raw);
+    }
+    final normalizedPath = raw.startsWith('/') ? raw : '/$raw';
+    return '${AppConfig.socketUrl}$normalizedPath';
+  }
+
+  IconData _roomIcon(String type) {
+    switch (type) {
+      case 'music':
+        return Icons.music_note_rounded;
+      case 'video':
+        return Icons.videocam_rounded;
+      case 'chat':
+        return Icons.chat_bubble_rounded;
+      case 'auction':
+        return Icons.gavel_rounded;
+      default:
+        return Icons.mic_rounded;
+    }
   }
 
   Widget _buildEmptyPanel({

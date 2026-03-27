@@ -54,6 +54,7 @@ class _ExploreScreenState extends State<ExploreScreen> {
   String _lastLoadedQuery = '';
   Timer? _searchDebounce;
   Timer? _realtimeDebounce;
+  Timer? _rallyExpiryTimer;
   StreamSubscription<Map<String, dynamic>>? _roomRealtimeSubscription;
   StreamSubscription<Map<String, dynamic>>? _socketResyncSubscription;
 
@@ -79,6 +80,7 @@ class _ExploreScreenState extends State<ExploreScreen> {
     _isDisposed = true;
     _searchDebounce?.cancel();
     _realtimeDebounce?.cancel();
+    _rallyExpiryTimer?.cancel();
     _roomRealtimeSubscription?.cancel();
     _socketResyncSubscription?.cancel();
     _searchController.dispose();
@@ -112,6 +114,7 @@ class _ExploreScreenState extends State<ExploreScreen> {
         'lobby_update',
         'participant_joined',
         'participant_left',
+        'rally_fans',
       }.contains(eventType)) {
         return;
       }
@@ -164,24 +167,17 @@ class _ExploreScreenState extends State<ExploreScreen> {
       final categories = results[3] as List<Map<String, dynamic>>;
       final users = results[4] as List<UserModel>;
       final query = activeQuery.toLowerCase();
+      final spotlightRooms = _extractSpotlightRooms(
+        liveRooms: live,
+        trendingRooms: trending,
+        query: query,
+      );
 
       _safeSetState(() {
         _lastLoadedQuery = activeQuery;
         _featuredRooms
           ..clear()
-          ..addAll(
-            trending.where((room) {
-              final matchesCategory = _selectedCategory == 'all' ||
-                  room.category == _selectedCategory ||
-                  room.type == _selectedCategory;
-              final matchesQuery = query.isEmpty ||
-                  room.name.toLowerCase().contains(query) ||
-                  room.roomId.toLowerCase().contains(query) ||
-                  room.hostName.toLowerCase().contains(query) ||
-                  room.tags.any((tag) => tag.toLowerCase().contains(query));
-              return matchesCategory && matchesQuery;
-            }).take(6),
-          );
+          ..addAll(spotlightRooms);
         _liveRooms = live;
         _myRooms = mine;
         _matchedUsers = users;
@@ -192,11 +188,70 @@ class _ExploreScreenState extends State<ExploreScreen> {
                 .toList();
         _isLoading = false;
       });
+      _scheduleRallyRefresh([...live, ...mine, ...spotlightRooms]);
     } catch (error) {
       debugPrint('Error loading explore screen: $error');
       if (_isDisposed || !mounted || requestId != _activeRequestId) return;
       _safeSetState(() => _isLoading = false);
     }
+  }
+
+  List<RoomModel> _extractSpotlightRooms({
+    required List<RoomModel> liveRooms,
+    required List<RoomModel> trendingRooms,
+    required String query,
+  }) {
+    final seenIds = <String>{};
+    final spotlight = <RoomModel>[];
+
+    bool matchesFilters(RoomModel room) {
+      final matchesCategory = _selectedCategory == 'all' ||
+          room.category == _selectedCategory ||
+          room.type == _selectedCategory ||
+          (_selectedCategory == 'battle' && room.type == 'game');
+      final matchesQuery = query.isEmpty ||
+          room.name.toLowerCase().contains(query) ||
+          room.roomId.toLowerCase().contains(query) ||
+          room.hostName.toLowerCase().contains(query) ||
+          room.tags.any((tag) => tag.toLowerCase().contains(query));
+      return matchesCategory && matchesQuery;
+    }
+
+    for (final room in [...liveRooms, ...trendingRooms]) {
+      if (!room.isRallyActive ||
+          seenIds.contains(room.id) ||
+          !matchesFilters(room)) {
+        continue;
+      }
+      seenIds.add(room.id);
+      spotlight.add(room);
+      if (spotlight.length == 6) break;
+    }
+
+    return spotlight;
+  }
+
+  void _scheduleRallyRefresh(List<RoomModel> rooms) {
+    _rallyExpiryTimer?.cancel();
+
+    final now = DateTime.now();
+    DateTime? nearestExpiry;
+    for (final room in rooms) {
+      final expiry = room.rallyExpiresAt;
+      if (expiry == null || !expiry.isAfter(now)) continue;
+      if (nearestExpiry == null || expiry.isBefore(nearestExpiry)) {
+        nearestExpiry = expiry;
+      }
+    }
+
+    if (nearestExpiry == null) return;
+
+    final duration = nearestExpiry.difference(now) + const Duration(seconds: 1);
+    _rallyExpiryTimer = Timer(duration, () {
+      if (!_isDisposed && mounted) {
+        _loadExploreData(showLoader: false);
+      }
+    });
   }
 
   Future<void> _refresh() => _loadExploreData(showLoader: false);
@@ -798,6 +853,15 @@ class _ExploreScreenState extends State<ExploreScreen> {
                                     Colors.white.withValues(alpha: 0.14),
                                 foreground: Colors.white,
                               ),
+                              if (room.isRallyActive) ...[
+                                const SizedBox(width: 8),
+                                _pill(
+                                  'RALLY ON',
+                                  background: AppColors.warningOrange
+                                      .withValues(alpha: 0.18),
+                                  foreground: Colors.white,
+                                ),
+                              ],
                             ],
                           ),
                           const Spacer(),
@@ -893,7 +957,7 @@ class _ExploreScreenState extends State<ExploreScreen> {
     }
 
     return SizedBox(
-      height: 128,
+      height: 172,
       child: ListView.separated(
         scrollDirection: Axis.horizontal,
         itemCount: _myRooms.length + 1,
@@ -949,6 +1013,8 @@ class _ExploreScreenState extends State<ExploreScreen> {
                     background: accent.withValues(alpha: 0.14),
                     foreground: AppColors.textPrimary,
                   ),
+                  const SizedBox(height: 10),
+                  _buildMyRoomPreview(room, accent),
                   const Spacer(),
                   Text(
                     room.name,
@@ -1075,19 +1141,65 @@ class _ExploreScreenState extends State<ExploreScreen> {
     );
   }
 
+  Widget _buildMyRoomPreview(RoomModel room, Color accent) {
+    final imageUrl = _normalizeImageUrl(room.coverImage) ??
+        _normalizeImageUrl(room.hostAvatar);
+
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(18),
+      child: Container(
+        height: 46,
+        width: double.infinity,
+        color: accent.withValues(alpha: 0.08),
+        child: imageUrl == null
+            ? Center(
+                child: Icon(
+                  _categoryIcon(room.type),
+                  size: 24,
+                  color: accent,
+                ),
+              )
+            : Image.network(
+                imageUrl,
+                fit: BoxFit.cover,
+                errorBuilder: (_, __, ___) => Center(
+                  child: Icon(
+                    _categoryIcon(room.type),
+                    size: 24,
+                    color: accent,
+                  ),
+                ),
+              ),
+      ),
+    );
+  }
+
   Widget _buildFeaturedBackdrop(RoomModel room, Color accent) {
     final coverImage = _normalizeImageUrl(room.coverImage);
     if (coverImage != null) {
       return Image.network(
         coverImage,
         fit: BoxFit.cover,
-        errorBuilder: (_, __, ___) => _buildFeaturedFallback(accent, room.type),
+        errorBuilder: (_, __, ___) => _buildFeaturedFallback(accent, room),
       );
     }
-    return _buildFeaturedFallback(accent, room.type);
+    return _buildFeaturedFallback(accent, room);
   }
 
-  Widget _buildFeaturedFallback(Color accent, String roomType) {
+  Widget _buildFeaturedFallback(Color accent, RoomModel room) {
+    final hostAvatar = _normalizeImageUrl(room.hostAvatar);
+    if (hostAvatar != null) {
+      return Image.network(
+        hostAvatar,
+        fit: BoxFit.cover,
+        errorBuilder: (_, __, ___) =>
+            _buildFeaturedIconFallback(accent, room.type),
+      );
+    }
+    return _buildFeaturedIconFallback(accent, room.type);
+  }
+
+  Widget _buildFeaturedIconFallback(Color accent, String roomType) {
     return DecoratedBox(
       decoration: BoxDecoration(
         gradient: LinearGradient(
@@ -1112,13 +1224,15 @@ class _ExploreScreenState extends State<ExploreScreen> {
   }
 
   String? _normalizeImageUrl(String? value) {
-    final normalized = value?.trim();
-    if (normalized == null ||
-        normalized.isEmpty ||
-        normalized.toLowerCase() == 'null') {
+    final raw = value?.trim();
+    if (raw == null || raw.isEmpty || raw.toLowerCase() == 'null') {
       return null;
     }
-    return normalized;
+    if (raw.startsWith('http://') || raw.startsWith('https://')) {
+      return AppConfig.normalizeBackendUrl(raw);
+    }
+    final normalizedPath = raw.startsWith('/') ? raw : '/$raw';
+    return '${AppConfig.socketUrl}$normalizedPath';
   }
 
   Color _categoryColor(String id) {

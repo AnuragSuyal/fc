@@ -21,6 +21,7 @@ const hpp            = require('hpp');
 const compression    = require('compression');
 const { apiLimiter } = require('./src/middleware/rateLimit');
 const requestLogger  = require('./src/middleware/requestLogger');
+const RALLY_DURATION_MS = 5 * 60 * 1000;
 
 // ── Redis ───────────────────────────────────────────────────────────────────────
 const redisClient = redis.createClient({ url: process.env.REDIS_URL || 'redis://localhost:6379' });
@@ -412,9 +413,51 @@ io.on('connection', (socket) => {
     socket.on('room:rally_fans', ({ roomId, roomName } = {}) => {
         if (!roomId) return;
         if (!isActiveRoomParticipant(roomId)) return;
-        io.to(`room:${roomId}`).emit('room:rally_fans', {
-            roomId, roomName, hostId: socket.userId, hostName: socket.username
-        });
+        (async () => {
+            try {
+                const Room = require('./src/models/Room');
+                const rallyExpiresAt = new Date(Date.now() + RALLY_DURATION_MS);
+                const room = await Room.findByIdAndUpdate(
+                    roomId,
+                    {
+                        $set: {
+                            rallyActive: true,
+                            rallyExpiresAt
+                        }
+                    },
+                    { new: true }
+                ).populate('hostId', 'username avatar level vipLevel');
+
+                if (!room) return;
+
+                io.to(`room:${roomId}`).emit('room:rally_fans', {
+                    roomId,
+                    roomName: roomName || room.name,
+                    hostId: socket.userId,
+                    hostName: socket.username,
+                    rallyActive: true,
+                    rallyExpiresAt
+                });
+
+                io.emit('room:lobby:update', {
+                    roomId: room._id.toString(),
+                    action: 'rally_started',
+                    name: room.name,
+                    category: room.category,
+                    type: room.type,
+                    hostAvatar: room.hostId?.avatar || '',
+                    coverImage: room.theme?.coverImage || '',
+                    participantCount: room.participantCount ?? room.participants?.length ?? 0,
+                    onlineCount: room.onlineCount ?? 0,
+                    rallyActive: true,
+                    rallyExpiresAt,
+                    endedAt: room.endedAt || null,
+                    updatedAt: new Date().toISOString()
+                });
+            } catch (err) {
+                console.error('room:rally_fans error:', err.message);
+            }
+        })();
     });
 
     // ── Real-time gift (socket-only path) ─────────────────────────────────────
