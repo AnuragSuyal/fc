@@ -7,9 +7,9 @@ import '../../services/room_service.dart';
 import '../../services/socket_service.dart';
 import '../../theme/app_theme.dart';
 import '../../utils/constants.dart';
+import '../../widgets/app_search_icon.dart';
 import '../../widgets/room_card.dart';
 import 'create_room_screen.dart';
-import 'room_detail_screen.dart';
 
 class RoomsScreen extends StatefulWidget {
   const RoomsScreen({super.key});
@@ -20,8 +20,6 @@ class RoomsScreen extends StatefulWidget {
 
 class _RoomsScreenState extends State<RoomsScreen> {
   List<RoomModel> _rooms = [];
-  List<Map<String, dynamic>> _categories = [];
-  String _selectedCategory = 'all';
   String _selectedSort = 'trending';
   bool _isLoading = true;
   bool _isLoadingMore = false;
@@ -29,7 +27,6 @@ class _RoomsScreenState extends State<RoomsScreen> {
   bool _hasMore = true;
   final TextEditingController _searchController = TextEditingController();
   List<RoomModel> _myRooms = [];
-  bool _isLoadingMyRooms = true;
   int _activeRequestId = 0;
   bool _isDisposed = false;
   Timer? _searchDebounce;
@@ -48,7 +45,6 @@ class _RoomsScreenState extends State<RoomsScreen> {
     super.initState();
     _searchController.addListener(_onSearchChanged);
     _subscribeToRealtime();
-    _loadCategories();
     _loadMyRooms();
     _loadRooms();
   }
@@ -112,32 +108,15 @@ class _RoomsScreenState extends State<RoomsScreen> {
     }
   }
 
-  Future<void> _loadCategories() async {
-    try {
-      final categories = await RoomService.getCategories();
-      if (!_isDisposed && mounted) {
-        _safeSetState(() {
-          _categories = categories;
-        });
-      }
-    } catch (e) {
-      debugPrint('Error loading categories: $e');
-    }
-  }
-
   Future<void> _loadMyRooms() async {
-    _safeSetState(() => _isLoadingMyRooms = true);
     try {
       final rooms = await RoomService.getMyRooms();
       if (!_isDisposed && mounted) {
         _safeSetState(() {
           _myRooms = rooms;
-          _isLoadingMyRooms = false;
         });
       }
-    } catch (_) {
-      _safeSetState(() => _isLoadingMyRooms = false);
-    }
+    } catch (_) {}
   }
 
   Future<void> _loadRooms({bool reset = false}) async {
@@ -164,7 +143,6 @@ class _RoomsScreenState extends State<RoomsScreen> {
 
     try {
       final rooms = await RoomService.getRooms(
-        category: _selectedCategory,
         search:
             _searchController.text.isNotEmpty ? _searchController.text : null,
         sort: _backendSort,
@@ -194,14 +172,6 @@ class _RoomsScreenState extends State<RoomsScreen> {
     }
   }
 
-  void _onCategoryChanged(String category) {
-    if (_selectedCategory == category) return;
-    setState(() {
-      _selectedCategory = category;
-    });
-    _loadRooms(reset: true);
-  }
-
   void _onSortChanged(String? value) {
     if (value != null && _selectedSort != value) {
       setState(() {
@@ -213,7 +183,6 @@ class _RoomsScreenState extends State<RoomsScreen> {
 
   Future<void> _refreshRooms() async {
     await Future.wait([
-      _loadCategories(),
       _loadMyRooms(),
       _loadRooms(reset: true),
     ]);
@@ -268,46 +237,6 @@ class _RoomsScreenState extends State<RoomsScreen> {
                   child: Padding(
                     padding: const EdgeInsets.fromLTRB(20, 16, 20, 0),
                     child: _buildInfoRow(),
-                  ),
-                ),
-                SliverToBoxAdapter(
-                  child: Padding(
-                    padding: const EdgeInsets.fromLTRB(20, 16, 20, 0),
-                    child: SizedBox(
-                      height: 42,
-                      child: ListView.separated(
-                        scrollDirection: Axis.horizontal,
-                        itemCount: _categories.length,
-                        separatorBuilder: (_, __) => const SizedBox(width: 8),
-                        itemBuilder: (context, index) {
-                          final category = _categories[index];
-                          final selected = _selectedCategory == category['id'];
-                          return ChoiceChip(
-                            label: Text(category['name'] ?? ''),
-                            selected: selected,
-                            onSelected: (_) =>
-                                _onCategoryChanged(category['id']),
-                          );
-                        },
-                      ),
-                    ),
-                  ),
-                ),
-                SliverToBoxAdapter(
-                  child: Padding(
-                    padding: const EdgeInsets.fromLTRB(20, 22, 20, 0),
-                    child: _sectionHeader(
-                      'Your rooms',
-                      'Quick jump back into your familiar corners.',
-                      actionLabel: 'Create',
-                      onAction: _openCreateRoom,
-                    ),
-                  ),
-                ),
-                SliverToBoxAdapter(
-                  child: Padding(
-                    padding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
-                    child: _buildMyRoomsStrip(),
                   ),
                 ),
                 SliverToBoxAdapter(
@@ -444,7 +373,7 @@ class _RoomsScreenState extends State<RoomsScreen> {
       textInputAction: TextInputAction.search,
       decoration: const InputDecoration(
         hintText: 'Search rooms or room UID',
-        prefixIcon: Icon(Icons.search_rounded),
+        prefixIcon: AppSearchIcon(size: 18),
       ),
     );
   }
@@ -573,96 +502,6 @@ class _RoomsScreenState extends State<RoomsScreen> {
     );
   }
 
-  Widget _buildMyRoomsStrip() {
-    if (_isLoadingMyRooms) {
-      return const Padding(
-        padding: EdgeInsets.symmetric(vertical: 24),
-        child: Center(child: CircularProgressIndicator()),
-      );
-    }
-
-    return SizedBox(
-      height: 132,
-      child: ListView.separated(
-        scrollDirection: Axis.horizontal,
-        itemCount: _myRooms.length + 1,
-        separatorBuilder: (_, __) => const SizedBox(width: 12),
-        itemBuilder: (context, index) {
-          if (index == 0) {
-            return InkWell(
-              onTap: _openCreateRoom,
-              borderRadius: BorderRadius.circular(28),
-              child: Ink(
-                width: 156,
-                decoration: BoxDecoration(
-                  gradient: context.mood.heroGradient,
-                  borderRadius: BorderRadius.circular(28),
-                ),
-                child: const Padding(
-                  padding: EdgeInsets.all(18),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Icon(Icons.add_circle_outline_rounded,
-                          color: Colors.white),
-                      Spacer(),
-                      Text(
-                        'Create room',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.w800,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            );
-          }
-
-          final room = _myRooms[index - 1];
-          return InkWell(
-            onTap: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                    builder: (context) => RoomDetailScreen(room: room)),
-              );
-            },
-            borderRadius: BorderRadius.circular(28),
-            child: Ink(
-              width: 170,
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(28),
-                border: Border.all(color: context.mood.outlineSoft),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    room.name,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                          fontWeight: FontWeight.w800,
-                        ),
-                  ),
-                  const Spacer(),
-                  Text(
-                    '${room.onlineCount} online',
-                    style: Theme.of(context).textTheme.bodySmall,
-                  ),
-                ],
-              ),
-            ),
-          );
-        },
-      ),
-    );
-  }
-
   Widget _buildEmptyState() {
     final theme = Theme.of(context);
 
@@ -685,7 +524,7 @@ class _RoomsScreenState extends State<RoomsScreen> {
           Text('No rooms found', style: theme.textTheme.headlineSmall),
           const SizedBox(height: 8),
           Text(
-            'Try another search or category, or make the first move and create a room.',
+            'Try another search, or make the first move and create a room.',
             style: theme.textTheme.bodyMedium?.copyWith(
               color: AppColors.textSecondary,
             ),

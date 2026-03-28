@@ -4,6 +4,7 @@ import '../../providers/auth_provider.dart';
 import '../../services/gift_service.dart';
 import '../../models/gift_model.dart';
 import '../../utils/constants.dart';
+import '../../widgets/currency_icon.dart';
 import '../../widgets/gift_card.dart';
 import '../../widgets/rounded_scaffold.dart';
 import 'send_gift_screen.dart';
@@ -89,7 +90,7 @@ class _GiftShopScreenState extends State<GiftShopScreen> {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(Icons.monetization_on, size: 14, color: Colors.amber),
+              const CurrencyIcon.coins(size: 14),
               const SizedBox(width: 4),
               Text(
                 '${user?.coins ?? 0}',
@@ -100,7 +101,7 @@ class _GiftShopScreenState extends State<GiftShopScreen> {
                 ),
               ),
               const SizedBox(width: 10),
-              const Icon(Icons.diamond, size: 14, color: Color(0xFFAA66FF)),
+              const CurrencyIcon.gems(size: 14),
               const SizedBox(width: 4),
               Text(
                 '${user?.gems ?? 0}',

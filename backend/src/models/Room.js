@@ -18,6 +18,15 @@ const roomSchema = new mongoose.Schema({
         type: String,
         required: true
     }, // Display ID like "1698332" - auto-generated
+    groupId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Group',
+        index: true
+    },
+    showInExplore: {
+        type: Boolean,
+        default: true
+    },
 
     // Type & Category
     type: {
@@ -203,7 +212,32 @@ const roomSchema = new mongoose.Schema({
         },
         youtubeUrl: String,
         youtubeTitle: String,
-        youtubeThumbnail: String
+        youtubeThumbnail: String,
+        youtubeQueue: [{
+            videoId: String,
+            url: String,
+            title: String,
+            thumbnailUrl: String,
+            durationMs: {
+                type: Number,
+                default: 0
+            },
+            addedBy: String,
+            addedAt: {
+                type: Date,
+                default: Date.now
+            }
+        }],
+        youtubePositionMs: {
+            type: Number,
+            default: 0
+        },
+        youtubePlaybackState: {
+            type: String,
+            enum: ['paused', 'playing'],
+            default: 'paused'
+        },
+        youtubeSyncedAt: Date
     },
 
     // Current State
@@ -384,5 +418,6 @@ roomSchema.index({ featured: -1 });
 roomSchema.index({ rallyActive: -1, rallyExpiresAt: -1 });
 roomSchema.index({ onlineCount: -1 });
 roomSchema.index({ roomId: 1 }, { unique: true });
+roomSchema.index({ groupId: 1, endedAt: 1 });
 
 module.exports = mongoose.model('Room', roomSchema);

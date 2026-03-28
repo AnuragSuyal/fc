@@ -27,16 +27,33 @@ class AppConfig {
     final uri = Uri.tryParse(url);
     if (uri == null || !uri.hasAuthority) return url;
 
-    final isLocalHost = uri.host == 'localhost' ||
-        uri.host == '127.0.0.1' ||
-        uri.host == '0.0.0.0';
-    if (!isLocalHost) return url;
+    if (!_isLoopbackHost(uri.host)) return url;
 
-    if (defaultTargetPlatform == TargetPlatform.android) {
-      return uri.replace(host: '10.0.2.2').toString();
+    final replacementHost = _preferredDeviceHost;
+    if (replacementHost != null && replacementHost.isNotEmpty) {
+      return uri.replace(host: replacementHost).toString();
     }
 
     return url;
+  }
+
+  static bool _isLoopbackHost(String host) =>
+      host == 'localhost' || host == '127.0.0.1' || host == '0.0.0.0';
+
+  static String? get _preferredDeviceHost {
+    final configuredApiUri = _apiUrl.isNotEmpty ? Uri.tryParse(_apiUrl) : null;
+    final configuredHost = configuredApiUri?.host;
+    if (configuredHost != null &&
+        configuredHost.isNotEmpty &&
+        !_isLoopbackHost(configuredHost)) {
+      return configuredHost;
+    }
+
+    if (defaultTargetPlatform == TargetPlatform.android) {
+      return '10.0.2.2';
+    }
+
+    return null;
   }
 }
 
@@ -73,4 +90,29 @@ class AppStrings {
   static const forgotPassword = 'Forgot Password?';
   static const alreadyHaveAccount = 'Already have an account? ';
   static const dontHaveAccount = "Don't have an account? ";
+}
+
+class AppRegions {
+  static const List<String> values = [
+    'Global',
+    'India',
+    'Pakistan',
+    'Bangladesh',
+    'Nepal',
+    'Sri Lanka',
+    'United Arab Emirates',
+    'Saudi Arabia',
+    'United Kingdom',
+    'United States',
+    'Canada',
+    'Australia',
+    'Germany',
+    'France',
+    'Japan',
+    'South Korea',
+    'Singapore',
+    'Malaysia',
+    'Indonesia',
+    'Philippines',
+  ];
 }

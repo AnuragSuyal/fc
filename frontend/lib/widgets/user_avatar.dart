@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 
 import '../utils/constants.dart';
+import '../utils/media_url.dart';
 
 class UserAvatar extends StatelessWidget {
   final String? imageUrl;
@@ -19,10 +20,7 @@ class UserAvatar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final String effectiveUrl =
-        (imageUrl != null && imageUrl!.isNotEmpty && imageUrl != 'null')
-            ? imageUrl!
-            : '';
+    final effectiveUrl = resolveMediaUrl(imageUrl) ?? '';
 
     if (effectiveUrl.isNotEmpty) {
       return CachedNetworkImage(

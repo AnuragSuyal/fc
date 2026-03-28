@@ -7,6 +7,7 @@ import '../../providers/auth_provider.dart';
 import '../../services/socket_service.dart';
 import '../../services/wedding_service.dart';
 import '../../utils/constants.dart';
+import '../../widgets/currency_icon.dart';
 
 class WeddingScreen extends StatefulWidget {
   const WeddingScreen({super.key});
@@ -460,10 +461,7 @@ class _WeddingScreenState extends State<WeddingScreen>
                 color: const Color(0xFFFDE7EF),
                 borderRadius: BorderRadius.circular(14),
               ),
-              child: const Icon(
-                Icons.diamond_outlined,
-                color: Color(0xFFEF476F),
-              ),
+              child: const Center(child: CurrencyIcon.gems(size: 24)),
             ),
             title: Text(ring['name']?.toString() ?? ''),
             subtitle: Text(

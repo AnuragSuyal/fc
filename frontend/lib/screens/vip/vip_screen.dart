@@ -6,6 +6,7 @@ import '../../models/vip_model.dart';
 import '../../providers/auth_provider.dart';
 import '../../services/vip_service.dart';
 import '../../utils/constants.dart';
+import '../../widgets/currency_icon.dart';
 import '../../widgets/rounded_scaffold.dart';
 
 class VipScreen extends StatefulWidget {
@@ -73,6 +74,15 @@ class _VipScreenState extends State<VipScreen> {
       final result =
           await VipService.purchaseVip(level: level.level, period: period);
       if (!mounted) return;
+      if (result['newBalance'] != null) {
+        context.read<AuthProvider>().updateProfile(
+              coins: result['newBalance']['coins'],
+              gems: result['newBalance']['gems'],
+              xp: result['newBalance']['xp'],
+              level: result['newBalance']['level'],
+              vipLevel: result['newBalance']['vipLevel'],
+            );
+      }
       await context.read<AuthProvider>().refreshBalance();
       await _load(silent: true);
       if (!mounted) return;
@@ -218,13 +228,11 @@ class _VipScreenState extends State<VipScreen> {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(Icons.monetization_on_rounded,
-                  size: 15, color: Colors.amber),
+              const CurrencyIcon.coins(size: 16),
               const SizedBox(width: 4),
               Text('${user?.coins ?? 0}', style: theme.textTheme.labelLarge),
               const SizedBox(width: 10),
-              const Icon(Icons.diamond_rounded,
-                  size: 15, color: Color(0xFF8B5CF6)),
+              const CurrencyIcon.gems(size: 16),
               const SizedBox(width: 4),
               Text('${user?.gems ?? 0}', style: theme.textTheme.labelLarge),
             ],

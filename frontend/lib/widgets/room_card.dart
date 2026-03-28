@@ -1,10 +1,11 @@
 import 'package:flutter/material.dart';
 
 import '../models/room_model.dart';
-import '../utils/constants.dart';
-import '../theme/app_theme.dart';
 import '../screens/rooms/room_detail_screen.dart';
-import '../widgets/user_avatar.dart';
+import '../theme/app_theme.dart';
+import '../utils/constants.dart';
+import 'currency_icon.dart';
+import 'user_avatar.dart';
 
 class RoomCard extends StatelessWidget {
   final RoomModel room;
@@ -245,11 +246,7 @@ class RoomCard extends StatelessWidget {
                       ),
                       child: Row(
                         children: [
-                          Icon(
-                            Icons.monetization_on_rounded,
-                            size: 14,
-                            color: AppColors.warningOrange,
-                          ),
+                          const CurrencyIcon.coins(size: 14),
                           const SizedBox(width: 4),
                           Text(
                             '${room.entryFee}',
@@ -299,26 +296,8 @@ class RoomCard extends StatelessWidget {
     );
   }
 
-  IconData _getTypeIcon(String type) {
-    switch (type) {
-      case 'voice':
-        return Icons.mic;
-      case 'music':
-        return Icons.music_note;
-      case 'video':
-        return Icons.videocam;
-      case 'chat':
-        return Icons.chat;
-      case 'auction':
-        return Icons.gavel;
-      default:
-        return Icons.chat_bubble_outline;
-    }
-  }
-
   Widget _buildRoomCover(Color typeColor) {
     final coverImage = _normalizeImageUrl(room.coverImage);
-    final hostAvatar = _normalizeImageUrl(room.hostAvatar);
 
     return Container(
       width: 52,
@@ -346,11 +325,10 @@ class RoomCard extends StatelessWidget {
                   return Image.network(
                     coverImage,
                     fit: BoxFit.cover,
-                    errorBuilder: (_, __, ___) =>
-                        _buildFallbackCover(hostAvatar),
+                    errorBuilder: (_, __, ___) => _buildInitialCover(typeColor),
                   );
                 }
-                return _buildFallbackCover(hostAvatar);
+                return _buildInitialCover(typeColor);
               },
             ),
           ),
@@ -359,24 +337,33 @@ class RoomCard extends StatelessWidget {
     );
   }
 
-  Widget _buildFallbackCover(String? hostAvatar) {
-    if (hostAvatar != null) {
-      return Image.network(
-        hostAvatar,
-        fit: BoxFit.cover,
-        errorBuilder: (_, __, ___) => _buildTypeIconFallback(),
-      );
-    }
-    return _buildTypeIconFallback();
-  }
+  Widget _buildInitialCover(Color typeColor) {
+    final label = room.hostName.trim().isNotEmpty
+        ? room.hostName.trim()
+        : room.name.trim();
+    final initial = label.isEmpty ? 'R' : label[0].toUpperCase();
 
-  Widget _buildTypeIconFallback() {
-    final typeColor = _getTypeColor(room.type);
-    return Center(
-      child: Icon(
-        _getTypeIcon(room.type),
-        color: typeColor,
-        size: 22,
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            typeColor.withValues(alpha: 0.16),
+            typeColor.withValues(alpha: 0.06),
+          ],
+        ),
+      ),
+      child: Center(
+        child: Text(
+          initial,
+          style: TextStyle(
+            color: AppColors.textPrimary,
+            fontSize: 22,
+            fontWeight: FontWeight.w900,
+            letterSpacing: 0.4,
+          ),
+        ),
       ),
     );
   }

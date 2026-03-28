@@ -192,18 +192,20 @@ class ApiService {
     try {
       final body = json.decode(response.body);
       String msg = 'Server error: ${response.statusCode}';
+      var hasDetailedMessage = false;
       if (body is Map) {
         if (body['details'] is List && (body['details'] as List).isNotEmpty) {
           final firstDetail = (body['details'] as List).first;
           if (firstDetail is Map && firstDetail['message'] is String) {
             msg = firstDetail['message'];
+            hasDetailedMessage = true;
           }
         }
-        if (body['error'] is Map) {
+        if (!hasDetailedMessage && body['error'] is Map) {
           msg = body['error']['message'] ?? msg;
-        } else if (body['error'] is String) {
+        } else if (!hasDetailedMessage && body['error'] is String) {
           msg = body['error'];
-        } else if (body['message'] is String) {
+        } else if (!hasDetailedMessage && body['message'] is String) {
           msg = body['message'];
         }
       }

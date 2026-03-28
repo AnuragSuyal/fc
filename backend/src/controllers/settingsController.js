@@ -1,6 +1,35 @@
 const User = require('../models/User');
 const { applyAvatarUpdate, getAvatarUploadStats } = require('../utils/avatarUploadLimit');
 
+const emitProfileUpdated = (req, user) => {
+    const io = req.app.get('io');
+    if (!io || !user?._id) return;
+
+    const userId = user._id.toString();
+    const payload = {
+        userId,
+        timestamp: new Date().toISOString(),
+        user: {
+            id: user._id,
+            uid: user.uid,
+            username: user.username,
+            avatar: user.avatar,
+            coverPhoto: user.coverPhoto,
+            bio: user.bio,
+            region: user.region || 'Global',
+            level: user.level,
+            xp: user.xp,
+            coins: user.coins,
+            gems: user.gems,
+            vipLevel: user.vipLevel,
+            status: user.status
+        }
+    };
+
+    io.to(`user:${userId}`).emit('profile:updated', payload);
+    io.to(`profile:${userId}`).emit('profile:updated', payload);
+};
+
 const defaultSettings = {
     notifications: {
         friendOnline: true,
@@ -30,7 +59,7 @@ const defaultSettings = {
 exports.getSettings = async (req, res, next) => {
     try {
         const user = await User.findById(req.userId)
-            .select('settings username avatar coverPhoto bio avatarUploadHistory');
+            .select('settings username avatar coverPhoto bio region avatarUploadHistory');
 
         if (!user) {
             const error = new Error('User not found');
@@ -43,6 +72,7 @@ exports.getSettings = async (req, res, next) => {
             avatar: user.avatar,
             coverPhoto: user.coverPhoto,
             bio: user.bio || '',
+            region: user.region || 'Global',
             avatarUploadsRemainingToday: getAvatarUploadStats(user).uploadsRemainingToday,
             settings: user.settings || defaultSettings
         });
@@ -140,7 +170,7 @@ exports.updateLanguage = async (req, res, next) => {
 // @desc    Update profile (username/bio/avatar/cover)
 exports.updateProfile = async (req, res, next) => {
     try {
-        const { username, bio, avatar, coverPhoto } = req.body;
+        const { username, bio, avatar, coverPhoto, region } = req.body;
         const user = await User.findById(req.userId);
         if (!user) {
             const error = new Error('User not found');
@@ -177,6 +207,9 @@ exports.updateProfile = async (req, res, next) => {
             avatarUploadStats = applyAvatarUpdate(user, avatar);
         }
         if (coverPhoto !== undefined) user.coverPhoto = coverPhoto;
+        if (region !== undefined) {
+            user.region = String(region).trim() || 'Global';
+        }
 
         await user.save();
 
@@ -184,6 +217,8 @@ exports.updateProfile = async (req, res, next) => {
         if (redis && redis.isReady) {
             await redis.del(`cache:user:${req.userId}`);
         }
+
+        emitProfileUpdated(req, user);
 
         res.json({
             success: true,
@@ -193,7 +228,8 @@ exports.updateProfile = async (req, res, next) => {
                 email: user.email,
                 avatar: user.avatar,
                 coverPhoto: user.coverPhoto,
-                bio: user.bio || ''
+                bio: user.bio || '',
+                region: user.region || 'Global'
             },
             avatarUploadsRemainingToday: avatarUploadStats.uploadsRemainingToday,
         });
@@ -255,8 +291,5 @@ exports.deleteAccount = async (req, res, next) => {
         next(error);
     }
 };
-
-
-
 
 

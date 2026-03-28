@@ -18,7 +18,7 @@ class ReactionAnimationOverlay extends StatefulWidget {
 }
 
 class _ReactionAnimationOverlayState extends State<ReactionAnimationOverlay> {
-  static const int _maxVisibleReactions = 18;
+  static const int _maxVisibleReactions = 24;
 
   final List<_PendingReaction> _reactions = [];
   StreamSubscription? _subscription;
@@ -93,15 +93,17 @@ class _ReactionAnimationOverlayState extends State<ReactionAnimationOverlay> {
     final random = Random();
     final nextReactions = <_PendingReaction>[
       ..._reactions,
-      for (final emoji in emojis)
+      for (var i = 0; i < emojis.length; i++)
         _PendingReaction(
-          id: '${DateTime.now().microsecondsSinceEpoch}-$emoji-${random.nextInt(1000)}',
-          emoji: emoji,
+          id: '${DateTime.now().microsecondsSinceEpoch}-${emojis[i]}-${random.nextInt(1000)}',
+          emoji: emojis[i],
           position: center +
               Offset(
-                random.nextDouble() * 30 - 15,
-                random.nextDouble() * 24 - 12,
+                random.nextDouble() * 42 - 21,
+                -6 - random.nextDouble() * 14,
               ),
+          seed: random.nextInt(1 << 32),
+          delayMs: i * 55 + random.nextInt(45),
         ),
     ];
 
@@ -145,6 +147,8 @@ class _ReactionAnimationOverlayState extends State<ReactionAnimationOverlay> {
                 child: FloatingReaction(
                   key: ValueKey(reaction.id),
                   emoji: reaction.emoji,
+                  seed: reaction.seed,
+                  launchDelayMs: reaction.delayMs,
                   onFinished: () => _removeReaction(reaction.id),
                 ),
               ),
@@ -159,10 +163,14 @@ class _PendingReaction {
   final String id;
   final String emoji;
   final Offset position;
+  final int seed;
+  final int delayMs;
 
   const _PendingReaction({
     required this.id,
     required this.emoji,
     required this.position,
+    required this.seed,
+    required this.delayMs,
   });
 }

@@ -17,6 +17,7 @@ class SocketService {
 
   static final Set<String> _joinedRoomIds = <String>{};
   static final Set<String> _joinedGroupIds = <String>{};
+  static final Set<String> _joinedProfileIds = <String>{};
 
   static bool _hasConnectedOnce = false;
   static bool _isRefreshingAuth = false;
@@ -27,17 +28,22 @@ class SocketService {
   static final _levelUp = _make<Map<String, dynamic>>();
   static final _roomMsg = _make<Map<String, dynamic>>();
   static final _groupMsg = _make<Map<String, dynamic>>();
+  static final _groupUpdate = _make<Map<String, dynamic>>();
   static final _dm = _make<Map<String, dynamic>>();
   static final _messageReaction = _make<Map<String, dynamic>>();
   static final _messageRead = _make<Map<String, dynamic>>();
+  static final _messageDeleted = _make<Map<String, dynamic>>();
   static final _reaction = _make<Map<String, dynamic>>();
   static final _sound = _make<Map<String, dynamic>>();
+  static final _roomFeature = _make<Map<String, dynamic>>();
   static final _roomUpdate = _make<Map<String, dynamic>>();
   static final _voice = _make<Map<String, dynamic>>();
   static final _typing = _make<Map<String, dynamic>>();
   static final _friend = _make<Map<String, dynamic>>();
   static final _roomInvite = _make<Map<String, dynamic>>();
   static final _wedding = _make<Map<String, dynamic>>();
+  static final _post = _make<Map<String, dynamic>>();
+  static final _profile = _make<Map<String, dynamic>>();
   static final _resync = _make<Map<String, dynamic>>();
 
   static Stream<Map<String, dynamic>> get giftStream => _gift.stream;
@@ -46,13 +52,19 @@ class SocketService {
   static Stream<Map<String, dynamic>> get roomMessageStream => _roomMsg.stream;
   static Stream<Map<String, dynamic>> get groupMessageStream =>
       _groupMsg.stream;
+  static Stream<Map<String, dynamic>> get groupUpdateStream =>
+      _groupUpdate.stream;
   static Stream<Map<String, dynamic>> get dmStream => _dm.stream;
   static Stream<Map<String, dynamic>> get messageReactionStream =>
       _messageReaction.stream;
   static Stream<Map<String, dynamic>> get messageReadStream =>
       _messageRead.stream;
+  static Stream<Map<String, dynamic>> get messageDeletedStream =>
+      _messageDeleted.stream;
   static Stream<Map<String, dynamic>> get reactionStream => _reaction.stream;
   static Stream<Map<String, dynamic>> get soundStream => _sound.stream;
+  static Stream<Map<String, dynamic>> get roomFeatureStream =>
+      _roomFeature.stream;
   static Stream<Map<String, dynamic>> get roomUpdateStream =>
       _roomUpdate.stream;
   static Stream<Map<String, dynamic>> get voiceStream => _voice.stream;
@@ -61,6 +73,8 @@ class SocketService {
   static Stream<Map<String, dynamic>> get roomInviteStream =>
       _roomInvite.stream;
   static Stream<Map<String, dynamic>> get weddingStream => _wedding.stream;
+  static Stream<Map<String, dynamic>> get postStream => _post.stream;
+  static Stream<Map<String, dynamic>> get profileStream => _profile.stream;
   static Stream<Map<String, dynamic>> get resyncStream => _resync.stream;
 
   static Future<void> init() async {
@@ -132,6 +146,18 @@ class SocketService {
     _socket?.emit('group:leave', {'groupId': groupId});
   }
 
+  static void joinProfile(String userId) {
+    if (userId.isEmpty) return;
+    _joinedProfileIds.add(userId);
+    _socket?.emit('profile:join', {'userId': userId});
+  }
+
+  static void leaveProfile(String userId) {
+    if (userId.isEmpty) return;
+    _joinedProfileIds.remove(userId);
+    _socket?.emit('profile:leave', {'userId': userId});
+  }
+
   static void sendRoomMessage({
     required String roomId,
     required String content,
@@ -164,6 +190,16 @@ class SocketService {
       'roomId': roomId,
       'soundId': soundId,
       if (seatIndex != null) 'seatIndex': seatIndex,
+    });
+  }
+
+  static void triggerRoomFeature({
+    required String roomId,
+    required String featureId,
+  }) {
+    _socket?.emit('room:stage_feature', {
+      'roomId': roomId,
+      'featureId': featureId,
     });
   }
 
@@ -258,11 +294,14 @@ class SocketService {
     socket.on('level_up', (data) => _add(_levelUp, data));
     socket.on('room:message', (data) => _add(_roomMsg, data));
     socket.on('group:message', (data) => _add(_groupMsg, data));
+    socket.on('group:updated', (data) => _add(_groupUpdate, data));
     socket.on('dm:received', (data) => _add(_dm, data));
     socket.on('message:reaction', (data) => _add(_messageReaction, data));
     socket.on('message:read', (data) => _add(_messageRead, data));
+    socket.on('message:deleted', (data) => _add(_messageDeleted, data));
     socket.on('room:reaction', (data) => _add(_reaction, data));
     socket.on('room:sound_effect', (data) => _add(_sound, data));
+    socket.on('room:stage_feature', (data) => _add(_roomFeature, data));
     socket.on(
       'room:created',
       (data) => _add(_roomUpdate, _typed(data, 'room_created')),
@@ -330,6 +369,10 @@ class SocketService {
       (data) => _add(_friend, _typed(data, 'friend_request_received')),
     );
     socket.on(
+      'friend_request_sent',
+      (data) => _add(_friend, _typed(data, 'friend_request_sent')),
+    );
+    socket.on(
       'friend_request_accepted',
       (data) => _add(_friend, _typed(data, 'friend_request_accepted')),
     );
@@ -374,6 +417,23 @@ class SocketService {
       'wedding:blessing',
       (data) => _add(_wedding, _typed(data, 'blessing')),
     );
+    socket.on('post:changed', (data) => _add(_post, data));
+    socket.on(
+      'profile:updated',
+      (data) => _add(_profile, _typed(data, 'profile_updated')),
+    );
+    socket.on(
+      'profile:visitor',
+      (data) => _add(_profile, _typed(data, 'profile_visitor')),
+    );
+    socket.on(
+      'profile:stats_updated',
+      (data) => _add(_profile, _typed(data, 'profile_stats_updated')),
+    );
+    socket.on(
+      'profile:badge_awarded',
+      (data) => _add(_profile, _typed(data, 'profile_badge_awarded')),
+    );
     socket.on('vip_activated', (data) => _add(_balance, data));
   }
 
@@ -395,6 +455,9 @@ class SocketService {
     }
     for (final groupId in _joinedGroupIds) {
       _socket?.emit('group:join', {'groupId': groupId});
+    }
+    for (final userId in _joinedProfileIds) {
+      _socket?.emit('profile:join', {'userId': userId});
     }
   }
 
@@ -480,6 +543,7 @@ class SocketService {
     if (clearMemberships) {
       _joinedRoomIds.clear();
       _joinedGroupIds.clear();
+      _joinedProfileIds.clear();
     }
 
     if (clearMemberships && _lifecycleObserver != null) {

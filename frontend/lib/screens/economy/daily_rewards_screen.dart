@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 import '../../providers/auth_provider.dart';
 import '../../services/economy_service.dart';
 import '../../utils/haptics_util.dart';
+import '../../widgets/currency_icon.dart';
 
 class DailyRewardsScreen extends StatefulWidget {
   const DailyRewardsScreen({super.key});
@@ -93,11 +94,7 @@ class _DailyRewardsScreenState extends State<DailyRewardsScreen> {
                   color: Colors.amber.shade50,
                   shape: BoxShape.circle,
                 ),
-                child: const Icon(
-                  Icons.monetization_on,
-                  size: 48,
-                  color: Colors.amber,
-                ),
+                child: const CurrencyIcon.coins(size: 52),
               ),
               const SizedBox(height: 16),
               Text(
@@ -257,15 +254,7 @@ class _DailyRewardsScreenState extends State<DailyRewardsScreen> {
                               ),
                             ),
                             const SizedBox(height: 4),
-                            Icon(
-                              Icons.monetization_on,
-                              size: 20,
-                              color: isCurrentDay
-                                  ? Colors.amber
-                                  : isPastDay
-                                      ? Colors.green
-                                      : Colors.grey,
-                            ),
+                            const CurrencyIcon.coins(size: 20),
                             Text(
                               '$reward',
                               style: TextStyle(
@@ -375,9 +364,3 @@ class _DailyRewardsScreenState extends State<DailyRewardsScreen> {
     );
   }
 }
-
-
-
-
-
-

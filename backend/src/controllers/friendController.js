@@ -49,15 +49,38 @@ exports.sendFriendRequest = async (req, res, next) => {
                 const e = new Error('Friend request already sent'); e.status = 400; throw e;
             }
 
-            targetUser.friendRequests.push({ from: req.userId, status: 'pending', sentAt: Date.now() });
+            const sentAt = new Date();
+            targetUser.friendRequests.push({ from: req.userId, status: 'pending', sentAt });
             await targetUser.save(session ? { session } : undefined);
-            return { currentUser };
+            return {
+                currentUser,
+                sentAt,
+                targetUser: {
+                    _id: targetUser._id,
+                    username: targetUser.username,
+                    avatar: targetUser.avatar,
+                    level: targetUser.level,
+                    uid: targetUser.uid,
+                    status: targetUser.status
+                }
+            };
         });
 
         const io = req.app.get('io');
         if (io) {
             io.to(`user:${userId}`).emit('friend_request_received', {
-                from: { _id: result.currentUser._id, username: result.currentUser.username, avatar: result.currentUser.avatar }
+                sentAt: result.sentAt,
+                from: {
+                    _id: result.currentUser._id,
+                    username: result.currentUser.username,
+                    avatar: result.currentUser.avatar,
+                    level: result.currentUser.level,
+                    uid: result.currentUser.uid
+                }
+            });
+            io.to(`user:${req.userId}`).emit('friend_request_sent', {
+                sentAt: result.sentAt,
+                user: result.targetUser
             });
         }
         res.json({ success: true, message: 'Friend request sent' });
@@ -88,13 +111,16 @@ exports.acceptFriendRequest = async (req, res, next) => {
                 currentUser.save(session ? { session } : undefined),
                 requestingUser.save(session ? { session } : undefined)
             ]);
-            return { currentUser };
+            return { currentUser, requestingUser };
         });
 
         const io = req.app.get('io');
         if (io) {
             io.to(`user:${userId}`).emit('friend_request_accepted', {
                 user: { _id: result.currentUser._id, username: result.currentUser.username, avatar: result.currentUser.avatar }
+            });
+            io.to(`user:${req.userId}`).emit('friend_request_accepted', {
+                user: { _id: result.requestingUser._id, username: result.requestingUser.username, avatar: result.requestingUser.avatar }
             });
         }
 
@@ -121,6 +147,9 @@ exports.rejectFriendRequest = async (req, res, next) => {
             io.to(`user:${userId}`).emit('friend_request_rejected', {
                 userId: currentUser._id, username: currentUser.username
             });
+            io.to(`user:${req.userId}`).emit('friend_request_rejected', {
+                userId, username: currentUser.username
+            });
         }
         res.json({ success: true, message: 'Friend request rejected' });
     } catch (error) { next(error); }
@@ -130,7 +159,7 @@ exports.rejectFriendRequest = async (req, res, next) => {
 exports.removeFriend = async (req, res, next) => {
     try {
         const { userId } = req.params;
-        await runWithOptionalTransaction(async (session) => {
+        const result = await runWithOptionalTransaction(async (session) => {
             const [currentUser, friendUser] = await Promise.all([
                 withSession(User.findById(req.userId), session),
                 withSession(User.findById(userId), session)
@@ -142,9 +171,19 @@ exports.removeFriend = async (req, res, next) => {
                 currentUser.save(session ? { session } : undefined),
                 friendUser.save(session ? { session } : undefined)
             ]);
+            return { currentUser, friendUser };
         });
         const io = req.app.get('io');
-        if (io) io.to(`user:${userId}`).emit('friend_removed', { userId: req.userId });
+        if (io) {
+            io.to(`user:${userId}`).emit('friend_removed', {
+                userId: req.userId,
+                username: result.currentUser.username
+            });
+            io.to(`user:${req.userId}`).emit('friend_removed', {
+                userId,
+                username: result.friendUser.username
+            });
+        }
         res.json({ success: true, message: 'Friend removed' });
     } catch (error) { next(error); }
 };
@@ -170,6 +209,60 @@ exports.getFriendRequests = async (req, res, next) => {
             .populate('friendRequests.from', 'username avatar level');
         if (!user) { const e = new Error('User not found'); e.status = 404; throw e; }
         res.json(user.friendRequests.filter(r => r.status === 'pending'));
+    } catch (error) { next(error); }
+};
+
+// @desc    Get friend request overview (incoming + outgoing)
+exports.getFriendRequestOverview = async (req, res, next) => {
+    try {
+        const user = await User.findById(req.userId)
+            .populate('friendRequests.from', 'username avatar level status.isOnline uid');
+        if (!user) { const e = new Error('User not found'); e.status = 404; throw e; }
+
+        const incoming = (user.friendRequests || [])
+            .filter(r => r.status === 'pending')
+            .map((request) => ({
+                direction: 'incoming',
+                sentAt: request.sentAt,
+                from: request.from
+            }));
+
+        const outgoingUsers = await User.find({
+            friendRequests: {
+                $elemMatch: {
+                    from: user._id,
+                    status: 'pending'
+                }
+            }
+        }).select('username avatar level status.isOnline uid friendRequests');
+
+        const outgoing = outgoingUsers.map((targetUser) => {
+            const pending = (targetUser.friendRequests || []).find(
+                (request) =>
+                    request.from?.toString() === req.userId &&
+                    request.status === 'pending'
+            );
+
+            return {
+                direction: 'outgoing',
+                sentAt: pending?.sentAt || null,
+                user: {
+                    _id: targetUser._id,
+                    id: targetUser._id,
+                    username: targetUser.username,
+                    avatar: targetUser.avatar,
+                    level: targetUser.level,
+                    uid: targetUser.uid,
+                    status: targetUser.status
+                }
+            };
+        });
+
+        res.json({
+            incoming,
+            outgoing,
+            total: incoming.length + outgoing.length
+        });
     } catch (error) { next(error); }
 };
 
@@ -232,6 +325,3 @@ exports.getBlockedUsers = async (req, res, next) => {
         res.json(user?.blockedUsers || []);
     } catch (error) { next(error); }
 };
-
-
-

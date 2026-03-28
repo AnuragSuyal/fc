@@ -1,7 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+import '../../services/socket_service.dart';
 import '../../services/wallet_service.dart';
+import '../../widgets/currency_icon.dart';
 import '../../widgets/rounded_scaffold.dart';
+import '../../widgets/transaction_history_icon.dart';
 
 class TransactionsScreen extends StatefulWidget {
   const TransactionsScreen({super.key});
@@ -16,6 +21,16 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
   int _currentPage = 1;
   bool _hasMore = true;
   bool _isDisposed = false;
+  StreamSubscription<Map<String, dynamic>>? _walletUpdateSubscription;
+  StreamSubscription<Map<String, dynamic>>? _walletResyncSubscription;
+  Timer? _realtimeDebounce;
+
+  @override
+  void initState() {
+    super.initState();
+    _subscribeToRealtime();
+    unawaited(_loadTransactions(reset: true));
+  }
 
   void _safeSetState(VoidCallback fn) {
     if (!_isDisposed && mounted) {
@@ -26,21 +41,50 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
   @override
   void dispose() {
     _isDisposed = true;
+    _realtimeDebounce?.cancel();
+    _walletUpdateSubscription?.cancel();
+    _walletResyncSubscription?.cancel();
     super.dispose();
   }
 
-  Future<void> _loadTransactions() async {
-    _safeSetState(() => _isLoading = true);
+  void _subscribeToRealtime() {
+    _walletUpdateSubscription = SocketService.balanceStream.listen((_) {
+      _scheduleRealtimeRefresh();
+    });
+    _walletResyncSubscription = SocketService.resyncStream.listen((_) {
+      _scheduleRealtimeRefresh();
+    });
+  }
 
-    final data = await WalletService.getTransactions(page: _currentPage);
+  void _scheduleRealtimeRefresh() {
+    _realtimeDebounce?.cancel();
+    _realtimeDebounce = Timer(const Duration(milliseconds: 350), () {
+      if (_isDisposed || !mounted) return;
+      unawaited(_loadTransactions(reset: true, showLoader: false));
+    });
+  }
 
-    if (!mounted) return;
+  Future<void> _loadTransactions({
+    bool reset = false,
+    bool showLoader = true,
+    int? page,
+  }) async {
+    final targetPage = page ?? (reset ? 1 : _currentPage);
+    if (showLoader) {
+      _safeSetState(() => _isLoading = true);
+    }
+
+    final data = await WalletService.getTransactions(page: targetPage);
+
+    if (!mounted || _isDisposed) return;
+
+    final newTransactions = _normalizeGroupedTransactions(data['transactions']);
 
     _safeSetState(() {
-      if (_currentPage == 1) {
-        _transactions = data['transactions'] ?? {};
+      if (reset || targetPage == 1) {
+        _transactions = newTransactions;
+        _currentPage = 1;
       } else {
-        final newTransactions = data['transactions'] ?? {};
         // Merge by date
         newTransactions.forEach((date, txs) {
           if (_transactions.containsKey(date)) {
@@ -49,17 +93,33 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
             _transactions[date] = txs;
           }
         });
+        _currentPage = targetPage;
       }
-      _hasMore = (data['pagination']?['pages'] ?? 1) > _currentPage;
+      _hasMore = (data['pagination']?['pages'] ?? 1) > targetPage;
       _isLoading = false;
     });
   }
 
   void _loadMore() {
     if (_hasMore && !_isLoading) {
-      _currentPage++;
-      _loadTransactions();
+      final nextPage = _currentPage + 1;
+      unawaited(_loadTransactions(page: nextPage));
     }
+  }
+
+  Map<String, dynamic> _normalizeGroupedTransactions(dynamic source) {
+    if (source is! Map) return {};
+
+    final grouped = <String, dynamic>{};
+    source.forEach((key, value) {
+      if (value is List) {
+        grouped[key.toString()] = value
+            .whereType<Map>()
+            .map((item) => Map<String, dynamic>.from(item))
+            .toList(growable: false);
+      }
+    });
+    return grouped;
   }
 
   @override
@@ -73,11 +133,7 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      Icon(
-                        Icons.history,
-                        size: 64,
-                        color: Colors.grey.shade400,
-                      ),
+                      const TransactionHistoryIcon(size: 96),
                       const SizedBox(height: 16),
                       Text(
                         'No transactions yet',
@@ -179,11 +235,7 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
                 ),
                 child: Row(
                   children: [
-                    Icon(
-                      Icons.monetization_on,
-                      size: 12,
-                      color: Colors.amber.shade700,
-                    ),
+                    const CurrencyIcon.coins(size: 12),
                     const SizedBox(width: 2),
                     Text(
                       '$amountCoins',
@@ -209,11 +261,7 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
                   ),
                   child: Row(
                     children: [
-                      Icon(
-                        Icons.diamond,
-                        size: 12,
-                        color: Colors.purple.shade700,
-                      ),
+                      const CurrencyIcon.gems(size: 12),
                       const SizedBox(width: 2),
                       Text(
                         '$amountGems',
@@ -291,8 +339,3 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
     }
   }
 }
-
-
-
-
-

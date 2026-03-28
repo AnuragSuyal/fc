@@ -14,6 +14,35 @@ const resolveRoom = async (roomIdOrName) => {
     return Room.findOne({ name: roomIdOrName });
 };
 
+const getLivekitServerUrl = (req) => {
+    const configuredUrl = String(process.env.LIVEKIT_URL || '').trim();
+    if (configuredUrl) {
+        return configuredUrl;
+    }
+
+    const protocol = String(req.headers['x-forwarded-proto'] || req.protocol || 'http')
+        .split(',')[0]
+        .trim()
+        .toLowerCase();
+    const rawHost = String(req.headers['x-forwarded-host'] || req.get('host') || '')
+        .split(',')[0]
+        .trim();
+
+    if (!rawHost) {
+        return 'ws://localhost:7880';
+    }
+
+    try {
+        const parsedHost = new URL(`${protocol}://${rawHost}`);
+        const livekitHost = parsedHost.hostname.includes(':')
+            ? `[${parsedHost.hostname}]`
+            : parsedHost.hostname;
+        return `${protocol === 'https' ? 'wss' : 'ws'}://${livekitHost}:7880`;
+    } catch (_) {
+        return 'ws://localhost:7880';
+    }
+};
+
 // @desc    Generate LiveKit token
 exports.generateToken = async (req, res, next) => {
     try {
@@ -66,7 +95,7 @@ exports.generateToken = async (req, res, next) => {
         const jwt = await token.toJwt();
         */
         const jwt = 'disabled';
-        res.json({ token: jwt, serverUrl: process.env.LIVEKIT_URL || 'ws://localhost:7880' });
+        res.json({ token: jwt, serverUrl: getLivekitServerUrl(req) });
     } catch (error) {
         next(error);
     }
@@ -127,8 +156,6 @@ exports.handleWebhook = async (req, res, next) => {
         next(error);
     }
 };
-
-
 
 
 

@@ -8,6 +8,7 @@ class UserModel {
   final String avatar;
   final String? coverPhoto;
   final String? bio;
+  final String region;
   final int level;
   final int xp;
   final int coins;
@@ -28,6 +29,7 @@ class UserModel {
     required this.avatar,
     this.coverPhoto,
     this.bio,
+    required this.region,
     required this.level,
     required this.xp,
     required this.coins,
@@ -49,6 +51,7 @@ class UserModel {
         avatar: json['avatar'] ?? '',
         coverPhoto: json['coverPhoto'],
         bio: json['bio'],
+        region: json['region']?.toString() ?? 'Global',
         level: _toInt(json['level']) ?? 1,
         xp: _toInt(json['xp']) ?? 0,
         coins: _toInt(json['coins']) ?? 0,
@@ -77,6 +80,7 @@ class UserModel {
     String? avatar,
     String? coverPhoto,
     String? bio,
+    String? region,
     int? level,
     int? xp,
     int? coins,
@@ -97,6 +101,7 @@ class UserModel {
         avatar: avatar ?? this.avatar,
         coverPhoto: coverPhoto ?? this.coverPhoto,
         bio: bio ?? this.bio,
+        region: region ?? this.region,
         level: level ?? this.level,
         xp: xp ?? this.xp,
         coins: coins ?? this.coins,

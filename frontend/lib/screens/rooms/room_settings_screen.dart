@@ -568,12 +568,14 @@ class _RoomSettingsScreenState extends State<RoomSettingsScreen> {
                       _permissions.canManageSpeakerState(participant);
                   final canTransferOwnership =
                       _permissions.canTransferOwnershipTo(participant);
+                  final adminLimitReached =
+                      !isModerator && _room.moderatorIds.length >= _room.maxAdminSlots;
                   final role = isHost
                       ? 'Host'
                       : isCohost
                           ? 'Co-host'
                           : isModerator
-                              ? 'Moderator'
+                              ? 'Admin'
                               : participant.role;
 
                   return ListTile(
@@ -600,15 +602,25 @@ class _RoomSettingsScreenState extends State<RoomSettingsScreen> {
                                     value: 'transfer_ownership',
                                     child: Text('Transfer ownership'),
                                   ),
-                                if (canManageRoles)
-                                  PopupMenuItem(
-                                    value: isModerator
-                                        ? 'remove_moderator'
-                                        : 'add_moderator',
-                                    child: Text(isModerator
-                                        ? 'Remove moderator'
-                                        : 'Make moderator'),
-                                  ),
+                                if (canManageRoles &&
+                                    (isModerator || !isCohost))
+                                  adminLimitReached
+                                      ? PopupMenuItem(
+                                          enabled: false,
+                                          child: Text(
+                                            _room.nextAdminUnlockLevel == null
+                                                ? 'Admin slots full (${_room.maxAdminSlots}/${_room.maxAdminSlots})'
+                                                : 'Room Lv.${_room.level} needs Lv.${_room.nextAdminUnlockLevel} for more admins',
+                                          ),
+                                        )
+                                      : PopupMenuItem(
+                                          value: isModerator
+                                              ? 'remove_moderator'
+                                              : 'add_moderator',
+                                          child: Text(isModerator
+                                              ? 'Remove admin'
+                                              : 'Make admin'),
+                                        ),
                                 if (_isHost && canManageRoles)
                                   PopupMenuItem(
                                     value: isCohost
@@ -666,6 +678,167 @@ class _RoomSettingsScreenState extends State<RoomSettingsScreen> {
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showSeatControls() async {
+    if (!_permissions.canManageStage) return;
+
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setSheetState) => _sheet(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Seat Controls',
+                style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.w700,
+                  color: Colors.white,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Lock or open specific stage seats in realtime.',
+                style: TextStyle(
+                  color: Colors.white.withValues(alpha: 0.54),
+                  fontSize: 12,
+                ),
+              ),
+              const SizedBox(height: 18),
+              GridView.builder(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                itemCount: 8,
+                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: 2,
+                  mainAxisSpacing: 12,
+                  crossAxisSpacing: 12,
+                  childAspectRatio: 1.6,
+                ),
+                itemBuilder: (context, index) {
+                  final seatIndex = index + 1;
+                  final isClosedByLimit = seatIndex > _room.maxActiveSpeakers;
+                  final isLocked = _room.isLockedSeat(seatIndex);
+                  final isOccupied = _room.participants.any(
+                    (participant) => participant.seatIndex == seatIndex,
+                  );
+
+                  return GestureDetector(
+                    onTap: isClosedByLimit
+                        ? null
+                        : () async {
+                            try {
+                              final updatedRoom = isLocked
+                                  ? await RoomService.unlockSeat(
+                                      _room.id,
+                                      seatIndex,
+                                    )
+                                  : await RoomService.lockSeat(
+                                      _room.id,
+                                      seatIndex,
+                                    );
+                              if (!mounted) return;
+                              if (updatedRoom != null) {
+                                setState(() => _room = updatedRoom);
+                              } else {
+                                await _reload();
+                                if (!mounted) return;
+                              }
+                              setSheetState(() {});
+                              ScaffoldMessenger.of(this.context).showSnackBar(
+                                SnackBar(
+                                  content: Text(
+                                    isLocked
+                                        ? 'Seat $seatIndex opened.'
+                                        : 'Seat $seatIndex locked.',
+                                  ),
+                                ),
+                              );
+                            } catch (error) {
+                              await _showError(error);
+                            }
+                          },
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 180),
+                      padding: const EdgeInsets.all(14),
+                      decoration: BoxDecoration(
+                        color: isClosedByLimit
+                            ? Colors.white.withValues(alpha: 0.03)
+                            : isLocked
+                                ? const Color(0xFFFF7A45)
+                                    .withValues(alpha: 0.12)
+                                : Colors.white.withValues(alpha: 0.06),
+                        borderRadius: BorderRadius.circular(18),
+                        border: Border.all(
+                          color: isClosedByLimit
+                              ? Colors.white10
+                              : isLocked
+                                  ? const Color(0xFFFF7A45)
+                                      .withValues(alpha: 0.38)
+                                  : Colors.white.withValues(alpha: 0.08),
+                        ),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Icon(
+                                isClosedByLimit
+                                    ? Icons.block_rounded
+                                    : isLocked
+                                        ? Icons.lock_rounded
+                                        : Icons.lock_open_rounded,
+                                size: 18,
+                                color: isClosedByLimit
+                                    ? Colors.white38
+                                    : isLocked
+                                        ? const Color(0xFFFF7A45)
+                                        : const Color(0xFF63E6BE),
+                              ),
+                              const SizedBox(width: 8),
+                              Text(
+                                'Seat $seatIndex',
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ],
+                          ),
+                          const Spacer(),
+                          Text(
+                            isClosedByLimit
+                                ? 'Closed by active seat limit'
+                                : isLocked
+                                    ? isOccupied
+                                        ? 'Locked after the speaker leaves'
+                                        : 'Locked for new joiners'
+                                    : isOccupied
+                                        ? 'Live speaker seat'
+                                        : 'Open for stage joins',
+                            style: TextStyle(
+                              color: Colors.white.withValues(alpha: 0.54),
+                              fontSize: 11,
+                              height: 1.35,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -1184,6 +1357,12 @@ class _RoomSettingsScreenState extends State<RoomSettingsScreen> {
                 onTap: _permissions.canManageRoomIdentity
                     ? _changeMaxActiveSpeakers
                     : null,
+              ),
+              _navItem(
+                title: 'Seat Controls',
+                count: '${_room.lockedSeats.length} locked',
+                icon: Icons.event_seat_rounded,
+                onTap: _permissions.canManageStage ? _showSeatControls : null,
               ),
               _switchItem(
                 title: 'Private Room',

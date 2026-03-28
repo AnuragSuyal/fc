@@ -6,31 +6,120 @@ const mongoose = require('mongoose');
 const economyController = require('./economyController');
 const { isRoomAdmin } = require('../utils/roomPermissions');
 
+const INTRO_MESSAGE_LIMIT = 3;
+const NON_FRIEND_BLOCKED_DM_TYPES = new Set(['gift', 'system']);
+
+const sanitizeMessageForViewer = (message) => {
+    if (!message) return message;
+
+    const payload = typeof message.toObject === 'function'
+        ? message.toObject({ virtuals: false })
+        : { ...message };
+
+    if (payload.type === 'private_image' || payload.metadata?.privateImage === true) {
+        const ephemeralSeconds = Number(payload.metadata?.ephemeralSeconds || 5);
+        payload.metadata = {
+            ...(payload.metadata || {}),
+            privateImage: true,
+            ephemeralSeconds,
+            screenshotProtection: payload.metadata?.screenshotProtection !== false
+        };
+    }
+
+    return payload;
+};
+
+const emitMessageRealtime = (io, message, event, payload) => {
+    if (!io || !message) return;
+
+    if (message.roomId) {
+        io.to(`room:${message.roomId}`).emit(event, payload);
+        return;
+    }
+
+    if (message.groupId) {
+        io.to(`group:${message.groupId}`).emit(event, payload);
+        return;
+    }
+
+    const targets = new Set();
+    if (message.senderId) targets.add(`user:${message.senderId}`);
+    if (message.recipientId) targets.add(`user:${message.recipientId}`);
+    targets.forEach((target) => io.to(target).emit(event, payload));
+};
+
+const resolveUserOrThrow = async (identifier, message = 'User not found') => {
+    const user = await User.findByIdOrUid(identifier);
+    if (user) {
+        return user;
+    }
+
+    const error = new Error(message);
+    error.status = 404;
+    throw error;
+};
+
+const countIntroMessagesSent = (senderId, recipientId) =>
+    Message.countDocuments({
+        senderId,
+        recipientId,
+        isDeleted: false,
+        type: { $ne: 'system' }
+    });
+
 // @desc    Send a direct message
 exports.sendDirectMessage = async (req, res, next) => {
     try {
-        const { recipientId, content, type = 'text', replyTo } = req.body;
+        const { recipientId, content, type = 'text', replyTo, metadata = {} } = req.body;
 
-        const recipient = await User.findById(recipientId);
-        if (!recipient) {
-            const error = new Error('Recipient not found');
+        const recipient = await resolveUserOrThrow(recipientId, 'Recipient not found');
+        const sender = await User.findById(req.userId).select('username friends blockedUsers');
+        if (!sender) {
+            const error = new Error('Sender not found');
             error.status = 404;
             throw error;
         }
+        const recipientUserId = recipient._id.toString();
 
-        const sender = await User.findById(req.userId);
-        if (!sender.friends.includes(recipientId)) {
-            const error = new Error('You can only message friends');
+        const isBlocked = (sender.blockedUsers || []).some(
+            (blockedId) => blockedId?.toString() === recipientUserId
+        ) || (recipient.blockedUsers || []).some(
+            (blockedId) => blockedId?.toString() === req.userId
+        );
+        if (isBlocked) {
+            const error = new Error('Direct chat is unavailable for this user');
             error.status = 403;
             throw error;
         }
 
+        const isFriend = (sender.friends || []).some(
+            (friendId) => friendId?.toString() === recipientUserId
+        );
+
+        if (!isFriend) {
+            if (NON_FRIEND_BLOCKED_DM_TYPES.has(type)) {
+                const error = new Error('Become friends first to send this in direct chat');
+                error.status = 403;
+                throw error;
+            }
+
+            const introMessagesUsed = await countIntroMessagesSent(req.userId, recipient._id);
+            if (introMessagesUsed >= INTRO_MESSAGE_LIMIT) {
+                const error = new Error(
+                    `You have used your ${INTRO_MESSAGE_LIMIT} intro messages. Add each other as friends to continue chatting.`
+                );
+                error.status = 403;
+                throw error;
+            }
+        }
+
         const message = new Message({
             senderId: req.userId,
-            recipientId,
+            recipientId: recipient._id,
             content,
             type,
-            replyTo: replyTo || null
+            replyTo: replyTo || null,
+            metadata: metadata && typeof metadata === 'object' ? metadata : {}
         });
 
         await message.save();
@@ -40,9 +129,10 @@ exports.sendDirectMessage = async (req, res, next) => {
         ]);
 
         const io = req.app.get('io');
+        const messagePayload = sanitizeMessageForViewer(message);
         if (io) {
-            io.to(`user:${recipientId}`).emit('dm:received', {
-                message,
+            emitMessageRealtime(io, message, 'dm:received', {
+                message: messagePayload,
                 from: { id: req.userId, username: sender.username }
             });
         }
@@ -50,7 +140,7 @@ exports.sendDirectMessage = async (req, res, next) => {
         const redis = req.app.get('redis');
         economyController._progressQuest(redis, req.userId, 'send_message', 1).catch(() => {});
 
-        res.status(201).json(message);
+        res.status(201).json(messagePayload);
     } catch (error) {
         next(error);
     }
@@ -59,7 +149,7 @@ exports.sendDirectMessage = async (req, res, next) => {
 // @desc    Send room message
 exports.sendRoomMessage = async (req, res, next) => {
     try {
-        const { roomId, content, type = 'text', replyTo } = req.body;
+        const { roomId, content, type = 'text', replyTo, metadata = {} } = req.body;
 
         const room = await Room.findById(roomId);
         if (!room) {
@@ -87,7 +177,14 @@ exports.sendRoomMessage = async (req, res, next) => {
             throw error;
         }
 
-        const message = new Message({ roomId, senderId: req.userId, content, type, replyTo: replyTo || null });
+        const message = new Message({
+            roomId,
+            senderId: req.userId,
+            content,
+            type,
+            replyTo: replyTo || null,
+            metadata: metadata && typeof metadata === 'object' ? metadata : {}
+        });
         await message.save();
         await message.populate([
             { path: 'senderId', select: 'username avatar level' },
@@ -95,12 +192,13 @@ exports.sendRoomMessage = async (req, res, next) => {
         ]);
 
         const io = req.app.get('io');
-        if (io) io.to(`room:${roomId}`).emit('room:message', message);
+        const messagePayload = sanitizeMessageForViewer(message);
+        if (io) io.to(`room:${roomId}`).emit('room:message', messagePayload);
 
         const redis = req.app.get('redis');
         economyController._progressQuest(redis, req.userId, 'send_message', 1).catch(() => {});
 
-        res.status(201).json(message);
+        res.status(201).json(messagePayload);
     } catch (error) {
         next(error);
     }
@@ -109,7 +207,7 @@ exports.sendRoomMessage = async (req, res, next) => {
 // @desc    Send group message
 exports.sendGroupMessage = async (req, res, next) => {
     try {
-        const { groupId, content, type = 'text', replyTo } = req.body;
+        const { groupId, content, type = 'text', replyTo, metadata = {} } = req.body;
         const group = await Group.findById(groupId);
         if (!group) {
             const error = new Error('Group not found');
@@ -124,7 +222,14 @@ exports.sendGroupMessage = async (req, res, next) => {
             throw error;
         }
 
-        const message = new Message({ groupId, senderId: req.userId, content, type, replyTo: replyTo || null });
+        const message = new Message({
+            groupId,
+            senderId: req.userId,
+            content,
+            type,
+            replyTo: replyTo || null,
+            metadata: metadata && typeof metadata === 'object' ? metadata : {}
+        });
         await message.save();
         await message.populate([
             { path: 'senderId', select: 'username avatar level' },
@@ -132,12 +237,36 @@ exports.sendGroupMessage = async (req, res, next) => {
         ]);
 
         const io = req.app.get('io');
-        if (io) io.to(`group:${groupId}`).emit('group:message', message);
+        const messagePayload = sanitizeMessageForViewer(message);
+        if (io) io.to(`group:${groupId}`).emit('group:message', messagePayload);
+
+        group.lastActivityAt = new Date();
+        group.stats = {
+            ...(group.stats || {}),
+            totalMessages: Number(group.stats?.totalMessages || 0) + 1
+        };
+        await group.save();
+
+        if (io) {
+            const groupUpdatePayload = {
+                action: 'chat_activity',
+                groupId: group._id.toString(),
+                memberUserId: req.userId,
+                updatedAt: new Date().toISOString()
+            };
+            io.to(`group:${groupId}`).emit('group:updated', groupUpdatePayload);
+            const memberIds = new Set(
+                (group.members || []).map((member) => member.userId?.toString()).filter(Boolean)
+            );
+            for (const memberId of memberIds) {
+                io.to(`user:${memberId}`).emit('group:updated', groupUpdatePayload);
+            }
+        }
 
         const redis = req.app.get('redis');
         economyController._progressQuest(redis, req.userId, 'send_message', 1).catch(() => {});
 
-        res.status(201).json(message);
+        res.status(201).json(messagePayload);
     } catch (error) {
         next(error);
     }
@@ -148,9 +277,11 @@ exports.getDirectMessages = async (req, res, next) => {
     try {
         const { userId } = req.params;
         const { page = 1, limit = 50 } = req.query;
+        const peerUser = await resolveUserOrThrow(userId);
+        const peerUserId = peerUser._id;
 
         const messages = await Message.find({
-            $or: [{ senderId: req.userId, recipientId: userId }, { senderId: userId, recipientId: req.userId }],
+            $or: [{ senderId: req.userId, recipientId: peerUserId }, { senderId: peerUserId, recipientId: req.userId }],
             isDeleted: false
         })
             .populate('senderId', 'username avatar')
@@ -160,17 +291,17 @@ exports.getDirectMessages = async (req, res, next) => {
             .skip((parseInt(page) - 1) * parseInt(limit));
 
         const total = await Message.countDocuments({
-            $or: [{ senderId: req.userId, recipientId: userId }, { senderId: userId, recipientId: req.userId }],
+            $or: [{ senderId: req.userId, recipientId: peerUserId }, { senderId: peerUserId, recipientId: req.userId }],
             isDeleted: false
         });
 
         await Message.updateMany(
-            { senderId: userId, recipientId: req.userId, 'readBy.userId': { $ne: req.userId } },
+            { senderId: peerUserId, recipientId: req.userId, 'readBy.userId': { $ne: req.userId } },
             { $push: { readBy: { userId: req.userId, readAt: Date.now() } } }
         );
 
         res.json({
-            messages: messages.reverse(),
+            messages: messages.reverse().map(sanitizeMessageForViewer),
             pagination: { page: parseInt(page), limit: parseInt(limit), total, pages: Math.ceil(total / parseInt(limit)) }
         });
     } catch (error) {
@@ -193,7 +324,7 @@ exports.getRoomMessages = async (req, res, next) => {
 
         const total = await Message.countDocuments({ roomId, isDeleted: false });
         res.json({
-            messages: messages.reverse(),
+            messages: messages.reverse().map(sanitizeMessageForViewer),
             pagination: { page: parseInt(page), limit: parseInt(limit), total, pages: Math.ceil(total / parseInt(limit)) }
         });
     } catch (error) {
@@ -206,6 +337,21 @@ exports.getGroupMessages = async (req, res, next) => {
     try {
         const { groupId } = req.params;
         const { page = 1, limit = 50 } = req.query;
+        const group = await Group.findById(groupId).select('members');
+        if (!group) {
+            const error = new Error('Group not found');
+            error.status = 404;
+            throw error;
+        }
+
+        const isInGroup = (group.members || []).some(
+            (member) => member.userId?.toString() === req.userId
+        );
+        if (!isInGroup) {
+            const error = new Error('You are not in this group');
+            error.status = 403;
+            throw error;
+        }
 
         const messages = await Message.find({ groupId, isDeleted: false })
             .populate('senderId', 'username avatar level')
@@ -216,7 +362,7 @@ exports.getGroupMessages = async (req, res, next) => {
 
         const total = await Message.countDocuments({ groupId, isDeleted: false });
         res.json({
-            messages: messages.reverse(),
+            messages: messages.reverse().map(sanitizeMessageForViewer),
             pagination: { page: parseInt(page), limit: parseInt(limit), total, pages: Math.ceil(total / parseInt(limit)) }
         });
     } catch (error) {
@@ -270,8 +416,13 @@ exports.addReaction = async (req, res, next) => {
         await message.save();
         const io = req.app.get('io');
         if (io) {
-            const target = message.roomId ? `room:${message.roomId}` : message.groupId ? `group:${message.groupId}` : `user:${message.recipientId}`;
-            io.to(target).emit('message:reaction', { messageId: message._id, userId: req.userId, reaction });
+            emitMessageRealtime(io, message, 'message:reaction', {
+                messageId: message._id,
+                userId: req.userId,
+                reaction,
+                active: reactIdx === -1,
+                createdAt: new Date().toISOString()
+            });
         }
         res.json({ success: true, reactions: message.reactions });
     } catch (error) {
@@ -298,30 +449,18 @@ exports.deleteMessage = async (req, res, next) => {
         message.isDeleted = true;
         message.deletedAt = Date.now();
         await message.save();
+
+        const io = req.app.get('io');
+        if (io) {
+            emitMessageRealtime(io, message, 'message:deleted', {
+                messageId: message._id
+            });
+        }
         res.json({ success: true });
     } catch (error) {
         next(error);
     }
 };
-
-// @desc    Mark read
-exports.markAsRead = async (req, res, next) => {
-    try {
-        const { userId } = req.params;
-        await Message.updateMany(
-            { senderId: userId, recipientId: req.userId, 'readBy.userId': { $ne: req.userId } },
-            { $push: { readBy: { userId: req.userId, readAt: Date.now() } } }
-        );
-        res.json({ success: true });
-    } catch (error) {
-        next(error);
-    }
-};
-
-
-
-
-
 
 // @desc    Get unread message count
 exports.getUnreadCount = async (req, res, next) => {
@@ -340,14 +479,19 @@ exports.getUnreadCount = async (req, res, next) => {
 exports.markAsRead = async (req, res, next) => {
     try {
         const { userId } = req.params;
+        const peerUser = await resolveUserOrThrow(userId);
+        const peerUserId = peerUser._id;
         await Message.updateMany(
-            { senderId: userId, recipientId: req.userId, 'readBy.userId': { $ne: req.userId } },
+            { senderId: peerUserId, recipientId: req.userId, 'readBy.userId': { $ne: req.userId } },
             { $push: { readBy: { userId: req.userId, readAt: Date.now() } } }
         );
 
         const io = req.app.get('io');
         if (io) {
-            io.to(`user:${userId}`).emit('message:read', { byUserId: req.userId, fromUserId: userId });
+            io.to(`user:${peerUserId}`).emit('message:read', {
+                byUserId: req.userId,
+                fromUserId: peerUserId.toString()
+            });
         }
 
         res.json({ success: true });

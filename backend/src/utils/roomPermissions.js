@@ -7,6 +7,15 @@ const ADMIN_REALTIME_SETTING_KEYS = new Set([
     'stageJoinsLocked'
 ]);
 
+const ADMIN_REALTIME_THEME_KEYS = new Set([
+    'youtubeUrl',
+    'youtubeTitle',
+    'youtubeThumbnail',
+    'youtubePositionMs',
+    'youtubePlaybackState',
+    'youtubeQueue'
+]);
+
 const idsEqual = (left, right) => {
     if (!left || !right) return false;
     return left.toString() === right.toString();
@@ -55,6 +64,7 @@ const canManageTarget = (room, actorUserId, targetUserId) => {
 
 const canManageStage = (room, userId) => isRoomAdmin(room, userId);
 const canManageRealtimeSafety = (room, userId) => isRoomAdmin(room, userId);
+const canManageRoomMedia = (room, userId) => isRoomAdmin(room, userId);
 const canManageRoomIdentity = (room, userId) => isRoomOwner(room, userId);
 const canManageRoomAccess = (room, userId) => isRoomOwner(room, userId);
 const canManageGifting = (room, userId) => isRoomOwner(room, userId);
@@ -105,7 +115,10 @@ const sanitizeRoomUpdatePayload = (room, userId, payload = {}) => {
     }
 
     const providedFields = Object.keys(payload).filter(field => payload[field] !== undefined);
-    if (providedFields.length === 0 || providedFields.some(field => field !== 'settings')) {
+    if (
+        providedFields.length === 0 ||
+        providedFields.some(field => !['settings', 'theme'].includes(field))
+    ) {
         return null;
     }
 
@@ -116,21 +129,38 @@ const sanitizeRoomUpdatePayload = (room, userId, payload = {}) => {
         Object.entries(incomingSettings).filter(([key]) => ADMIN_REALTIME_SETTING_KEYS.has(key))
     );
 
-    if (Object.keys(allowedSettings).length === 0) {
+    const incomingTheme = payload.theme && typeof payload.theme === 'object'
+        ? payload.theme
+        : {};
+    const allowedTheme = Object.fromEntries(
+        Object.entries(incomingTheme).filter(([key]) => ADMIN_REALTIME_THEME_KEYS.has(key))
+    );
+
+    const sanitized = {};
+    if (Object.keys(allowedSettings).length > 0) {
+        sanitized.settings = allowedSettings;
+    }
+    if (Object.keys(allowedTheme).length > 0) {
+        sanitized.theme = allowedTheme;
+    }
+
+    if (Object.keys(sanitized).length === 0) {
         return null;
     }
 
-    return { settings: allowedSettings };
+    return sanitized;
 };
 
 module.exports = {
     ADMIN_REALTIME_SETTING_KEYS,
+    ADMIN_REALTIME_THEME_KEYS,
     MAX_STAGE_SEATS,
     canEditAnnouncement,
     canEndRoom,
     canJoinStageDirectly,
     canManageAdmins,
     canManageGifting,
+    canManageRoomMedia,
     canManageRealtimeSafety,
     canManageRoomAccess,
     canManageRoomIdentity,

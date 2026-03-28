@@ -2,6 +2,10 @@
 const Room = require('../models/Room');
 const User = require('../models/User');
 const {
+    getNextAdminUnlockLevel,
+    getRoomAdminLimit
+} = require('../services/roomProgressionService');
+const {
     canEditAnnouncement,
     canManageAdmins,
     canManageStage,
@@ -63,13 +67,23 @@ exports.lockSeat = async (req, res, next) => {
         await room.save();
         await invalidateRoomCache(req.app.get('redis'), room._id);
 
+        const populatedRoom = await populateRoomById(room._id);
         const io = req.app.get('io');
         if (io) {
-            io.to(`room:${room._id}`).emit('room:seat_locked', { seatIndex: idx });
-            emitLobbyUpdate(io, room, 'seat_updated');
+            io.to(`room:${room._id}`).emit('room:seat_locked', {
+                roomId: room._id.toString(),
+                seatIndex: idx,
+                lockedSeats: populatedRoom?.lockedSeats || room.lockedSeats
+            });
+            io.to(`room:${room._id}`).emit('room:updated', populatedRoom);
+            emitLobbyUpdate(io, populatedRoom || room, 'seat_updated');
         }
 
-        res.json({ success: true, lockedSeats: room.lockedSeats });
+        res.json({
+            success: true,
+            lockedSeats: populatedRoom?.lockedSeats || room.lockedSeats,
+            room: populatedRoom
+        });
     } catch (error) { next(error); }
 };
 
@@ -85,13 +99,23 @@ exports.unlockSeat = async (req, res, next) => {
         await room.save();
         await invalidateRoomCache(req.app.get('redis'), room._id);
 
+        const populatedRoom = await populateRoomById(room._id);
         const io = req.app.get('io');
         if (io) {
-            io.to(`room:${room._id}`).emit('room:seat_unlocked', { seatIndex: idx });
-            emitLobbyUpdate(io, room, 'seat_updated');
+            io.to(`room:${room._id}`).emit('room:seat_unlocked', {
+                roomId: room._id.toString(),
+                seatIndex: idx,
+                lockedSeats: populatedRoom?.lockedSeats || room.lockedSeats
+            });
+            io.to(`room:${room._id}`).emit('room:updated', populatedRoom);
+            emitLobbyUpdate(io, populatedRoom || room, 'seat_updated');
         }
 
-        res.json({ success: true, lockedSeats: room.lockedSeats });
+        res.json({
+            success: true,
+            lockedSeats: populatedRoom?.lockedSeats || room.lockedSeats,
+            room: populatedRoom
+        });
     } catch (error) { next(error); }
 };
 
@@ -271,7 +295,20 @@ exports.addModerator = async (req, res, next) => {
         }
 
         if (!room.moderators) room.moderators = [];
-        if (!room.moderators.some(id => id.toString() === targetUserId)) {
+        const isAlreadyModerator =
+            room.moderators.some(id => id.toString() === targetUserId);
+        if (!isAlreadyModerator) {
+            const adminLimit = getRoomAdminLimit(room.level);
+            if (room.moderators.length >= adminLimit) {
+                const nextUnlockLevel = getNextAdminUnlockLevel(room.level);
+                const e = new Error(
+                    nextUnlockLevel == null
+                        ? `This room already has the max ${adminLimit} admins.`
+                        : `Room level ${room.level} allows ${adminLimit} admins. Reach level ${nextUnlockLevel} to unlock 5 admins.`
+                );
+                e.status = 400;
+                throw e;
+            }
             room.moderators.push(targetUserId);
         }
 

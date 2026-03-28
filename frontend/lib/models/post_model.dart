@@ -48,15 +48,32 @@ class PostModel {
   factory PostModel.fromJson(Map<String, dynamic> json) {
     final user =
         json['userId'] is Map ? json['userId'] as Map<String, dynamic> : null;
+    final images = (json['images'] as List? ?? const [])
+        .map((image) {
+          if (image is Map<String, dynamic>) {
+            return image;
+          }
+          if (image is Map) {
+            return Map<String, dynamic>.from(image);
+          }
+          if (image is String && image.isNotEmpty) {
+            return <String, dynamic>{'url': image};
+          }
+          return const <String, dynamic>{};
+        })
+        .where((image) => (image['url']?.toString() ?? '').isNotEmpty)
+        .toList(growable: false);
 
     return PostModel(
       id: json['_id'] ?? '',
       userId: user?['_id']?.toString() ?? json['userId']?.toString() ?? '',
       username: user?['username'] ?? 'Unknown',
       userAvatar: user?['avatar'] ?? '',
-      userLevel: user?['level'] ?? 1,
+      userLevel: user?['level'] is int
+          ? user!['level'] as int
+          : int.tryParse('${user?['level'] ?? 1}') ?? 1,
       content: json['content'] ?? '',
-      images: List<Map<String, dynamic>>.from(json['images'] ?? []),
+      images: images,
       type: json['type'] ?? 'normal',
       likes: json['likes'] ?? [],
       likeCount: json['likeCount'] ?? 0,
@@ -72,6 +89,48 @@ class PostModel {
       updatedAt: json['updatedAt'] != null
           ? DateTime.parse(json['updatedAt'])
           : DateTime.now(),
+    );
+  }
+
+  PostModel copyWith({
+    String? id,
+    String? userId,
+    String? username,
+    String? userAvatar,
+    int? userLevel,
+    String? content,
+    List<Map<String, dynamic>>? images,
+    String? type,
+    List<dynamic>? likes,
+    int? likeCount,
+    bool? isLikedByUser,
+    List<dynamic>? comments,
+    int? commentCount,
+    List<dynamic>? mentions,
+    int? views,
+    bool? isEdited,
+    DateTime? createdAt,
+    DateTime? updatedAt,
+  }) {
+    return PostModel(
+      id: id ?? this.id,
+      userId: userId ?? this.userId,
+      username: username ?? this.username,
+      userAvatar: userAvatar ?? this.userAvatar,
+      userLevel: userLevel ?? this.userLevel,
+      content: content ?? this.content,
+      images: images ?? this.images,
+      type: type ?? this.type,
+      likes: likes ?? this.likes,
+      likeCount: likeCount ?? this.likeCount,
+      isLikedByUser: isLikedByUser ?? this.isLikedByUser,
+      comments: comments ?? this.comments,
+      commentCount: commentCount ?? this.commentCount,
+      mentions: mentions ?? this.mentions,
+      views: views ?? this.views,
+      isEdited: isEdited ?? this.isEdited,
+      createdAt: createdAt ?? this.createdAt,
+      updatedAt: updatedAt ?? this.updatedAt,
     );
   }
 
@@ -124,7 +183,6 @@ class CommentModel {
     );
   }
 }
-
 
 
 

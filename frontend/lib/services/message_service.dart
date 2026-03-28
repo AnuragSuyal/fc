@@ -84,18 +84,22 @@ class MessageService {
   static Future<MessageModel?> sendDirectMessage({
     required String recipientId,
     required String content,
+    String type = 'text',
     String? replyTo,
+    Map<String, dynamic>? metadata,
   }) async {
     try {
       final response = await ApiService.post('/messages/dm', {
         'recipientId': recipientId,
         'content': content,
+        'type': type,
         if (replyTo != null) 'replyTo': replyTo,
+        if (metadata != null) 'metadata': metadata,
       });
       return MessageModel.fromJson(response);
     } catch (e) {
       debugPrint('Error sending DM: $e');
-      return null;
+      rethrow;
     }
   }
 
@@ -124,18 +128,22 @@ class MessageService {
   static Future<MessageModel?> sendGroupMessage({
     required String groupId,
     required String content,
+    String type = 'text',
     String? replyTo,
+    Map<String, dynamic>? metadata,
   }) async {
     try {
       final response = await ApiService.post('/messages/group', {
         'groupId': groupId,
         'content': content,
+        'type': type,
         if (replyTo != null) 'replyTo': replyTo,
+        if (metadata != null) 'metadata': metadata,
       });
       return MessageModel.fromJson(response);
     } catch (e) {
       debugPrint('Error sending group message: $e');
-      return null;
+      rethrow;
     }
   }
 

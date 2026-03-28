@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
-import '../../services/gift_service.dart';
 import '../../models/gift_transaction_model.dart';
+import '../../services/gift_service.dart';
+import '../../widgets/currency_icon.dart';
 
 class GiftHistoryScreen extends StatefulWidget {
   const GiftHistoryScreen({super.key});
@@ -119,14 +120,13 @@ class _GiftHistoryScreenState extends State<GiftHistoryScreen>
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     if (tx.coinsAmount != 0) ...[
-                      const Icon(Icons.monetization_on,
-                          size: 14, color: Colors.amber),
+                      const CurrencyIcon.coins(size: 14),
                       const SizedBox(width: 2),
                       Text('${tx.coinsAmount.abs()}'),
                     ],
                     if (tx.gemsAmount != 0) ...[
                       const SizedBox(width: 4),
-                      const Icon(Icons.diamond, size: 14, color: Colors.purple),
+                      const CurrencyIcon.gems(size: 14),
                       const SizedBox(width: 2),
                       Text('${tx.gemsAmount.abs()}'),
                     ],
@@ -139,9 +139,3 @@ class _GiftHistoryScreenState extends State<GiftHistoryScreen>
     );
   }
 }
-
-
-
-
-
-

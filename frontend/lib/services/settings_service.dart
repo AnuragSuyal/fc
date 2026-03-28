@@ -58,14 +58,24 @@ class SettingsService {
   }
 
   // Update profile
+  static Future<Map<String, dynamic>> saveProfileOrThrow(
+    Map<String, dynamic> data,
+  ) async {
+    final response = await ApiService.put('/settings/profile', data);
+    if (response is Map<String, dynamic>) {
+      return response;
+    }
+    if (response is Map) {
+      return Map<String, dynamic>.from(response);
+    }
+    throw Exception('Unexpected response while updating profile.');
+  }
+
   static Future<Map<String, dynamic>?> saveProfile(
     Map<String, dynamic> data,
   ) async {
     try {
-      final response = await ApiService.put('/settings/profile', data);
-      return response is Map<String, dynamic>
-          ? response
-          : Map<String, dynamic>.from(response as Map);
+      return await saveProfileOrThrow(data);
     } catch (e) {
       debugPrint('Error updating profile: $e');
       return null;
@@ -104,8 +114,3 @@ class SettingsService {
     }
   }
 }
-
-
-
-
-

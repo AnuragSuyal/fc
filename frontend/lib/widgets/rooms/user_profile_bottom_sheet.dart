@@ -1,9 +1,21 @@
-import 'package:flutter/material.dart';
-import '../../models/room_model.dart';
-import '../user_avatar.dart';
-import '../../services/room_service.dart';
+import 'dart:async';
 
-class UserProfileBottomSheet extends StatelessWidget {
+import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+
+import '../../models/message_model.dart';
+import '../../models/room_model.dart';
+import '../../models/user_model.dart';
+import '../../providers/auth_provider.dart';
+import '../../services/friend_service.dart';
+import '../../services/message_service.dart';
+import '../../services/profile_service.dart';
+import '../../services/room_service.dart';
+import '../../services/socket_service.dart';
+import '../../utils/constants.dart';
+import '../user_avatar.dart';
+
+class UserProfileBottomSheet extends StatefulWidget {
   final Participant participant;
   final RoomModel room;
   final bool isMe;
@@ -12,10 +24,13 @@ class UserProfileBottomSheet extends StatelessWidget {
   final bool canManageRoles;
   final bool canManageSpeakerState;
   final bool canSendGifts;
+  final bool isLocallyMuted;
   final VoidCallback onViewProfile;
+  final VoidCallback onOpenChat;
   final VoidCallback onSendGift;
   final VoidCallback onLeaveSeat;
   final VoidCallback onRefreshRoom;
+  final Future<void> Function()? onToggleLocalAudio;
 
   const UserProfileBottomSheet({
     super.key,
@@ -27,14 +42,212 @@ class UserProfileBottomSheet extends StatelessWidget {
     required this.canManageRoles,
     required this.canManageSpeakerState,
     required this.canSendGifts,
+    this.isLocallyMuted = false,
     required this.onViewProfile,
+    required this.onOpenChat,
     required this.onSendGift,
     required this.onLeaveSeat,
     required this.onRefreshRoom,
+    this.onToggleLocalAudio,
   });
 
   @override
+  State<UserProfileBottomSheet> createState() => _UserProfileBottomSheetState();
+}
+
+class _UserProfileBottomSheetState extends State<UserProfileBottomSheet> {
+  UserModel? _profileUser;
+  Map<String, dynamic> _relationship = const {};
+  List<MessageModel> _recentMessages = const [];
+  bool _isLoading = true;
+  bool _isFriendBusy = false;
+  Timer? _refreshTimer;
+  final List<StreamSubscription> _subscriptions = [];
+
+  Participant get participant => widget.participant;
+  bool get _isFriend => _relationship['isFriend'] == true;
+  bool get _hasIncomingRequest => _relationship['hasIncomingRequest'] == true;
+  bool get _hasOutgoingRequest => _relationship['hasOutgoingRequest'] == true;
+  bool get _canSendFriendRequest =>
+      _relationship['canSendFriendRequest'] == true;
+  bool get _isBlocked => _relationship['isBlocked'] == true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadSheetData();
+    _subscriptions.add(SocketService.friendStream.listen((_) {
+      unawaited(_loadSheetData(refreshChat: false));
+    }));
+    _subscriptions.add(SocketService.dmStream.listen(_handleDmUpdate));
+    _subscriptions.add(SocketService.resyncStream.listen((_) {
+      unawaited(_loadSheetData());
+    }));
+    _refreshTimer = Timer.periodic(
+      const Duration(seconds: 12),
+      (_) => _loadSheetData(refreshChat: false),
+    );
+  }
+
+  @override
+  void dispose() {
+    _refreshTimer?.cancel();
+    for (final sub in _subscriptions) {
+      sub.cancel();
+    }
+    super.dispose();
+  }
+
+  Future<void> _loadSheetData({bool refreshChat = true}) async {
+    try {
+      final profileFuture = widget.isMe
+          ? ProfileService.getMyProfile()
+          : ProfileService.getProfile(participant.userId);
+      final chatFuture = !widget.isMe && refreshChat
+          ? MessageService.getDirectMessages(participant.userId, limit: 3)
+          : Future.value({
+              'messages': _recentMessages,
+              'pagination': null,
+            });
+      final results = await Future.wait<dynamic>([profileFuture, chatFuture]);
+      if (!mounted) return;
+
+      final profileData = results[0] is Map<String, dynamic>
+          ? results[0] as Map<String, dynamic>
+          : <String, dynamic>{};
+      final profileUserJson = profileData['user'];
+      final relationship = profileData['relationship'] is Map<String, dynamic>
+          ? Map<String, dynamic>.from(profileData['relationship'])
+          : <String, dynamic>{
+              'isSelf': widget.isMe,
+              'canMessage': widget.isMe,
+            };
+      final messagesMap = results[1] is Map<String, dynamic>
+          ? results[1] as Map<String, dynamic>
+          : <String, dynamic>{};
+
+      setState(() {
+        _profileUser = profileUserJson is Map<String, dynamic>
+            ? UserModel.fromJson(profileUserJson)
+            : _profileUser;
+        _relationship = relationship;
+        _recentMessages = List<MessageModel>.from(
+          messagesMap['messages'] as List? ?? _recentMessages,
+        ).reversed.toList(growable: false);
+        _isLoading = false;
+      });
+    } catch (_) {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  void _handleDmUpdate(Map<String, dynamic> data) {
+    final currentUserId = context.read<AuthProvider>().user?.id;
+    final messageJson = data['message'];
+    if (currentUserId == null || messageJson is! Map) return;
+    final message = MessageModel.fromJson(Map<String, dynamic>.from(messageJson));
+    final ids = <String>{
+      message.senderId,
+      if (message.recipientId != null) message.recipientId!,
+    };
+    if (!ids.contains(currentUserId) || !ids.contains(participant.userId)) {
+      return;
+    }
+    if (!mounted) return;
+    setState(() {
+      _recentMessages = [
+        message,
+        ..._recentMessages.where((item) => item.id != message.id),
+      ].take(3).toList(growable: false);
+    });
+  }
+
+  Future<void> _handlePrimaryAction() async {
+    if (widget.isMe) {
+      widget.onLeaveSeat();
+      return;
+    }
+    if (_isBlocked || _isFriendBusy) return;
+    if (!_hasIncomingRequest && !_canSendFriendRequest) return;
+
+    setState(() => _isFriendBusy = true);
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      if (_hasIncomingRequest) {
+        final success = await FriendService.acceptFriendRequest(participant.userId);
+        if (success) {
+          setState(() {
+            _relationship = {
+              ..._relationship,
+              'isFriend': true,
+              'hasIncomingRequest': false,
+              'hasOutgoingRequest': false,
+              'canSendFriendRequest': false,
+              'canMessage': true,
+            };
+          });
+          messenger.showSnackBar(
+            SnackBar(
+              content: Text('You are now friends with ${participant.username}.'),
+              backgroundColor: AppColors.successGreen,
+            ),
+          );
+        }
+      } else if (_canSendFriendRequest) {
+        final success = await FriendService.sendFriendRequest(participant.userId);
+        if (success) {
+          setState(() {
+            _relationship = {
+              ..._relationship,
+              'hasOutgoingRequest': true,
+              'canSendFriendRequest': false,
+            };
+          });
+          messenger.showSnackBar(
+            SnackBar(
+              content: Text('Friend request sent to ${participant.username}.'),
+              backgroundColor: AppColors.successGreen,
+            ),
+          );
+        }
+      }
+    } catch (error) {
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(error.toString().replaceFirst('Exception: ', '')),
+          backgroundColor: AppColors.errorRed,
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _isFriendBusy = false);
+    }
+  }
+
+  String _primaryLabel() {
+    if (widget.isMe) return 'Leave Seat';
+    if (_isFriend) return 'Friends';
+    if (_hasIncomingRequest) return 'Accept Friend';
+    if (_hasOutgoingRequest) return 'Requested';
+    if (_isBlocked) return 'Unavailable';
+    return 'Add Friend';
+  }
+
+  Color _primaryColor() {
+    if (widget.isMe) return Colors.redAccent;
+    if (_isFriend) return AppColors.successGreen;
+    if (_hasOutgoingRequest) return Colors.grey.shade700;
+    return const Color(0xFFFF528D);
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final user = _profileUser;
+    final stats = user?.stats ?? const <String, dynamic>{};
+    final friendCount = _asInt(stats['friendCount']);
+    final followerCount = _asInt(stats['followerCount']);
+    final followingCount = _asInt(stats['followingCount']);
+    final visitorCount = _asInt(stats['visitorCount']);
+
     return Container(
       padding: const EdgeInsets.only(bottom: 24),
       decoration: const BoxDecoration(
@@ -44,10 +257,10 @@ class UserProfileBottomSheet extends StatelessWidget {
       child: SafeArea(
         top: false,
         child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
           child: Column(
-            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const SizedBox(height: 12),
               Center(
                 child: Container(
                   width: 48,
@@ -58,144 +271,283 @@ class UserProfileBottomSheet extends StatelessWidget {
                   ),
                 ),
               ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  IconButton(
+                    icon: const Icon(Icons.more_vert_rounded, color: Colors.white54),
+                    onPressed: (widget.canModerate ||
+                            widget.canManageRoles ||
+                            widget.canManageSpeakerState)
+                        ? () => _showModerationMenu(context)
+                        : null,
+                  ),
+                  const Spacer(),
+                  IconButton(
+                    icon: const Icon(Icons.person_outline_rounded,
+                        color: Colors.white54),
+                    onPressed: () {
+                      Navigator.pop(context);
+                      widget.onViewProfile();
+                    },
+                  ),
+                ],
+              ),
+              Center(child: _buildAvatar(user)),
               const SizedBox(height: 16),
-              Align(
-                alignment: Alignment.centerRight,
-                child: Padding(
-                  padding: const EdgeInsets.only(right: 16),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      IconButton(
-                        icon: const Icon(Icons.more_vert_rounded,
-                            color: Colors.white54),
-                        onPressed: (canModerate ||
-                                canManageRoles ||
-                                canManageSpeakerState)
-                            ? () {
-                                _showModerationMenu(context);
-                              }
-                            : null,
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.share_outlined,
-                            color: Colors.white54),
-                        onPressed: () {},
-                      ),
-                    ],
+              Center(
+                child: Text(
+                  user?.username ?? participant.username,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 24,
+                    fontWeight: FontWeight.w800,
                   ),
                 ),
               ),
-              _buildAvatarSection(),
-              const SizedBox(height: 16),
-              Text(
-                participant.username,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 24,
-                  fontWeight: FontWeight.w800,
+              const SizedBox(height: 6),
+              Center(
+                child: Text(
+                  user?.uid.isNotEmpty == true
+                      ? 'UID ${user!.uid}'
+                      : 'ID: ${participant.userId.substring(0, participant.userId.length > 8 ? 8 : participant.userId.length)}',
+                  style: const TextStyle(
+                    color: Colors.white54,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
               ),
-              const SizedBox(height: 4),
-              Text(
-                'ID: ${participant.userId.length > 8 ? participant.userId.substring(0, 8) : participant.userId}',
-                style: const TextStyle(
-                  color: Colors.white54,
-                  fontSize: 14,
-                ),
-              ),
-              const SizedBox(height: 16),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
                 children: [
-                  if (participant.vipLevel > 0)
-                    _buildPill('TOP DONOR', Colors.white24),
-                  if (participant.role == 'host') ...[
-                    if (participant.vipLevel > 0) const SizedBox(width: 8),
-                    _buildPill('VERIFIED ARTIST',
-                        const Color(0xFFFF528D).withValues(alpha: 0.2),
-                        textColor: const Color(0xFFFF528D)),
-                  ],
+                  _pill(
+                    participant.role == 'host'
+                        ? 'HOST'
+                        : participant.role == 'cohost'
+                            ? 'CO-HOST'
+                            : participant.role == 'moderator'
+                                ? 'ADMIN'
+                                : 'LISTENER',
+                    const Color(0xFFFF7A45).withValues(alpha: 0.16),
+                    const Color(0xFFFFB083),
+                  ),
+                  _pill(
+                    (user?.isOnline ?? participant.isOnline) ? 'ONLINE' : 'OFFLINE',
+                    ((user?.isOnline ?? participant.isOnline)
+                            ? AppColors.successGreen
+                            : Colors.white24)
+                        .withValues(alpha: 0.16),
+                    (user?.isOnline ?? participant.isOnline)
+                        ? AppColors.successGreen
+                        : Colors.white70,
+                  ),
+                  if ((user?.vipLevel ?? participant.vipLevel) > 0)
+                    _pill(
+                      'VIP ${user?.vipLevel ?? participant.vipLevel}',
+                      const Color(0xFFFFD24D).withValues(alpha: 0.16),
+                      const Color(0xFFFFD24D),
+                    ),
+                  if (_isFriend)
+                    _pill(
+                      'FRIEND',
+                      AppColors.successGreen.withValues(alpha: 0.16),
+                      AppColors.successGreen,
+                    ),
                 ],
               ),
-              const SizedBox(height: 32),
-              _buildStatsRow(),
-              const SizedBox(height: 32),
-              _buildHonorMedals(),
-              const SizedBox(height: 24),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 24),
-                child: Column(
-                  children: [
-                    _buildInfoRow('Region', 'United States Virgin Islands'),
-                    const SizedBox(height: 16),
-                    _buildInfoRow(
-                        'Announcement', 'No one loves me like I do. ✨'),
-                  ],
+              const SizedBox(height: 20),
+              if (_isLoading && user == null)
+                const Center(child: CircularProgressIndicator())
+              else ...[
+                _card(
+                  child: Wrap(
+                    spacing: 12,
+                    runSpacing: 12,
+                    children: [
+                      _statTile('Level', '${user?.level ?? participant.level}'),
+                      _statTile('XP', '${user?.xp ?? 0}'),
+                      _statTile('Friends', '$friendCount'),
+                      _statTile('Followers', '$followerCount'),
+                      _statTile('Following', '$followingCount'),
+                      _statTile('Visitors', '$visitorCount'),
+                    ],
+                  ),
                 ),
-              ),
-              const SizedBox(height: 32),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 24),
-                child: Row(
-                  children: [
-                    Container(
-                      width: 56,
-                      height: 56,
-                      decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: 0.05),
-                        borderRadius: BorderRadius.circular(16),
-                        border: Border.all(color: Colors.white10),
+                const SizedBox(height: 16),
+                _card(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Live Profile',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w700,
+                        ),
                       ),
-                      child: IconButton(
-                        icon: const Icon(Icons.card_giftcard_rounded,
-                            color: Color(0xFFFFB347)),
-                        onPressed: canSendGifts ? onSendGift : null,
+                      const SizedBox(height: 12),
+                      _infoRow(
+                        'Bio',
+                        (user?.bio ?? '').trim().isEmpty
+                            ? 'No bio yet'
+                            : (user!.bio ?? ''),
                       ),
+                      const SizedBox(height: 12),
+                      _infoRow('Region', user?.region ?? 'Global'),
+                      const SizedBox(height: 12),
+                      _infoRow('Coins', '${user?.coins ?? 0}'),
+                      const SizedBox(height: 12),
+                      _infoRow('Diamonds', '${user?.gems ?? 0}'),
+                      const SizedBox(height: 12),
+                      _infoRow('Win Rate', '${stats['winRate'] ?? 0}%'),
+                      const SizedBox(height: 12),
+                      _infoRow('Gifts Sent', '${stats['giftsSent'] ?? 0}'),
+                      const SizedBox(height: 12),
+                      _infoRow(
+                        'Gifts Received',
+                        '${stats['giftsReceived'] ?? 0}',
+                      ),
+                      const SizedBox(height: 12),
+                      _infoRow('Last Active', _lastActiveLabel(user?.lastActive)),
+                    ],
+                  ),
+                ),
+                if (!widget.isMe) ...[
+                  const SizedBox(height: 16),
+                  _card(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            const Expanded(
+                              child: Text(
+                                'Live Chat Preview',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ),
+                            TextButton(
+                              onPressed: () {
+                                Navigator.pop(context);
+                                widget.onOpenChat();
+                              },
+                              child: const Text('Open chat'),
+                            ),
+                          ],
+                        ),
+                        if (_recentMessages.isEmpty)
+                          Text(
+                            _isFriend
+                                ? 'No private messages yet.'
+                                : 'Add each other as friends to start private chat.',
+                            style: const TextStyle(
+                              color: Colors.white54,
+                              fontSize: 13,
+                            ),
+                          )
+                        else
+                          ..._recentMessages.map(_messagePreview),
+                      ],
+                    ),
+                  ),
+                ],
+              ],
+              const SizedBox(height: 20),
+              Row(
+                children: [
+                  if (!widget.isMe) ...[
+                    _squareAction(
+                      icon: widget.isLocallyMuted
+                          ? Icons.volume_up_rounded
+                          : Icons.volume_off_rounded,
+                      color: widget.isLocallyMuted
+                          ? Colors.white
+                          : const Color(0xFFFF7A45),
+                      tooltip: widget.isLocallyMuted
+                          ? 'Hear on this device'
+                          : 'Mute on this device',
+                      onTap: widget.onToggleLocalAudio,
                     ),
                     const SizedBox(width: 12),
-                    Expanded(
-                      child: OutlinedButton.icon(
-                        onPressed: onViewProfile,
-                        icon: const Icon(Icons.chat_bubble_rounded,
-                            color: Colors.white),
-                        label: const Text('Chat',
-                            style: TextStyle(
+                  ],
+                  _squareAction(
+                    icon: Icons.card_giftcard_rounded,
+                    color: const Color(0xFFFFB347),
+                    tooltip: 'Send gift',
+                    onTap: widget.canSendGifts
+                        ? () async => widget.onSendGift()
+                        : null,
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: () {
+                        Navigator.pop(context);
+                        widget.onOpenChat();
+                      },
+                      icon: const Icon(Icons.chat_bubble_rounded,
+                          color: Colors.white),
+                      label: const Text(
+                        'Chat',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      style: OutlinedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(vertical: 16),
+                        backgroundColor: Colors.white.withValues(alpha: 0.05),
+                        side: const BorderSide(color: Colors.white10),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(24),
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: ElevatedButton(
+                      onPressed: widget.isMe || _hasIncomingRequest || _canSendFriendRequest
+                          ? _handlePrimaryAction
+                          : null,
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: _primaryColor(),
+                        disabledBackgroundColor: _primaryColor(),
+                        padding: const EdgeInsets.symmetric(vertical: 16),
+                        elevation: 0,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(24),
+                        ),
+                      ),
+                      child: _isFriendBusy
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
                                 color: Colors.white,
-                                fontSize: 16,
-                                fontWeight: FontWeight.w700)),
-                        style: OutlinedButton.styleFrom(
-                          padding: const EdgeInsets.symmetric(vertical: 16),
-                          backgroundColor: Colors.white.withValues(alpha: 0.05),
-                          side: const BorderSide(color: Colors.white10),
-                          shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(24)),
-                        ),
-                      ),
+                              ),
+                            )
+                          : Text(
+                              _primaryLabel(),
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 15,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
                     ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: ElevatedButton(
-                        onPressed: isMe ? onLeaveSeat : () {},
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor:
-                              isMe ? Colors.redAccent : const Color(0xFFFF528D),
-                          padding: const EdgeInsets.symmetric(vertical: 16),
-                          elevation: 0,
-                          shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(24)),
-                        ),
-                        child: Text(
-                          isMe ? 'Leave Seat' : 'Follow',
-                          style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 16,
-                              fontWeight: FontWeight.w700),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
+                  ),
+                ],
               ),
             ],
           ),
@@ -204,7 +556,7 @@ class UserProfileBottomSheet extends StatelessWidget {
     );
   }
 
-  Widget _buildAvatarSection() {
+  Widget _buildAvatar(UserModel? user) {
     return Stack(
       alignment: Alignment.center,
       clipBehavior: Clip.none,
@@ -212,9 +564,9 @@ class UserProfileBottomSheet extends StatelessWidget {
         Container(
           width: 110,
           height: 110,
-          decoration: BoxDecoration(
+          decoration: const BoxDecoration(
             shape: BoxShape.circle,
-            gradient: const LinearGradient(
+            gradient: LinearGradient(
               colors: [Color(0xFFFF7A45), Color(0xFFFFCC00)],
               begin: Alignment.topLeft,
               end: Alignment.bottomRight,
@@ -229,10 +581,12 @@ class UserProfileBottomSheet extends StatelessWidget {
                 shape: BoxShape.circle,
               ),
               child: Padding(
-                padding: const EdgeInsets.all(4.0),
+                padding: const EdgeInsets.all(4),
                 child: UserAvatar(
-                  username: participant.username,
-                  imageUrl: participant.avatar,
+                  username: user?.username ?? participant.username,
+                  imageUrl: (user?.avatar.isNotEmpty == true)
+                      ? user!.avatar
+                      : participant.avatar,
                   radius: 50,
                 ),
               ),
@@ -250,7 +604,7 @@ class UserProfileBottomSheet extends StatelessWidget {
               border: Border.all(color: const Color(0xFF111115), width: 2),
             ),
             child: Text(
-              'Lv.${participant.level}',
+              'Lv.${user?.level ?? participant.level}',
               style: const TextStyle(
                 color: Colors.white,
                 fontSize: 11,
@@ -263,14 +617,13 @@ class UserProfileBottomSheet extends StatelessWidget {
     );
   }
 
-  Widget _buildPill(String text, Color bgColor,
-      {Color textColor = Colors.white54}) {
+  Widget _pill(String text, Color background, Color textColor) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       decoration: BoxDecoration(
-        color: bgColor,
+        color: background,
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: textColor.withValues(alpha: 0.3)),
+        border: Border.all(color: textColor.withValues(alpha: 0.25)),
       ),
       child: Text(
         text,
@@ -284,138 +637,60 @@ class UserProfileBottomSheet extends StatelessWidget {
     );
   }
 
-  Widget _buildStatsRow() {
+  Widget _card({required Widget child}) {
     return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 24),
-      padding: const EdgeInsets.symmetric(vertical: 16),
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
         color: Colors.white.withValues(alpha: 0.03),
         borderRadius: BorderRadius.circular(24),
         border: Border.all(color: Colors.white.withValues(alpha: 0.05)),
       ),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-        children: [
-          _buildStatColumn('12.4K', 'Fans'),
-          Container(width: 1, height: 30, color: Colors.white10),
-          _buildStatColumn('482', 'Following'),
-          Container(width: 1, height: 30, color: Colors.white10),
-          _buildStatColumn('88', 'Medals'),
-        ],
-      ),
+      child: child,
     );
   }
 
-  Widget _buildStatColumn(String value, String label) {
-    return Column(
-      children: [
-        Text(
-          value,
-          style: const TextStyle(
-            color: Colors.white,
-            fontSize: 20,
-            fontWeight: FontWeight.w800,
-          ),
-        ),
-        const SizedBox(height: 4),
-        Text(
-          label,
-          style: const TextStyle(
-            color: Colors.white54,
-            fontSize: 12,
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildHonorMedals() {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 24),
+  Widget _statTile(String label, String value) {
+    return SizedBox(
+      width: 96,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              const Text(
-                'Honor Medals',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 16,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-              const Text(
-                'View All',
-                style: TextStyle(
-                  color: Color(0xFFFF528D),
-                  fontSize: 12,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-            ],
+          Text(
+            value,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 18,
+              fontWeight: FontWeight.w800,
+            ),
           ),
-          const SizedBox(height: 16),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              _buildMedalItem('🏆', 'Champion', const Color(0xFF5D2E8C)),
-              _buildMedalItem('🔥', 'Active', const Color(0xFF8C522E)),
-              _buildMedalItem('💎', 'Gems', const Color(0xFF2E5B8C)),
-              _buildMedalItem('🍀', 'Lucky', const Color(0xFF2E8C4A)),
-            ],
+          const SizedBox(height: 4),
+          Text(
+            label,
+            style: const TextStyle(color: Colors.white54, fontSize: 12),
           ),
         ],
       ),
     );
   }
 
-  Widget _buildMedalItem(String emoji, String label, Color bgColor) {
-    return Column(
-      children: [
-        Container(
-          width: 64,
-          height: 64,
-          decoration: BoxDecoration(
-            color: bgColor.withValues(alpha: 0.5),
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(color: bgColor),
-          ),
-          child: Center(
-            child: Text(emoji, style: const TextStyle(fontSize: 28)),
-          ),
-        ),
-        const SizedBox(height: 8),
-        Text(
-          label,
-          style: const TextStyle(
-            color: Colors.white54,
-            fontSize: 11,
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildInfoRow(String label, String value) {
+  Widget _infoRow(String label, String value) {
     return Row(
-      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          label,
-          style: const TextStyle(
-            color: Colors.white54,
-            fontSize: 14,
+        SizedBox(
+          width: 92,
+          child: Text(
+            label,
+            style: const TextStyle(color: Colors.white54, fontSize: 13),
           ),
         ),
-        Flexible(
+        Expanded(
           child: Text(
             value,
-            textAlign: TextAlign.right,
             style: const TextStyle(
               color: Colors.white,
-              fontSize: 14,
+              fontSize: 13,
               fontWeight: FontWeight.w600,
             ),
           ),
@@ -424,8 +699,131 @@ class UserProfileBottomSheet extends StatelessWidget {
     );
   }
 
+  Widget _messagePreview(MessageModel message) {
+    final currentUserId = context.read<AuthProvider>().user?.id;
+    final isFromMe = message.senderId == currentUserId;
+
+    return Container(
+      margin: const EdgeInsets.only(top: 10),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.04),
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 8,
+            height: 8,
+            margin: const EdgeInsets.only(top: 6),
+            decoration: BoxDecoration(
+              color: isFromMe
+                  ? const Color(0xFFFFB347)
+                  : const Color(0xFF52A1FF),
+              shape: BoxShape.circle,
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  isFromMe
+                      ? 'You'
+                      : (message.senderName.isEmpty ? 'Friend' : message.senderName),
+                  style: const TextStyle(
+                    color: Colors.white70,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  _previewText(message),
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            message.timeAgo,
+            style: const TextStyle(color: Colors.white38, fontSize: 11),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _previewText(MessageModel message) {
+    if (message.isGift) return message.content;
+    if (message.isImage) return 'Photo';
+    if (message.isVoice) return 'Voice message';
+    if (message.isEmoji) return 'Emote ${message.content}';
+    if (message.isPrivateImage) return 'Private photo';
+    return message.content;
+  }
+
+  Widget _squareAction({
+    required IconData icon,
+    required Color color,
+    required String tooltip,
+    required Future<void> Function()? onTap,
+  }) {
+    return Container(
+      width: 56,
+      height: 56,
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.05),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.white10),
+      ),
+      child: IconButton(
+        tooltip: tooltip,
+        icon: Icon(icon, color: color),
+        onPressed: onTap == null ? null : () => unawaited(onTap()),
+      ),
+    );
+  }
+
+  String _lastActiveLabel(DateTime? lastActive) {
+    if (lastActive == null) return 'Unknown';
+    final diff = DateTime.now().difference(lastActive);
+    if (diff.inMinutes < 1) return 'Just now';
+    if (diff.inHours < 1) return '${diff.inMinutes}m ago';
+    if (diff.inDays < 1) return '${diff.inHours}h ago';
+    return '${diff.inDays}d ago';
+  }
+
+  int _asInt(dynamic value) {
+    if (value is int) return value;
+    if (value is num) return value.toInt();
+    return 0;
+  }
+
   void _showModerationMenu(BuildContext context) {
-    if (!canModerate && !canManageRoles && !canManageSpeakerState) return;
+    if (!widget.canModerate &&
+        !widget.canManageRoles &&
+        !widget.canManageSpeakerState) {
+      return;
+    }
+    final isAdminRole = widget.room.moderatorIds.contains(participant.userId) ||
+        participant.role == 'moderator';
+    final isCoHostRole = widget.room.coHostIds.contains(participant.userId) ||
+        participant.role == 'cohost';
+    final adminLimitReached = !isAdminRole &&
+        widget.room.moderatorIds.length >= widget.room.maxAdminSlots;
+    final adminLimitSubtitle = adminLimitReached
+        ? widget.room.nextAdminUnlockLevel == null
+            ? 'This room already uses all ${widget.room.maxAdminSlots} admin slots'
+            : 'Room Lv.${widget.room.level} allows ${widget.room.maxAdminSlots} admins. Reach Lv.${widget.room.nextAdminUnlockLevel} to unlock 5 admins'
+        : null;
 
     showModalBottomSheet(
       context: context,
@@ -439,91 +837,162 @@ class UserProfileBottomSheet extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            if (canModerate)
+            if (widget.canModerate)
               ListTile(
-                leading: Icon(participant.isMuted ? Icons.mic : Icons.mic_off,
-                    color: Colors.orange),
-                title: Text(participant.isMuted ? 'Unmute User' : 'Mute User',
-                    style: const TextStyle(color: Colors.white)),
+                leading: Icon(
+                  participant.isMuted ? Icons.mic : Icons.mic_off,
+                  color: Colors.orange,
+                ),
+                title: Text(
+                  participant.isMuted ? 'Unmute User' : 'Mute User',
+                  style: const TextStyle(color: Colors.white),
+                ),
                 onTap: () async {
                   Navigator.pop(ctx);
                   try {
                     await RoomService.muteParticipant(
-                        room.id, participant.userId,
-                        muted: !participant.isMuted);
-                    onRefreshRoom();
+                      widget.room.id,
+                      participant.userId,
+                      muted: !participant.isMuted,
+                    );
+                    widget.onRefreshRoom();
                   } catch (e) {
                     debugPrint('Failed to update mute state: $e');
                   }
                 },
               ),
-            if (canManageSpeakerState)
+            if (widget.canManageSpeakerState)
               ListTile(
                 leading: Icon(
-                    participant.seatIndex >= 0
-                        ? Icons.arrow_downward
-                        : Icons.arrow_upward,
-                    color: Colors.purpleAccent),
+                  participant.seatIndex >= 0
+                      ? Icons.arrow_downward
+                      : Icons.arrow_upward,
+                  color: Colors.purpleAccent,
+                ),
                 title: Text(
-                    participant.seatIndex >= 0
-                        ? 'Move To Audience'
-                        : 'Approve Mic Request',
-                    style: const TextStyle(color: Colors.white)),
+                  participant.seatIndex >= 0
+                      ? 'Move To Audience'
+                      : 'Approve Mic Request',
+                  style: const TextStyle(color: Colors.white),
+                ),
                 onTap: () async {
                   Navigator.pop(ctx);
                   try {
                     if (participant.seatIndex >= 0) {
                       await RoomService.demoteParticipant(
-                          room.id, participant.userId);
+                        widget.room.id,
+                        participant.userId,
+                      );
                     } else {
                       await RoomService.promoteParticipant(
-                          room.id, participant.userId);
+                        widget.room.id,
+                        participant.userId,
+                      );
                     }
-                    onRefreshRoom();
+                    widget.onRefreshRoom();
                   } catch (e) {
                     debugPrint('Failed to update speaker state: $e');
                   }
                 },
               ),
-            if (isHost && canManageRoles)
+            if (widget.isHost && widget.canManageRoles)
               ListTile(
                 leading: Icon(
-                    participant.role == 'cohost'
-                        ? Icons.person_remove
-                        : Icons.person_add,
-                    color: Colors.cyanAccent),
+                  isAdminRole
+                      ? Icons.admin_panel_settings
+                      : Icons.shield_outlined,
+                  color: const Color(0xFF52A1FF),
+                ),
                 title: Text(
-                    participant.role == 'cohost'
-                        ? 'Remove Co-host'
-                        : 'Make Co-host',
-                    style: const TextStyle(color: Colors.white)),
+                  isAdminRole ? 'Remove Admin' : 'Make Admin',
+                  style: const TextStyle(color: Colors.white),
+                ),
+                onTap: (isCoHostRole && !isAdminRole) || adminLimitReached
+                    ? null
+                    : () async {
+                        final messenger = ScaffoldMessenger.of(context);
+                        Navigator.pop(ctx);
+                        try {
+                          if (isAdminRole) {
+                            await RoomService.removeModerator(
+                              widget.room.id,
+                              participant.userId,
+                            );
+                          } else {
+                            await RoomService.addModerator(
+                              widget.room.id,
+                              participant.userId,
+                            );
+                          }
+                          widget.onRefreshRoom();
+                        } catch (e) {
+                          messenger.showSnackBar(
+                            SnackBar(
+                              content: Text(
+                                e.toString().replaceFirst('Exception: ', ''),
+                              ),
+                            ),
+                          );
+                        }
+                      },
+                subtitle: isCoHostRole && !isAdminRole
+                    ? const Text(
+                        'Remove co-host first to assign admin',
+                        style: TextStyle(color: Colors.white54),
+                      )
+                    : adminLimitSubtitle == null
+                        ? null
+                        : Text(
+                            adminLimitSubtitle,
+                            style: const TextStyle(color: Colors.white54),
+                          ),
+              ),
+            if (widget.isHost && widget.canManageRoles)
+              ListTile(
+                leading: Icon(
+                  isCoHostRole ? Icons.person_remove : Icons.person_add,
+                  color: Colors.cyanAccent,
+                ),
+                title: Text(
+                  isCoHostRole ? 'Remove Co-host' : 'Make Co-host',
+                  style: const TextStyle(color: Colors.white),
+                ),
                 onTap: () async {
                   Navigator.pop(ctx);
                   try {
-                    if (participant.role == 'cohost') {
+                    if (isCoHostRole) {
                       await RoomService.removeCoHost(
-                          room.id, participant.userId);
+                        widget.room.id,
+                        participant.userId,
+                      );
                     } else {
                       await RoomService.assignCoHost(
-                          room.id, participant.userId);
+                        widget.room.id,
+                        participant.userId,
+                      );
                     }
-                    onRefreshRoom();
+                    widget.onRefreshRoom();
                   } catch (e) {
                     debugPrint('Failed to update co-host role: $e');
                   }
                 },
               ),
-            if (canModerate)
+            if (widget.canModerate)
               ListTile(
-                leading: const Icon(Icons.person_off, color: Colors.redAccent),
-                title: const Text('Kick From Room',
-                    style: TextStyle(color: Colors.white)),
+                leading:
+                    const Icon(Icons.person_off, color: Colors.redAccent),
+                title: const Text(
+                  'Kick From Room',
+                  style: TextStyle(color: Colors.white),
+                ),
                 onTap: () async {
                   Navigator.pop(ctx);
                   try {
                     await RoomService.kickParticipant(
-                        room.id, participant.userId);
-                    onRefreshRoom();
+                      widget.room.id,
+                      participant.userId,
+                    );
+                    widget.onRefreshRoom();
                   } catch (e) {
                     debugPrint('Failed to kick participant: $e');
                   }

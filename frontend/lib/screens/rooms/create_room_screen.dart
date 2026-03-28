@@ -5,6 +5,7 @@ import 'package:image_picker/image_picker.dart';
 import '../../services/room_service.dart';
 import '../../services/upload_service.dart';
 import '../../utils/constants.dart';
+import '../../widgets/currency_icon.dart';
 import 'room_detail_screen.dart';
 
 class CreateRoomScreen extends StatefulWidget {
@@ -366,7 +367,11 @@ class _CreateRoomScreenState extends State<CreateRoomScreen> {
                           valueText: '$_maxParticipants',
                           helper:
                               'Good for ${_maxParticipants <= 12 ? 'small circles' : _maxParticipants <= 40 ? 'active hangouts' : 'big public rooms'}',
-                          icon: Icons.groups_rounded,
+                          icon: Icon(
+                            Icons.groups_rounded,
+                            color: selectedType.color,
+                            size: 18,
+                          ),
                           slider: Slider(
                             value: _maxParticipants.toDouble(),
                             min: 2,
@@ -386,8 +391,7 @@ class _CreateRoomScreenState extends State<CreateRoomScreen> {
                           helper: _entryFee == 0
                               ? 'Open room for everyone'
                               : 'Coins required to join',
-                          icon: Icons.monetization_on_rounded,
-                          iconColor: Colors.amber,
+                          icon: const CurrencyIcon.coins(size: 18),
                           slider: Slider(
                             value: _entryFee.toDouble(),
                             min: 0,
@@ -545,24 +549,32 @@ class _CreateRoomScreenState extends State<CreateRoomScreen> {
             runSpacing: 10,
             children: [
               _buildHeroPill(
-                Icons.bolt_rounded,
+                const Icon(
+                  Icons.bolt_rounded,
+                  color: Color(0xFF63E6BE),
+                  size: 16,
+                ),
                 'Live sync ready',
-                const Color(0xFF63E6BE),
               ),
               _buildHeroPill(
-                Icons.groups_rounded,
+                const Icon(
+                  Icons.groups_rounded,
+                  color: Colors.white,
+                  size: 16,
+                ),
                 '$_maxParticipants spots',
-                Colors.white,
               ),
               _buildHeroPill(
-                Icons.explore_rounded,
+                Icon(
+                  Icons.explore_rounded,
+                  color: selectedType.color,
+                  size: 16,
+                ),
                 _selectedCategoryOption.label,
-                selectedType.color,
               ),
               _buildHeroPill(
-                Icons.monetization_on_rounded,
+                const CurrencyIcon.coins(size: 16),
                 _entryFee == 0 ? 'Free entry' : '$_entryFee coins',
-                Colors.amber,
               ),
             ],
           ),
@@ -571,7 +583,7 @@ class _CreateRoomScreenState extends State<CreateRoomScreen> {
     );
   }
 
-  Widget _buildHeroPill(IconData icon, String label, Color color) {
+  Widget _buildHeroPill(Widget icon, String label) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
@@ -582,7 +594,7 @@ class _CreateRoomScreenState extends State<CreateRoomScreen> {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(icon, color: color, size: 16),
+          icon,
           const SizedBox(width: 8),
           Text(
             label,
@@ -782,9 +794,8 @@ class _CreateRoomScreenState extends State<CreateRoomScreen> {
     required String label,
     required String valueText,
     required String helper,
-    required IconData icon,
+    required Widget icon,
     required Widget slider,
-    Color iconColor = Colors.white,
   }) {
     return Container(
       padding: const EdgeInsets.all(14),
@@ -798,7 +809,7 @@ class _CreateRoomScreenState extends State<CreateRoomScreen> {
         children: [
           Row(
             children: [
-              Icon(icon, color: iconColor, size: 18),
+              icon,
               const SizedBox(width: 10),
               Expanded(
                 child: Text(

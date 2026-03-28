@@ -17,7 +17,7 @@ class FriendsRealtimeScreen extends StatefulWidget {
 class _FriendsRealtimeScreenState extends State<FriendsRealtimeScreen>
     with SingleTickerProviderStateMixin {
   late TabController _tabs;
-  List<dynamic> _online = [], _offline = [], _requests = [];
+  List<dynamic> _online = [], _offline = [], _incoming = [], _outgoing = [];
   bool _loading = true;
   StreamSubscription? _friendSub;
   StreamSubscription? _resyncSub;
@@ -43,12 +43,13 @@ class _FriendsRealtimeScreenState extends State<FriendsRealtimeScreen>
     setState(() => _loading = true);
     try {
       final fr = await ApiService.get('/friends');
-      final rq = await ApiService.get('/friends/requests');
+      final rq = await FriendService.getFriendRequestOverview();
       if (!mounted) return;
       setState(() {
         _online = fr['online'] as List? ?? [];
         _offline = fr['offline'] as List? ?? [];
-        _requests = rq is List ? rq : [];
+        _incoming = rq['incoming'] as List? ?? [];
+        _outgoing = rq['outgoing'] as List? ?? [];
         _loading = false;
       });
       Provider.of<AuthProvider>(context, listen: false)
@@ -62,9 +63,12 @@ class _FriendsRealtimeScreenState extends State<FriendsRealtimeScreen>
     if (!mounted) return;
     final type = d['_eventType'] as String? ?? '';
     if (type == 'friend_request_received') {
-      setState(() => _requests.insert(0, d));
+      _load();
       _snack('New friend request from ${d['from']?['username'] ?? 'someone'}',
           AppColors.primaryBlue);
+    } else if (type == 'friend_request_sent') {
+      _load();
+      _snack('Friend request sent.', AppColors.successGreen);
     } else if (type == 'friend_request_accepted') {
       _snack('${d['user']?['username'] ?? 'Someone'} accepted your request! 🎉',
           AppColors.successGreen);
@@ -114,7 +118,7 @@ class _FriendsRealtimeScreenState extends State<FriendsRealtimeScreen>
   Future<void> _reject(String uid) async {
     final success = await FriendService.rejectFriendRequest(uid);
     if (success) {
-      setState(() => _requests.removeWhere(
+      setState(() => _incoming.removeWhere(
             (r) => (r['from']?['_id'] ?? r['from'])?.toString() == uid,
           ));
       return;
@@ -133,14 +137,14 @@ class _FriendsRealtimeScreenState extends State<FriendsRealtimeScreen>
             Tab(
                 child: Stack(clipBehavior: Clip.none, children: [
               const Text('Requests'),
-              if (_requests.isNotEmpty)
+              if (_incoming.isNotEmpty || _outgoing.isNotEmpty)
                 Positioned(
                     right: -12,
                     top: -4,
                     child: CircleAvatar(
                         radius: 8,
                         backgroundColor: AppColors.errorRed,
-                        child: Text('${_requests.length}',
+                        child: Text('${_incoming.length + _outgoing.length}',
                             style: const TextStyle(
                                 fontSize: 10, color: Colors.white)))),
             ])),
@@ -182,15 +186,15 @@ class _FriendsRealtimeScreenState extends State<FriendsRealtimeScreen>
   }
 
   Widget _reqList() {
-    if (_requests.isEmpty) {
+    if (_incoming.isEmpty && _outgoing.isEmpty) {
       return const Center(
           child: Text('No pending requests',
               style: TextStyle(color: Colors.grey)));
     }
-    return ListView.builder(
-        itemCount: _requests.length,
-        itemBuilder: (_, i) {
-          final r = _requests[i] as Map<String, dynamic>;
+    return ListView(
+      children: [
+        ..._incoming.map((raw) {
+          final r = raw as Map<String, dynamic>;
           final from = r['from'] is Map
               ? r['from'] as Map<String, dynamic>
               : <String, dynamic>{};
@@ -214,6 +218,25 @@ class _FriendsRealtimeScreenState extends State<FriendsRealtimeScreen>
                       style: TextStyle(color: AppColors.errorRed))),
             ]),
           );
-        });
+        }),
+        ..._outgoing.map((raw) {
+          final r = raw as Map<String, dynamic>;
+          final user = r['user'] is Map
+              ? r['user'] as Map<String, dynamic>
+              : <String, dynamic>{};
+          return ListTile(
+            leading: UserAvatar(
+                imageUrl: user['avatar']?.toString(),
+                username: user['username']?.toString() ?? 'U',
+                radius: 24),
+            title: Text(user['username']?.toString() ?? 'Unknown'),
+            subtitle: const Text('Request sent'),
+            trailing: const Text('Sent',
+                style: TextStyle(
+                    color: AppColors.primaryBlue, fontWeight: FontWeight.w700)),
+          );
+        }),
+      ],
+    );
   }
 }

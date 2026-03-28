@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../../models/room_model.dart';
@@ -17,12 +16,7 @@ import '../rooms/create_room_screen.dart';
 import '../rooms/room_detail_screen.dart';
 
 class ExploreScreen extends StatefulWidget {
-  const ExploreScreen({
-    super.key,
-    this.focusSignal,
-  });
-
-  final ValueListenable<int>? focusSignal;
+  const ExploreScreen({super.key});
 
   @override
   State<ExploreScreen> createState() => _ExploreScreenState();
@@ -40,18 +34,18 @@ class _ExploreScreenState extends State<ExploreScreen> {
   ];
 
   final _searchController = TextEditingController();
-  final _searchFocusNode = FocusNode();
   final List<RoomModel> _featuredRooms = [];
   List<RoomModel> _liveRooms = [];
-  List<RoomModel> _myRooms = [];
+  List<RoomModel> _followedRooms = [];
   List<UserModel> _matchedUsers = [];
   List<Map<String, dynamic>> _categories = const [];
   String _selectedCategory = 'all';
-  String _selectedSort = 'onlineCount';
+  String? _hoveredCategory;
+  String? _pressedCategory;
+  final String _selectedSort = 'onlineCount';
   bool _isLoading = true;
   bool _isDisposed = false;
   int _activeRequestId = 0;
-  String _lastLoadedQuery = '';
   Timer? _searchDebounce;
   Timer? _realtimeDebounce;
   Timer? _rallyExpiryTimer;
@@ -62,17 +56,8 @@ class _ExploreScreenState extends State<ExploreScreen> {
   void initState() {
     super.initState();
     _searchController.addListener(_onSearchChanged);
-    widget.focusSignal?.addListener(_handleFocusSignal);
     _subscribeToRealtime();
     unawaited(_loadExploreData());
-  }
-
-  @override
-  void didUpdateWidget(covariant ExploreScreen oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.focusSignal == widget.focusSignal) return;
-    oldWidget.focusSignal?.removeListener(_handleFocusSignal);
-    widget.focusSignal?.addListener(_handleFocusSignal);
   }
 
   @override
@@ -84,8 +69,6 @@ class _ExploreScreenState extends State<ExploreScreen> {
     _roomRealtimeSubscription?.cancel();
     _socketResyncSubscription?.cancel();
     _searchController.dispose();
-    _searchFocusNode.dispose();
-    widget.focusSignal?.removeListener(_handleFocusSignal);
     super.dispose();
   }
 
@@ -95,14 +78,6 @@ class _ExploreScreenState extends State<ExploreScreen> {
 
   String get _searchQuery => _searchController.text.trim();
   bool get _hasActiveSearch => _searchQuery.isNotEmpty;
-
-  void _handleFocusSignal() {
-    if (!mounted || _isDisposed) return;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || _isDisposed) return;
-      _searchFocusNode.requestFocus();
-    });
-  }
 
   void _subscribeToRealtime() {
     _roomRealtimeSubscription = SocketService.roomUpdateStream.listen((data) {
@@ -154,16 +129,18 @@ class _ExploreScreenState extends State<ExploreScreen> {
           sort: _selectedSort,
           limit: 20,
         ),
-        RoomService.getMyRooms(),
+        RoomService.getFollowedRooms(),
         RoomService.getCategories(),
-        UserService.searchUsers(activeQuery),
+        activeQuery.isEmpty
+            ? Future.value(<UserModel>[])
+            : UserService.searchUsers(activeQuery),
       ]);
 
       if (_isDisposed || !mounted || requestId != _activeRequestId) return;
 
       final trending = results[0] as List<RoomModel>;
       final live = results[1] as List<RoomModel>;
-      final mine = results[2] as List<RoomModel>;
+      final followed = results[2] as List<RoomModel>;
       final categories = results[3] as List<Map<String, dynamic>>;
       final users = results[4] as List<UserModel>;
       final query = activeQuery.toLowerCase();
@@ -174,12 +151,11 @@ class _ExploreScreenState extends State<ExploreScreen> {
       );
 
       _safeSetState(() {
-        _lastLoadedQuery = activeQuery;
         _featuredRooms
           ..clear()
           ..addAll(spotlightRooms);
         _liveRooms = live;
-        _myRooms = mine;
+        _followedRooms = followed;
         _matchedUsers = users;
         _categories = categories.isEmpty
             ? _fallbackCategories
@@ -188,7 +164,7 @@ class _ExploreScreenState extends State<ExploreScreen> {
                 .toList();
         _isLoading = false;
       });
-      _scheduleRallyRefresh([...live, ...mine, ...spotlightRooms]);
+      _scheduleRallyRefresh([...live, ...followed, ...spotlightRooms]);
     } catch (error) {
       debugPrint('Error loading explore screen: $error');
       if (_isDisposed || !mounted || requestId != _activeRequestId) return;
@@ -272,59 +248,6 @@ class _ExploreScreenState extends State<ExploreScreen> {
     );
   }
 
-  UserModel? _findExactUserMatch(String query) {
-    final normalized = query.trim();
-    if (normalized.isEmpty) return null;
-
-    for (final user in _matchedUsers) {
-      if (user.uid == normalized) {
-        return user;
-      }
-    }
-
-    return null;
-  }
-
-  RoomModel? _findExactRoomMatch(String query) {
-    final normalized = query.trim().toLowerCase();
-    if (normalized.isEmpty) return null;
-
-    for (final room in _liveRooms) {
-      if (room.roomId.toLowerCase() == normalized) {
-        return room;
-      }
-    }
-
-    for (final room in _featuredRooms) {
-      if (room.roomId.toLowerCase() == normalized) {
-        return room;
-      }
-    }
-
-    return null;
-  }
-
-  Future<void> _handleSearchSubmitted([String? queryOverride]) async {
-    final query = (queryOverride ?? _searchQuery).trim();
-    if (query.isEmpty) return;
-
-    if (_lastLoadedQuery != query) {
-      await _loadExploreData(showLoader: false);
-      if (!mounted || _isDisposed) return;
-    }
-
-    final exactUser = _findExactUserMatch(query);
-    if (exactUser != null) {
-      _openUserProfile(exactUser);
-      return;
-    }
-
-    final exactRoom = _findExactRoomMatch(query);
-    if (exactRoom != null) {
-      _openRoom(exactRoom);
-    }
-  }
-
   void _openCreateRoom() {
     Navigator.push(
       context,
@@ -346,8 +269,6 @@ class _ExploreScreenState extends State<ExploreScreen> {
         padding: const EdgeInsets.fromLTRB(20, 18, 20, 28),
         children: [
           _buildHero(),
-          const SizedBox(height: 16),
-          _buildSearchBar(),
           const SizedBox(height: 16),
           _buildCategoryStrip(categories),
           const SizedBox(height: 22),
@@ -386,9 +307,7 @@ class _ExploreScreenState extends State<ExploreScreen> {
             const SizedBox(height: 22),
             _sectionTitle(
               'Your corners',
-              'Easy re-entry into rooms you already know.',
-              actionLabel: 'Create',
-              onAction: _openCreateRoom,
+              'Followed rooms stay here for fast re-entry.',
             ),
             const SizedBox(height: 12),
             _buildMyRoomsStrip(),
@@ -466,15 +385,27 @@ class _ExploreScreenState extends State<ExploreScreen> {
                   child: _signalCard(
                     title: 'Spotlight',
                     value: '${_featuredRooms.length}',
-                    icon: Icons.local_fire_department_rounded,
+                    icon: Image.asset(
+                      'assets/images/explore_spotlight.png',
+                      width: 28,
+                      height: 28,
+                      fit: BoxFit.contain,
+                      filterQuality: FilterQuality.high,
+                    ),
                   ),
                 ),
                 const SizedBox(width: 10),
                 Expanded(
                   child: _signalCard(
-                    title: 'Your rooms',
-                    value: '${_myRooms.length}',
-                    icon: Icons.favorite_rounded,
+                    title: 'Following',
+                    value: '${_followedRooms.length}',
+                    icon: Image.asset(
+                      'assets/images/explore_following.png',
+                      width: 32,
+                      height: 28,
+                      fit: BoxFit.contain,
+                      filterQuality: FilterQuality.high,
+                    ),
                   ),
                 ),
               ],
@@ -518,7 +449,7 @@ class _ExploreScreenState extends State<ExploreScreen> {
   Widget _signalCard({
     required String title,
     required String value,
-    required IconData icon,
+    required Widget icon,
   }) {
     final theme = Theme.of(context);
 
@@ -530,7 +461,11 @@ class _ExploreScreenState extends State<ExploreScreen> {
       ),
       child: Row(
         children: [
-          Icon(icon, color: Colors.white),
+          SizedBox(
+            width: 32,
+            height: 32,
+            child: Center(child: icon),
+          ),
           const SizedBox(width: 10),
           Expanded(
             child: Column(
@@ -553,32 +488,6 @@ class _ExploreScreenState extends State<ExploreScreen> {
             ),
           ),
         ],
-      ),
-    );
-  }
-
-  Widget _buildSearchBar() {
-    return TextField(
-      controller: _searchController,
-      focusNode: _searchFocusNode,
-      textInputAction: TextInputAction.search,
-      onSubmitted: _handleSearchSubmitted,
-      decoration: InputDecoration(
-        hintText: 'Search user UID, room UID, hosts',
-        prefixIcon: const Icon(Icons.search_rounded),
-        suffixIcon: PopupMenuButton<String>(
-          initialValue: _selectedSort,
-          icon: const Icon(Icons.tune_rounded),
-          onSelected: (value) {
-            if (_selectedSort == value) return;
-            _safeSetState(() => _selectedSort = value);
-            unawaited(_loadExploreData(showLoader: false));
-          },
-          itemBuilder: (context) => const [
-            PopupMenuItem(value: 'onlineCount', child: Text('Most online')),
-            PopupMenuItem(value: 'newest', child: Text('Newest first')),
-          ],
-        ),
       ),
     );
   }
@@ -673,7 +582,7 @@ class _ExploreScreenState extends State<ExploreScreen> {
 
   Widget _buildCategoryStrip(List<Map<String, dynamic>> categories) {
     return SizedBox(
-      height: 98,
+      height: 126,
       child: ListView.separated(
         scrollDirection: Axis.horizontal,
         itemCount: categories.length,
@@ -683,7 +592,19 @@ class _ExploreScreenState extends State<ExploreScreen> {
           final id = (category['id'] ?? 'all').toString();
           final label = (category['name'] ?? id).toString();
           final selected = id == _selectedCategory;
+          final hovered = _hoveredCategory == id;
+          final pressed = _pressedCategory == id;
+          final engaged = selected || hovered || pressed;
           final color = _categoryColor(id);
+          final artwork = _categoryArtwork(id);
+          final labelStyle = (Theme.of(context).textTheme.labelMedium ??
+                  const TextStyle(fontSize: 12))
+              .copyWith(
+            color: AppColors.textPrimary,
+            fontWeight: selected || hovered || pressed
+                ? FontWeight.w800
+                : FontWeight.w700,
+          );
 
           return InkWell(
             onTap: () {
@@ -691,43 +612,99 @@ class _ExploreScreenState extends State<ExploreScreen> {
               _safeSetState(() => _selectedCategory = id);
               unawaited(_loadExploreData(showLoader: false));
             },
+            onHover: (value) {
+              if (_hoveredCategory == (value ? id : null)) return;
+              _safeSetState(() => _hoveredCategory = value ? id : null);
+            },
+            onHighlightChanged: (value) {
+              if (_pressedCategory == (value ? id : null)) return;
+              _safeSetState(() => _pressedCategory = value ? id : null);
+            },
             borderRadius: BorderRadius.circular(26),
+            splashColor: color.withValues(alpha: 0.12),
+            highlightColor: color.withValues(alpha: 0.08),
             child: Ink(
-              width: 90,
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: selected ? color.withValues(alpha: 0.14) : Colors.white,
-                borderRadius: BorderRadius.circular(26),
-                border: Border.all(
+              width: 104,
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 180),
+                curve: Curves.easeOutCubic,
+                decoration: BoxDecoration(
                   color: selected
-                      ? color.withValues(alpha: 0.45)
-                      : context.mood.outlineSoft,
+                      ? color.withValues(alpha: 0.14)
+                      : pressed
+                          ? color.withValues(alpha: 0.12)
+                          : hovered
+                              ? color.withValues(alpha: 0.07)
+                              : Colors.white,
+                  borderRadius: BorderRadius.circular(26),
+                  border: Border.all(
+                    color: selected
+                        ? color.withValues(alpha: 0.45)
+                        : engaged
+                            ? color.withValues(alpha: 0.26)
+                            : context.mood.outlineSoft,
+                  ),
+                  boxShadow: engaged
+                      ? [
+                          BoxShadow(
+                            color: color.withValues(
+                              alpha: pressed ? 0.16 : 0.09,
+                            ),
+                            blurRadius: pressed ? 10 : 16,
+                            offset: const Offset(0, 6),
+                          ),
+                        ]
+                      : null,
                 ),
-              ),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Container(
-                    width: 42,
-                    height: 42,
-                    decoration: BoxDecoration(
-                      color: color.withValues(alpha: 0.14),
-                      shape: BoxShape.circle,
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    AnimatedScale(
+                      scale: pressed
+                          ? 0.94
+                          : (hovered ? 1.06 : (selected ? 1.03 : 1)),
+                      duration: const Duration(milliseconds: 160),
+                      curve: Curves.easeOutCubic,
+                      child: artwork != null
+                          ? SizedBox(
+                              width: 62,
+                              height: 62,
+                              child: Image.asset(
+                                artwork,
+                                fit: BoxFit.contain,
+                                filterQuality: FilterQuality.high,
+                              ),
+                            )
+                          : Container(
+                              width: 42,
+                              height: 42,
+                              decoration: BoxDecoration(
+                                color: color.withValues(alpha: 0.14),
+                                shape: BoxShape.circle,
+                              ),
+                              child: Icon(_categoryIcon(id), color: color),
+                            ),
                     ),
-                    child: Icon(_categoryIcon(id), color: color),
-                  ),
-                  const SizedBox(height: 10),
-                  Text(
-                    _shortLabel(label),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                          color: AppColors.textPrimary,
-                          fontWeight:
-                              selected ? FontWeight.w800 : FontWeight.w700,
+                    const SizedBox(height: 8),
+                    SizedBox(
+                      height: 32,
+                      child: Center(
+                        child: AnimatedDefaultTextStyle(
+                          duration: const Duration(milliseconds: 160),
+                          curve: Curves.easeOutCubic,
+                          style: labelStyle,
+                          child: Text(
+                            label.trim(),
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            textAlign: TextAlign.center,
+                          ),
                         ),
-                  ),
-                ],
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
           );
@@ -951,48 +928,20 @@ class _ExploreScreenState extends State<ExploreScreen> {
   }
 
   Widget _buildMyRoomsStrip() {
-    if (_myRooms.isEmpty) {
+    if (_followedRooms.isEmpty) {
       return _buildMiniEmpty(
-          'No saved rooms yet. Create one or join a live room.');
+        'No followed rooms yet. Follow a live room and it will appear here in realtime.',
+      );
     }
 
     return SizedBox(
       height: 172,
       child: ListView.separated(
         scrollDirection: Axis.horizontal,
-        itemCount: _myRooms.length + 1,
+        itemCount: _followedRooms.length,
         separatorBuilder: (_, __) => const SizedBox(width: 12),
         itemBuilder: (context, index) {
-          if (index == 0) {
-            return InkWell(
-              onTap: _openCreateRoom,
-              borderRadius: BorderRadius.circular(26),
-              child: Ink(
-                width: 152,
-                padding: const EdgeInsets.all(18),
-                decoration: BoxDecoration(
-                  gradient: context.mood.loungeGradient,
-                  borderRadius: BorderRadius.circular(26),
-                ),
-                child: const Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Icon(Icons.add_circle_outline_rounded, color: Colors.white),
-                    Spacer(),
-                    Text(
-                      'Create room',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            );
-          }
-
-          final room = _myRooms[index - 1];
+          final room = _followedRooms[index];
           final accent = _categoryColor(room.type);
           return InkWell(
             onTap: () => _openRoom(room),
@@ -1026,7 +975,7 @@ class _ExploreScreenState extends State<ExploreScreen> {
                   ),
                   const SizedBox(height: 6),
                   Text(
-                    '${room.onlineCount} online',
+                    '${room.onlineCount} online • ${room.followers} fans',
                     style: Theme.of(context).textTheme.bodySmall,
                   ),
                 ],
@@ -1237,15 +1186,18 @@ class _ExploreScreenState extends State<ExploreScreen> {
 
   Color _categoryColor(String id) {
     switch (id) {
+      case 'voice':
+        return AppColors.secondaryBlue;
       case 'music':
         return AppColors.accentBerry;
       case 'video':
-        return AppColors.secondaryBlue;
+        return AppColors.accentSky;
       case 'chat':
-        return AppColors.secondaryBlue;
+        return AppColors.successGreen;
       case 'battle':
+        return AppColors.warningOrange;
       case 'auction':
-        return AppColors.accentYellow;
+        return AppColors.errorRed;
       case 'all':
         return AppColors.primaryBlue;
       default:
@@ -1253,8 +1205,27 @@ class _ExploreScreenState extends State<ExploreScreen> {
     }
   }
 
+  String? _categoryArtwork(String id) {
+    switch (id) {
+      case 'all':
+        return 'assets/images/explore_all_rooms.png';
+      case 'voice':
+        return 'assets/images/explore_voice_chat.png';
+      case 'music':
+        return 'assets/images/explore_music.png';
+      case 'video':
+        return 'assets/images/explore_video.png';
+      default:
+        return null;
+    }
+  }
+
   IconData _categoryIcon(String id) {
     switch (id) {
+      case 'all':
+        return Icons.explore_rounded;
+      case 'voice':
+        return Icons.record_voice_over_rounded;
       case 'music':
         return Icons.music_note_rounded;
       case 'video':
@@ -1262,14 +1233,15 @@ class _ExploreScreenState extends State<ExploreScreen> {
       case 'chat':
         return Icons.chat_bubble_rounded;
       case 'battle':
-        return Icons.flash_on_rounded;
+        return Icons.sports_esports_rounded;
       case 'auction':
-        return Icons.sell_rounded;
+        return Icons.gavel_rounded;
       default:
-        return Icons.mic_rounded;
+        return Icons.grid_view_rounded;
     }
   }
 
+  // ignore: unused_element
   String _shortLabel(String label) {
     if (label.length <= 8) return label;
     return '${label.substring(0, 7)}…';

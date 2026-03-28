@@ -61,7 +61,20 @@ const createRoomSchema = z.object({
         musicLoop: z.boolean().optional(),
         youtubeUrl: z.string().url().optional(),
         youtubeTitle: z.string().max(160).optional(),
-        youtubeThumbnail: z.string().url().optional()
+        youtubeThumbnail: z.string().url().optional(),
+        youtubePositionMs: z.number().int().min(0).optional(),
+        youtubePlaybackState: z.enum(['paused', 'playing']).optional(),
+        youtubeQueue: z.array(
+            z.object({
+                videoId: z.string().max(32).optional(),
+                url: z.string().url(),
+                title: z.string().max(160).optional(),
+                thumbnailUrl: z.string().url().optional(),
+                durationMs: z.number().int().min(0).optional(),
+                addedBy: z.string().optional(),
+                addedAt: z.union([z.string(), z.date()]).optional()
+            })
+        ).optional()
     }).optional()
 });
 
@@ -71,25 +84,48 @@ const updateRoomSchema = createRoomSchema.partial().extend({
 
 const createPostSchema = z.object({
     content: z.string().max(2000).optional(),
-    images: z.array(z.string().url()).max(9).optional(),
-    type: z.enum(['normal', 'announcement', 'poll']).optional(),
-    metadata: z.record(z.any()).optional()
-}).refine(data => data.content || (data.images && data.images.length > 0), {
+    images: z.array(
+        z.object({
+            url: z.string().url(),
+            thumbnail: z.string().url().optional()
+        })
+    ).max(9).optional(),
+    type: z.enum(['normal', 'achievement', 'event']).optional(),
+    metadata: z.record(z.string(), z.any()).optional()
+}).refine(data => {
+    const hasContent = typeof data.content === 'string' && data.content.trim().length > 0;
+    const hasImages = Array.isArray(data.images) && data.images.length > 0;
+    return hasContent || hasImages;
+}, {
     message: "Post must have content or images"
 });
 
 const sendDirectMessageSchema = z.object({
-    recipientId: z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid user ID'),
+    recipientId: z.string().min(1).max(64),
     content: z.string().min(1).max(5000),
-    type: z.enum(['text', 'image', 'voice', 'gift', 'system', 'emoji']).optional(),
-    replyTo: z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid message ID').optional()
+    type: z.enum(['text', 'image', 'voice', 'gift', 'system', 'emoji', 'private_image']).optional(),
+    replyTo: z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid message ID').optional(),
+    metadata: z.record(z.string(), z.any()).optional()
 });
 
 const sendRoomMessageSchema = z.object({
     roomId: z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid room ID'),
     content: z.string().min(1).max(5000),
-    type: z.enum(['text', 'image', 'voice', 'gift', 'system', 'emoji']).optional(),
-    replyTo: z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid message ID').optional()
+    type: z.enum(['text', 'image', 'voice', 'gift', 'system', 'emoji', 'private_image']).optional(),
+    replyTo: z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid message ID').optional(),
+    metadata: z.record(z.string(), z.any()).optional()
+});
+
+const sendGroupMessageSchema = z.object({
+    groupId: z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid group ID'),
+    content: z.string().min(1).max(5000),
+    type: z.enum(['text', 'image', 'voice', 'gift', 'system', 'emoji', 'private_image']).optional(),
+    replyTo: z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid message ID').optional(),
+    metadata: z.record(z.string(), z.any()).optional()
+});
+
+const inviteRoomFriendSchema = z.object({
+    targetUserId: z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid user ID')
 });
 
 const createGroupSchema = z.object({
@@ -97,13 +133,20 @@ const createGroupSchema = z.object({
     description: z.string().max(500).optional(),
     motto: z.string().max(100).optional(),
     isPublic: z.boolean().optional(),
-    maxMembers: z.number().min(10).max(500).optional()
+    maxMembers: z.number().min(10).max(500).optional(),
+    approvalRequired: z.boolean().optional(),
+    type: z.enum(['small', 'large', 'epic']).optional(),
+    vibe: z.string().max(40).optional(),
+    invitedFriendIds: z.array(
+        z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid friend ID')
+    ).max(24).optional()
 });
 
 const updateProfileSchema = z.object({
     bio: z.string().max(500).optional(),
     avatar: z.string().url().optional(),
-    coverPhoto: z.string().url().optional()
+    coverPhoto: z.string().url().optional(),
+    region: z.string().max(60).optional()
 });
 
 const updateLocationSchema = z.object({
@@ -146,6 +189,7 @@ const updateUserSchema = z.object({
     username: z.string().min(3).max(20).regex(/^[a-zA-Z0-9_]+$/, 'Username can only contain letters, numbers, and underscores').optional(),
     bio: z.string().max(500).optional(),
     avatar: z.string().url().optional(),
+    region: z.string().max(60).optional(),
     settings: updateSettingsSchema.optional()
 });
 const purchaseVipSchema = z.object({
@@ -164,6 +208,8 @@ module.exports = {
     createPostSchema,
     sendDirectMessageSchema,
     sendRoomMessageSchema,
+    sendGroupMessageSchema,
+    inviteRoomFriendSchema,
     createGroupSchema,
     updateProfileSchema,
     updateLocationSchema,

@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
-import '../../services/economy_service.dart';
 import '../../models/quest_model.dart';
+import '../../services/economy_service.dart';
 import '../../utils/constants.dart';
+import '../../widgets/currency_icon.dart';
 
 class QuestsScreen extends StatefulWidget {
   const QuestsScreen({super.key});
@@ -53,12 +54,12 @@ class _QuestsScreenState extends State<QuestsScreen> {
 
   Future<void> _claimQuest(QuestModel quest) async {
     try {
-      final result =
-          await EconomyService.claimQuestReward(questId: quest.questId);
+      await EconomyService.claimQuestReward(questId: quest.questId);
 
       if (!mounted) return;
 
       await _loadQuests();
+      if (!mounted) return;
 
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -337,11 +338,8 @@ class _QuestsScreenState extends State<QuestsScreen> {
                                                   right: 8),
                                               child: Row(
                                                 children: [
-                                                  const Icon(
-                                                    Icons.monetization_on,
-                                                    size: 14,
-                                                    color: Colors.amber,
-                                                  ),
+                                                  const CurrencyIcon.coins(
+                                                      size: 14),
                                                   const SizedBox(width: 2),
                                                   Text(
                                                     '+${quest.reward['coins']}',
@@ -360,11 +358,8 @@ class _QuestsScreenState extends State<QuestsScreen> {
                                                   right: 8),
                                               child: Row(
                                                 children: [
-                                                  const Icon(
-                                                    Icons.diamond,
-                                                    size: 14,
-                                                    color: Colors.purple,
-                                                  ),
+                                                  const CurrencyIcon.gems(
+                                                      size: 14),
                                                   const SizedBox(width: 2),
                                                   Text(
                                                     '+${quest.reward['gems']}',
@@ -436,8 +431,3 @@ class _QuestsScreenState extends State<QuestsScreen> {
     return Icons.assignment;
   }
 }
-
-
-
-
-

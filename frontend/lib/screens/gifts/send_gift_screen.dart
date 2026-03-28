@@ -6,6 +6,8 @@ import '../../services/user_service.dart';
 import '../../models/gift_model.dart';
 import '../../models/user_model.dart';
 import '../../utils/constants.dart';
+import '../../widgets/app_search_icon.dart';
+import '../../widgets/currency_icon.dart';
 import '../../widgets/user_avatar.dart';
 
 class SendGiftScreen extends StatefulWidget {
@@ -134,14 +136,14 @@ class _SendGiftScreenState extends State<SendGiftScreen> {
                 Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    const Icon(Icons.monetization_on, color: Colors.amber),
+                    const CurrencyIcon.coins(size: 18),
                     const SizedBox(width: 4),
                     Text(
                       '${result['newBalance']['coins']}',
                       style: const TextStyle(fontWeight: FontWeight.bold),
                     ),
                     const SizedBox(width: 16),
-                    const Icon(Icons.diamond, color: Colors.purple),
+                    const CurrencyIcon.gems(size: 18),
                     const SizedBox(width: 4),
                     Text(
                       '${result['newBalance']['gems']}',
@@ -230,8 +232,7 @@ class _SendGiftScreenState extends State<SendGiftScreen> {
                             Row(
                               mainAxisAlignment: MainAxisAlignment.center,
                               children: [
-                                const Icon(Icons.monetization_on,
-                                    color: Colors.amber),
+                                const CurrencyIcon.coins(size: 20),
                                 const SizedBox(width: 4),
                                 Text(
                                   '${widget.gift.coinsPrice}',
@@ -246,7 +247,7 @@ class _SendGiftScreenState extends State<SendGiftScreen> {
                             Row(
                               mainAxisAlignment: MainAxisAlignment.center,
                               children: [
-                                const Icon(Icons.diamond, color: Colors.purple),
+                                const CurrencyIcon.gems(size: 20),
                                 const SizedBox(width: 4),
                                 Text(
                                   '${widget.gift.gemsPrice}',
@@ -372,7 +373,7 @@ class _SendGiftScreenState extends State<SendGiftScreen> {
                     TextField(
                       decoration: InputDecoration(
                         hintText: 'Search by username...',
-                        prefixIcon: const Icon(Icons.search),
+                        prefixIcon: const AppSearchIcon(size: 18),
                         border: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(12),
                         ),

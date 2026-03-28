@@ -1,479 +1,1115 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
-import '../../services/group_service.dart';
+import 'package:provider/provider.dart';
+
 import '../../models/group_model.dart';
+import '../../providers/auth_provider.dart';
+import '../../services/friend_service.dart';
+import '../../services/group_service.dart';
+import '../../services/notification_sound_service.dart';
+import '../../services/room_service.dart';
+import '../../services/socket_service.dart';
 import '../../utils/constants.dart';
+import '../../utils/media_url.dart';
 import '../../widgets/user_avatar.dart';
+import '../rooms/room_detail_screen.dart';
 
 class GroupsScreen extends StatefulWidget {
-  const GroupsScreen({super.key});
+  final bool embedded;
+
+  const GroupsScreen({
+    super.key,
+    this.embedded = false,
+  });
 
   @override
   State<GroupsScreen> createState() => _GroupsScreenState();
 }
 
-class _GroupsScreenState extends State<GroupsScreen>
-    with SingleTickerProviderStateMixin {
-  late TabController _tabController;
+class _GroupsScreenState extends State<GroupsScreen> {
+  final List<StreamSubscription> _subs = [];
+  final Map<String, int> _activityCounts = <String, int>{};
+
   List<GroupModel> _myGroups = [];
+  List<GroupModel> _invites = [];
   List<GroupModel> _discoverGroups = [];
   List<GroupModel> _leaderboard = [];
+
   bool _isLoading = true;
+  String? _error;
+  Timer? _refreshDebounce;
 
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 3, vsync: this);
     _loadData();
+    _bindRealtime();
   }
 
   @override
   void dispose() {
-    _tabController.dispose();
+    _refreshDebounce?.cancel();
+    for (final sub in _subs) {
+      sub.cancel();
+    }
     super.dispose();
   }
 
-  Future<void> _loadData() async {
-    setState(() => _isLoading = true);
+  Future<void> _loadData({bool silent = false}) async {
+    if (!silent) {
+      setState(() {
+        _isLoading = true;
+        _error = null;
+      });
+    }
 
     try {
-      final myGroups = await GroupService.getMyGroups();
-      final discover = await GroupService.getDiscoverGroups();
-      final leaderboard = await GroupService.getLeaderboard();
+      final results = await Future.wait<dynamic>([
+        GroupService.getMyGroups(),
+        GroupService.getMyInvites(),
+        GroupService.getDiscoverGroups(),
+        GroupService.getLeaderboard(),
+      ]);
 
       if (!mounted) return;
-
       setState(() {
-        _myGroups = myGroups;
-        _discoverGroups = discover;
-        _leaderboard = leaderboard;
+        _myGroups = results[0] as List<GroupModel>;
+        _invites = results[1] as List<GroupModel>;
+        _discoverGroups = results[2] as List<GroupModel>;
+        _leaderboard = results[3] as List<GroupModel>;
         _isLoading = false;
       });
     } catch (e) {
-      debugPrint('Error loading groups: $e');
-      setState(() => _isLoading = false);
+      if (!mounted) return;
+      setState(() {
+        _isLoading = false;
+        _error = e.toString().replaceFirst('Exception: ', '');
+      });
     }
   }
 
-  void _showCreateGroupDialog() {
-    final nameController = TextEditingController();
-    final descController = TextEditingController();
-    final mottoController = TextEditingController();
+  void _bindRealtime() {
+    _subs.add(SocketService.groupMessageStream.listen(_handleGroupMessage));
+    _subs.add(SocketService.groupUpdateStream.listen(_handleGroupUpdate));
+    _subs.add(SocketService.resyncStream.listen((_) => _scheduleRefresh()));
+  }
 
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Create New Group'),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: nameController,
-                decoration: const InputDecoration(
-                  labelText: 'Group Name',
-                  hintText: 'e.g., Gaming Squad',
-                  border: OutlineInputBorder(),
-                ),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: descController,
-                decoration: const InputDecoration(
-                  labelText: 'Description',
-                  hintText: 'What is your group about?',
-                  border: OutlineInputBorder(),
-                ),
-                maxLines: 2,
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: mottoController,
-                decoration: const InputDecoration(
-                  labelText: 'Motto (Optional)',
-                  hintText: 'A short slogan',
-                  border: OutlineInputBorder(),
-                ),
-              ),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-          ElevatedButton(
-            onPressed: () async {
-              Navigator.pop(context);
-              setState(() => _isLoading = true);
+  void _handleGroupMessage(Map<String, dynamic> event) {
+    final groupId = event['groupId']?.toString();
+    if (groupId == null || groupId.isEmpty) return;
 
-              final group = await GroupService.createGroup(
-                name: nameController.text,
-                description: descController.text,
-                motto: mottoController.text,
-              );
+    final index = _myGroups.indexWhere((group) => group.id == groupId);
+    if (index == -1) return;
 
-              if (group != null && mounted) {
-                await _loadData();
-                if (!context.mounted) return;
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: Text('Group "${group.name}" created!'),
-                    backgroundColor: Colors.green,
-                  ),
-                );
-              }
-            },
-            child: const Text('Create'),
-          ),
-        ],
-      ),
+    final reordered = [..._myGroups];
+    final group = reordered.removeAt(index);
+    reordered.insert(0, group);
+
+    if (!mounted) return;
+    setState(() {
+      _myGroups = reordered;
+      _activityCounts[groupId] = (_activityCounts[groupId] ?? 0) + 1;
+    });
+  }
+
+  void _handleGroupUpdate(Map<String, dynamic> event) {
+    final action = event['action']?.toString() ?? '';
+    final actorId = event['actorId']?.toString();
+    final currentUserId = context.read<AuthProvider>().user?.id;
+
+    if ((action == 'invited' || action == 'join_request_approved') &&
+        actorId != null &&
+        actorId != currentUserId) {
+      unawaited(NotificationSoundService.playFriendRequest());
+    } else if (action == 'member_joined' ||
+        action == 'member_removed' ||
+        action == 'role_updated' ||
+        action == 'group_updated') {
+      unawaited(NotificationSoundService.playFriendUpdate());
+    }
+
+    _scheduleRefresh();
+  }
+
+  void _scheduleRefresh() {
+    _refreshDebounce?.cancel();
+    _refreshDebounce = Timer(
+      const Duration(milliseconds: 350),
+      () => _loadData(silent: true),
     );
   }
 
-  Future<void> _handleJoinGroup(String groupId, String groupName) async {
-    final success = await GroupService.joinGroup(groupId);
-
+  Future<void> _openGroup(GroupModel group) async {
+    _activityCounts.remove(group.id);
+    await Navigator.pushNamed(
+      context,
+      '/groups/detail',
+      arguments: group.id,
+    );
     if (!mounted) return;
+    _scheduleRefresh();
+  }
 
-    if (success) {
-      await _loadData();
+  Future<void> _openVoiceLounge(GroupModel group) async {
+    final roomId = group.linkedVoiceRoom?.id;
+    if (roomId == null || roomId.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Voice lounge is not ready yet.')),
+      );
+      return;
+    }
+
+    final room = await RoomService.getRoomById(roomId);
+    if (!mounted) return;
+    if (room == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Could not open the voice lounge.')),
+      );
+      return;
+    }
+
+    await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => RoomDetailScreen(room: room)),
+    );
+    if (!mounted) return;
+    _scheduleRefresh();
+  }
+
+  Future<void> _acceptInvite(GroupModel group) async {
+    try {
+      await GroupService.acceptInvite(group.id);
+      if (!mounted) return;
+      await _loadData(silent: true);
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Joined $groupName!'),
-          backgroundColor: Colors.green,
+          content: Text('You joined ${group.name}'),
+          backgroundColor: const Color(0xFF10B981),
         ),
       );
-    } else {
+    } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Failed to join group'),
-          backgroundColor: Colors.red,
-        ),
+        SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
       );
     }
   }
 
-  Future<void> _handleClaimTreasure(String groupId) async {
-    final result = await GroupService.claimTreasure(groupId);
+  Future<void> _rejectInvite(GroupModel group) async {
+    final success = await GroupService.rejectInvite(group.id);
+    if (!mounted || !success) return;
+    await _loadData(silent: true);
+  }
 
+  Future<void> _joinGroup(GroupModel group) async {
+    try {
+      final response = await GroupService.joinGroup(group.id);
+      if (!mounted) return;
+      await _loadData(silent: true);
+      if (!mounted) return;
+      final requested = response['pendingApproval'] == true;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            requested
+                ? 'Request sent to ${group.name}'
+                : 'Joined ${group.name}',
+          ),
+          backgroundColor:
+              requested ? const Color(0xFFF59E0B) : const Color(0xFF10B981),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
+      );
+    }
+  }
+
+  Future<void> _showCreateGroupSheet() async {
+    final friendsPayload = await FriendService.getFriends();
     if (!mounted) return;
 
-    if (result != null) {
-      await _loadData();
+    final friends = <Map<String, dynamic>>[
+      ...((friendsPayload['online'] as List?) ?? const []),
+      ...((friendsPayload['offline'] as List?) ?? const []),
+    ].whereType<Map>().map((user) => Map<String, dynamic>.from(user)).toList();
+
+    final result = await showModalBottomSheet<Map<String, dynamic>>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => _CreateGroupSheet(friends: friends),
+    );
+
+    if (result == null || !mounted) return;
+
+    try {
+      final created = await GroupService.createGroup(
+        name: result['name']?.toString() ?? '',
+        description: result['description']?.toString(),
+        motto: result['motto']?.toString(),
+        isPublic: result['isPublic'] == true,
+        approvalRequired: result['approvalRequired'] == true,
+        maxMembers: (result['maxMembers'] as num?)?.toInt() ?? 20,
+        type: result['type']?.toString() ?? 'small',
+        vibe: result['vibe']?.toString() ?? 'Orbit',
+        invitedFriendIds: (result['invitedFriendIds'] as List? ?? const [])
+            .map((item) => item.toString())
+            .toList(growable: false),
+      );
+
+      if (!mounted || created == null) return;
+      await _loadData(silent: true);
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Treasure claimed! +${result['coins'] ?? 0} coins'),
-          backgroundColor: Colors.amber,
+          content: Text('Created ${created.name}'),
+          backgroundColor: const Color(0xFF10B981),
         ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
       );
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      children: [
-        Container(
-          color: Colors.white,
-          child: TabBar(
-            controller: _tabController,
-            labelColor: AppColors.primaryBlue,
-            unselectedLabelColor: Colors.grey,
-            indicatorColor: AppColors.primaryBlue,
-            tabs: const [
-              Tab(text: 'My Groups'),
-              Tab(text: 'Discover'),
-              Tab(text: 'Leaderboard'),
-            ],
-          ),
+    final body = RefreshIndicator(
+      color: AppColors.primaryBlue,
+      onRefresh: _loadData,
+      child: ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: EdgeInsets.fromLTRB(
+          18,
+          widget.embedded ? 18 : 16,
+          18,
+          widget.embedded ? 120 : 28,
         ),
-        Expanded(
-          child: _isLoading
-              ? const Center(child: CircularProgressIndicator())
-              : TabBarView(
-                  controller: _tabController,
+        children: [
+          _buildHero(),
+          if (_error != null) ...[
+            const SizedBox(height: 14),
+            _buildErrorCard(),
+          ],
+          const SizedBox(height: 18),
+          if (_invites.isNotEmpty) ...[
+            _buildSectionTitle(
+                'Invites waiting', '${_invites.length} circle invitations'),
+            const SizedBox(height: 10),
+            ..._invites.map(
+              (group) => Padding(
+                padding: const EdgeInsets.only(bottom: 12),
+                child: _buildInviteCard(group),
+              ),
+            ),
+            const SizedBox(height: 8),
+          ],
+          _buildSectionTitle(
+            'Your circles',
+            _myGroups.isEmpty
+                ? 'Build one with your people'
+                : '${_myGroups.length} live circle${_myGroups.length == 1 ? '' : 's'}',
+          ),
+          const SizedBox(height: 10),
+          if (_isLoading && _myGroups.isEmpty)
+            const Center(
+                child: Padding(
+              padding: EdgeInsets.symmetric(vertical: 24),
+              child: CircularProgressIndicator(),
+            ))
+          else if (_myGroups.isEmpty)
+            _buildEmptyCard(
+              title: 'No circles yet',
+              subtitle:
+                  'Create a private crew for chat, gifting, voice hangouts, and owner-led admin control.',
+              actionLabel: 'Create circle',
+              onPressed: _showCreateGroupSheet,
+            )
+          else
+            ..._myGroups.map(
+              (group) => Padding(
+                padding: const EdgeInsets.only(bottom: 14),
+                child: _buildMyGroupCard(group),
+              ),
+            ),
+          const SizedBox(height: 8),
+          _buildSectionTitle(
+            'Discover',
+            _discoverGroups.isEmpty
+                ? 'No new public circles right now'
+                : 'Fresh public circles to join',
+          ),
+          const SizedBox(height: 10),
+          if (_discoverGroups.isEmpty)
+            _buildMiniCard(
+                'Public circles will appear here when new crews open up.')
+          else
+            ..._discoverGroups.take(8).map(
+                  (group) => Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: _buildDiscoverTile(group),
+                  ),
+                ),
+          const SizedBox(height: 8),
+          _buildSectionTitle('Leaderboard', 'Top crews by energy and XP'),
+          const SizedBox(height: 10),
+          if (_leaderboard.isEmpty)
+            _buildMiniCard('Leaderboard data is warming up.')
+          else
+            ..._leaderboard.take(5).toList().asMap().entries.map(
+                  (entry) => Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: _buildLeaderboardTile(entry.key + 1, entry.value),
+                  ),
+                ),
+        ],
+      ),
+    );
+
+    if (widget.embedded) {
+      return body;
+    }
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Groups'),
+      ),
+      body: body,
+    );
+  }
+
+  Widget _buildHero() {
+    final liveLounges =
+        _myGroups.where((group) => group.linkedVoiceRoom != null).length;
+    final onlineMembers = _myGroups.fold<int>(
+      0,
+      (sum, group) => sum + group.onlineMembers,
+    );
+
+    return Container(
+      padding: const EdgeInsets.all(22),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(28),
+        gradient: const LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            Color(0xFF0F172A),
+            Color(0xFF1D4ED8),
+            Color(0xFF14B8A6),
+          ],
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFF1D4ED8).withValues(alpha: 0.18),
+            blurRadius: 24,
+            offset: const Offset(0, 14),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // My Groups Tab
-                    _buildMyGroups(),
-
-                    // Discover Tab
-                    _buildDiscoverGroups(),
-
-                    // Leaderboard Tab
-                    _buildLeaderboard(),
+                    Text(
+                      'Orbit Groups',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 24,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    SizedBox(height: 6),
+                    Text(
+                      'Build fun crews with owner powers, appointed admins, live voice lounges, gifts, and fast group chat.',
+                      style: TextStyle(
+                        color: Color(0xFFE2E8F0),
+                        height: 1.45,
+                      ),
+                    ),
                   ],
                 ),
+              ),
+              FilledButton.icon(
+                onPressed: _showCreateGroupSheet,
+                style: FilledButton.styleFrom(
+                  backgroundColor: Colors.white,
+                  foregroundColor: const Color(0xFF0F172A),
+                ),
+                icon: const Icon(Icons.add_rounded),
+                label: const Text('Create'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 18),
+          Wrap(
+            spacing: 10,
+            runSpacing: 10,
+            children: [
+              _buildHeroChip(
+                  Icons.groups_2_rounded, '${_myGroups.length}', 'Circles'),
+              _buildHeroChip(Icons.mark_email_unread_rounded,
+                  '${_invites.length}', 'Invites'),
+              _buildHeroChip(
+                  Icons.graphic_eq_rounded, '$liveLounges', 'Lounges'),
+              _buildHeroChip(Icons.circle_rounded, '$onlineMembers', 'Online'),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildHeroChip(IconData icon, String value, String label) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.14),
+        borderRadius: BorderRadius.circular(18),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, color: Colors.white, size: 18),
+          const SizedBox(width: 10),
+          Text(
+            '$value $label',
+            style: const TextStyle(
+              color: Colors.white,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSectionTitle(String title, String subtitle) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          title,
+          style: const TextStyle(
+            fontSize: 21,
+            fontWeight: FontWeight.w900,
+            color: Color(0xFF0F172A),
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          subtitle,
+          style: const TextStyle(
+            color: AppColors.textSecondary,
+            fontSize: 13,
+          ),
         ),
       ],
     );
   }
 
-  Widget _buildMyGroups() {
-    if (_myGroups.isEmpty) {
-      return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(
-              Icons.group_off,
-              size: 64,
-              color: Colors.grey.shade400,
-            ),
-            const SizedBox(height: 16),
-            Text(
-              'No groups yet',
-              style: TextStyle(
-                fontSize: 18,
-                color: Colors.grey.shade600,
-              ),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              'Create or join a group to get started',
-              style: TextStyle(color: Colors.grey.shade500),
-            ),
-            const SizedBox(height: 24),
-            ElevatedButton.icon(
-              onPressed: _showCreateGroupDialog,
-              icon: const Icon(Icons.add),
-              label: const Text('Create Group'),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: AppColors.primaryBlue,
-                foregroundColor: Colors.white,
-              ),
-            ),
-          ],
-        ),
-      );
-    }
-
-    return ListView.builder(
+  Widget _buildInviteCard(GroupModel group) {
+    return Container(
       padding: const EdgeInsets.all(16),
-      itemCount: _myGroups.length,
-      itemBuilder: (context, index) {
-        final group = _myGroups[index];
-        return Card(
-          margin: const EdgeInsets.only(bottom: 12),
-          child: Column(
+      decoration: BoxDecoration(
+        color: const Color(0xFFFFFBEB),
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: const Color(0xFFFDE68A)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
             children: [
-              ListTile(
-                leading: UserAvatar(
-                  imageUrl: group.avatar,
-                  username: group.name,
-                  radius: 20,
-                ),
-                title: Text(group.name),
-                subtitle: Text(
-                  '${group.memberCount}/${group.maxMembers} members â€¢ ${group.type}',
-                ),
-                trailing: group.hasTreasure
-                    ? IconButton(
-                        icon: const Icon(Icons.card_giftcard,
-                            color: Colors.amber),
-                        onPressed: () => _handleClaimTreasure(group.id),
-                      )
-                    : null,
+              UserAvatar(
+                imageUrl: resolveMediaUrl(group.avatar),
+                username: group.name,
+                radius: 24,
               ),
-              Padding(
-                padding: const EdgeInsets.all(8.0),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.end,
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    TextButton(
-                      onPressed: () {
-                        Navigator.pushNamed(
-                          context,
-                          '/groups/detail',
-                          arguments: group.id,
-                        );
-                      },
-                      child: const Text('View'),
+                    Text(
+                      group.name,
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w900,
+                        color: Color(0xFF0F172A),
+                      ),
                     ),
-                    const SizedBox(width: 8),
-                    TextButton(
-                      onPressed: () async {
-                        final confirm = await showDialog<bool>(
-                          context: context,
-                          builder: (context) => AlertDialog(
-                            title: const Text('Leave Group'),
-                            content: Text(
-                                'Are you sure you want to leave ${group.name}?'),
-                            actions: [
-                              TextButton(
-                                onPressed: () => Navigator.pop(context, false),
-                                child: const Text('Cancel'),
-                              ),
-                              TextButton(
-                                onPressed: () => Navigator.pop(context, true),
-                                child: const Text('Leave'),
-                              ),
-                            ],
-                          ),
-                        );
-
-                        if (confirm == true) {
-                          await GroupService.leaveGroup(group.id);
-                          await _loadData();
-                        }
-                      },
-                      child: const Text('Leave'),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Invited by ${group.leaderName}',
+                      style: const TextStyle(color: AppColors.textSecondary),
                     ),
                   ],
                 ),
               ),
-            ],
-          ),
-        );
-      },
-    );
-  }
-
-  Widget _buildDiscoverGroups() {
-    if (_discoverGroups.isEmpty) {
-      return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(
-              Icons.explore,
-              size: 64,
-              color: Colors.grey.shade400,
-            ),
-            const SizedBox(height: 16),
-            Text(
-              'No groups to discover',
-              style: TextStyle(
-                fontSize: 18,
-                color: Colors.grey.shade600,
-              ),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              'Check back later for new groups',
-              style: TextStyle(color: Colors.grey.shade500),
-            ),
-          ],
-        ),
-      );
-    }
-
-    return ListView.builder(
-      padding: const EdgeInsets.all(16),
-      itemCount: _discoverGroups.length,
-      itemBuilder: (context, index) {
-        final group = _discoverGroups[index];
-        return Card(
-          margin: const EdgeInsets.only(bottom: 12),
-          child: ListTile(
-            onTap: () {
-              Navigator.pushNamed(
-                context,
-                '/groups/detail',
-                arguments: group.id,
-              );
-            },
-            leading: UserAvatar(
-              imageUrl: group.avatar,
-              username: group.name,
-              radius: 18,
-            ),
-            title: Text(group.name),
-            subtitle: Text(
-              '${group.memberCount}/${group.maxMembers} members â€¢ ${group.motto.isNotEmpty ? group.motto : group.type}',
-            ),
-            trailing: ElevatedButton(
-              onPressed: () => _handleJoinGroup(group.id, group.name),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: AppColors.primaryBlue,
-                foregroundColor: Colors.white,
-              ),
-              child: const Text('Join'),
-            ),
-          ),
-        );
-      },
-    );
-  }
-
-  Widget _buildLeaderboard() {
-    if (_leaderboard.isEmpty) {
-      return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(
-              Icons.emoji_events_outlined,
-              size: 64,
-              color: Colors.grey.shade400,
-            ),
-            const SizedBox(height: 16),
-            Text(
-              'No groups on leaderboard yet',
-              style: TextStyle(
-                fontSize: 18,
-                color: Colors.grey.shade600,
-              ),
-            ),
-          ],
-        ),
-      );
-    }
-
-    return ListView.builder(
-      padding: const EdgeInsets.all(16),
-      itemCount: _leaderboard.length,
-      itemBuilder: (context, index) {
-        final group = _leaderboard[index];
-        return Card(
-          margin: const EdgeInsets.only(bottom: 12),
-          child: ListTile(
-            onTap: () {
-              Navigator.pushNamed(
-                context,
-                '/groups/detail',
-                arguments: group.id,
-              );
-            },
-            leading: Container(
-              width: 40,
-              height: 40,
-              decoration: BoxDecoration(
-                color: index == 0
-                    ? Colors.amber
-                    : index == 1
-                        ? Colors.grey.shade400
-                        : index == 2
-                            ? Colors.brown.shade400
-                            : Colors.grey.shade200,
-                shape: BoxShape.circle,
-              ),
-              child: Center(
-                child: Text(
-                  '#${index + 1}',
-                  style: TextStyle(
-                    color: index < 3 ? Colors.white : Colors.black,
-                    fontWeight: FontWeight.bold,
-                  ),
+              Text(
+                '${group.memberCount} members',
+                style: const TextStyle(
+                  color: Color(0xFFB45309),
+                  fontWeight: FontWeight.w700,
                 ),
               ),
-            ),
-            title: Text(group.name),
-            subtitle: Text(
-                '${group.memberCount} members â€¢ ${group.stats['totalXp'] ?? 0} XP'),
-            trailing: Text('ðŸŽ¯ ${group.stats['rank'] ?? 0}'),
+            ],
           ),
-        );
-      },
+          const SizedBox(height: 12),
+          Text(
+            group.motto.isNotEmpty ? group.motto : group.description,
+            style: const TextStyle(color: Color(0xFF92400E), height: 1.4),
+          ),
+          const SizedBox(height: 14),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton(
+                  onPressed: () => _rejectInvite(group),
+                  child: const Text('Later'),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: FilledButton(
+                  onPressed: () => _acceptInvite(group),
+                  child: const Text('Join now'),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMyGroupCard(GroupModel group) {
+    final liveCount = _activityCounts[group.id] ?? 0;
+
+    return InkWell(
+      borderRadius: BorderRadius.circular(26),
+      onTap: () => _openGroup(group),
+      child: Container(
+        padding: const EdgeInsets.all(18),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(26),
+          border: Border.all(color: const Color(0xFFE2E8F0)),
+          boxShadow: [
+            BoxShadow(
+              color: const Color(0xFF0F172A).withValues(alpha: 0.05),
+              blurRadius: 24,
+              offset: const Offset(0, 12),
+            ),
+          ],
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                UserAvatar(
+                  imageUrl: resolveMediaUrl(group.avatar),
+                  username: group.name,
+                  radius: 26,
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        group.name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w900,
+                          fontSize: 17,
+                          color: Color(0xFF0F172A),
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        '${group.viewerRole.toUpperCase()}  •  ${group.onlineMembers} online now',
+                        style: const TextStyle(color: AppColors.textSecondary),
+                      ),
+                    ],
+                  ),
+                ),
+                if (liveCount > 0)
+                  Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFEFF6FF),
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                    child: Text(
+                      '$liveCount new',
+                      style: const TextStyle(
+                        color: Color(0xFF2563EB),
+                        fontWeight: FontWeight.w800,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 14),
+            Text(
+              group.motto.isNotEmpty ? group.motto : group.description,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: AppColors.textSecondary,
+                height: 1.45,
+              ),
+            ),
+            const SizedBox(height: 14),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                _smallPill('${group.memberCount}/${group.maxMembers} members'),
+                _smallPill(group.vibe),
+                if (group.hasTreasure) _smallPill('Treasure live'),
+                if (group.linkedVoiceRoom != null) _smallPill('Voice lounge'),
+              ],
+            ),
+            const SizedBox(height: 14),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: group.linkedVoiceRoom != null
+                        ? () => _openVoiceLounge(group)
+                        : null,
+                    icon: const Icon(Icons.graphic_eq_rounded),
+                    label: const Text('Voice'),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: FilledButton.icon(
+                    onPressed: () => _openGroup(group),
+                    icon: const Icon(Icons.chat_bubble_rounded),
+                    label: Text(group.hasTreasure ? 'Open' : 'Chat'),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDiscoverTile(GroupModel group) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: const Color(0xFFE2E8F0)),
+      ),
+      child: Row(
+        children: [
+          UserAvatar(
+            imageUrl: resolveMediaUrl(group.avatar),
+            username: group.name,
+            radius: 24,
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  group.name,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w900,
+                    color: Color(0xFF0F172A),
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  '${group.memberCount} members • ${group.approvalRequired ? 'Approval on' : 'Open join'} • ${group.vibe}',
+                  style: const TextStyle(
+                    color: AppColors.textSecondary,
+                    fontSize: 13,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          FilledButton(
+            onPressed: () => _joinGroup(group),
+            child: Text(group.approvalRequired ? 'Request' : 'Join'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildLeaderboardTile(int rank, GroupModel group) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: const Color(0xFFE2E8F0)),
+      ),
+      child: Row(
+        children: [
+          CircleAvatar(
+            radius: 22,
+            backgroundColor: rank == 1
+                ? const Color(0xFFF59E0B)
+                : rank == 2
+                    ? const Color(0xFF94A3B8)
+                    : rank == 3
+                        ? const Color(0xFFC08457)
+                        : const Color(0xFFE2E8F0),
+            child: Text(
+              '#$rank',
+              style: TextStyle(
+                color: rank <= 3 ? Colors.white : const Color(0xFF0F172A),
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  group.name,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w900,
+                    color: Color(0xFF0F172A),
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  '${group.stats['totalXp'] ?? 0} XP • ${group.memberCount} members',
+                  style: const TextStyle(
+                    color: AppColors.textSecondary,
+                    fontSize: 13,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          TextButton(
+            onPressed: () => _openGroup(group),
+            child: const Text('Open'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _smallPill(String label) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF8FAFC),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        label,
+        style: const TextStyle(
+          color: Color(0xFF475569),
+          fontSize: 12,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildEmptyCard({
+    required String title,
+    required String subtitle,
+    required String actionLabel,
+    required VoidCallback onPressed,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(22),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: const Color(0xFFE2E8F0)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(Icons.groups_2_rounded,
+              color: Color(0xFF2563EB), size: 30),
+          const SizedBox(height: 14),
+          Text(
+            title,
+            style: const TextStyle(
+              fontWeight: FontWeight.w900,
+              fontSize: 18,
+              color: Color(0xFF0F172A),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            subtitle,
+            style: const TextStyle(
+              color: AppColors.textSecondary,
+              height: 1.5,
+            ),
+          ),
+          const SizedBox(height: 16),
+          OutlinedButton(
+            onPressed: onPressed,
+            child: Text(actionLabel),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMiniCard(String text) {
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: const Color(0xFFE2E8F0)),
+      ),
+      child: Text(
+        text,
+        style: const TextStyle(color: AppColors.textSecondary, height: 1.45),
+      ),
+    );
+  }
+
+  Widget _buildErrorCard() {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFEF2F2),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: const Color(0xFFFECACA)),
+      ),
+      child: Text(
+        _error ?? 'Something went wrong.',
+        style: const TextStyle(
+          color: Color(0xFFB91C1C),
+          fontWeight: FontWeight.w700,
+        ),
+      ),
     );
   }
 }
 
+class _CreateGroupSheet extends StatefulWidget {
+  final List<Map<String, dynamic>> friends;
 
+  const _CreateGroupSheet({
+    required this.friends,
+  });
 
+  @override
+  State<_CreateGroupSheet> createState() => _CreateGroupSheetState();
+}
 
+class _CreateGroupSheetState extends State<_CreateGroupSheet> {
+  final _nameController = TextEditingController();
+  final _descriptionController = TextEditingController();
+  final _mottoController = TextEditingController();
+  final Set<String> _selectedFriends = <String>{};
 
+  bool _isPublic = false;
+  bool _approvalRequired = false;
+  int _maxMembers = 20;
+  String _type = 'small';
+  String _vibe = 'Orbit';
 
+  @override
+  void dispose() {
+    _nameController.dispose();
+    _descriptionController.dispose();
+    _mottoController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bottomInset = MediaQuery.of(context).viewInsets.bottom;
+
+    return Container(
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.vertical(top: Radius.circular(32)),
+      ),
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(20, 18, 20, bottomInset + 20),
+        child: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                child: Container(
+                  width: 54,
+                  height: 5,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFE2E8F0),
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 18),
+              const Text(
+                'Create Circle',
+                style: TextStyle(fontSize: 24, fontWeight: FontWeight.w900),
+              ),
+              const SizedBox(height: 6),
+              const Text(
+                'Invite friends now, keep owner control, and launch a live voice lounge automatically.',
+                style: TextStyle(color: AppColors.textSecondary, height: 1.45),
+              ),
+              const SizedBox(height: 18),
+              TextField(
+                controller: _nameController,
+                decoration: const InputDecoration(labelText: 'Circle name'),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _descriptionController,
+                maxLines: 2,
+                decoration: const InputDecoration(labelText: 'Description'),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _mottoController,
+                decoration: const InputDecoration(labelText: 'Motto'),
+              ),
+              const SizedBox(height: 18),
+              Wrap(
+                spacing: 8,
+                children: ['Orbit', 'Arcade', 'Midnight', 'Squad', 'Pulse']
+                    .map(
+                      (vibe) => ChoiceChip(
+                        label: Text(vibe),
+                        selected: _vibe == vibe,
+                        onSelected: (_) => setState(() => _vibe = vibe),
+                      ),
+                    )
+                    .toList(),
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                value: _isPublic,
+                onChanged: (value) => setState(() => _isPublic = value),
+                title: const Text('Public circle'),
+                subtitle: const Text('Let others discover and request to join'),
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                value: _approvalRequired,
+                onChanged: (value) => setState(() => _approvalRequired = value),
+                title: const Text('Approval required'),
+                subtitle: const Text('Owner and admins approve new members'),
+              ),
+              Wrap(
+                spacing: 8,
+                children: ['small', 'large', 'epic']
+                    .map(
+                      (type) => ChoiceChip(
+                        label: Text(type.toUpperCase()),
+                        selected: _type == type,
+                        onSelected: (_) => setState(() => _type = type),
+                      ),
+                    )
+                    .toList(),
+              ),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                children: [12, 20, 35, 50]
+                    .map(
+                      (size) => ChoiceChip(
+                        label: Text('$size max'),
+                        selected: _maxMembers == size,
+                        onSelected: (_) => setState(() => _maxMembers = size),
+                      ),
+                    )
+                    .toList(),
+              ),
+              const SizedBox(height: 18),
+              const Text(
+                'Add friends',
+                style: TextStyle(fontWeight: FontWeight.w800, fontSize: 16),
+              ),
+              const SizedBox(height: 8),
+              ...widget.friends.take(12).map((friend) {
+                final id = friend['_id']?.toString() ?? '';
+                final selected = _selectedFriends.contains(id);
+                return CheckboxListTile(
+                  value: selected,
+                  onChanged: (_) {
+                    setState(() {
+                      if (selected) {
+                        _selectedFriends.remove(id);
+                      } else {
+                        _selectedFriends.add(id);
+                      }
+                    });
+                  },
+                  title: Text(friend['username']?.toString() ?? 'Friend'),
+                  secondary: UserAvatar(
+                    imageUrl: resolveMediaUrl(friend['avatar']?.toString()),
+                    username: friend['username']?.toString() ?? 'F',
+                    radius: 18,
+                  ),
+                  contentPadding: EdgeInsets.zero,
+                  controlAffinity: ListTileControlAffinity.trailing,
+                );
+              }),
+              const SizedBox(height: 12),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton(
+                  onPressed: () {
+                    final name = _nameController.text.trim();
+                    if (name.isEmpty) return;
+                    Navigator.pop(context, {
+                      'name': name,
+                      'description': _descriptionController.text.trim(),
+                      'motto': _mottoController.text.trim(),
+                      'isPublic': _isPublic,
+                      'approvalRequired': _approvalRequired,
+                      'maxMembers': _maxMembers,
+                      'type': _type,
+                      'vibe': _vibe,
+                      'invitedFriendIds':
+                          _selectedFriends.toList(growable: false),
+                    });
+                  },
+                  child: const Text('Create circle'),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}

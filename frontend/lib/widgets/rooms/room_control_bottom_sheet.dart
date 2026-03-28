@@ -377,12 +377,11 @@ class RoomControlBottomSheet extends StatelessWidget {
               mainAxisAlignment: MainAxisAlignment.spaceEvenly,
               children: [
                 _buildConnectAction(
-                    'Invite', Icons.person_add_alt_1_rounded, onInvite),
-                _buildConnectAction(
                     'Rally', Icons.campaign_rounded, onRallyFans),
                 _buildConnectAction(
                     'Sounds', Icons.music_note_rounded, onGiftSound),
-                _buildConnectAction('Pass', Icons.badge_rounded, () {}),
+                _buildConnectAction(
+                    'Invite', Icons.person_add_alt_1_rounded, onInvite),
               ],
             ),
           ),

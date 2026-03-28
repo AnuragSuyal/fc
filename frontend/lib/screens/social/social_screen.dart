@@ -1,3 +1,5 @@
+// ignore_for_file: unused_element, unused_element_parameter
+
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -10,11 +12,13 @@ import '../../services/api_service.dart';
 import '../../services/friend_service.dart';
 import '../../services/group_service.dart';
 import '../../services/message_service.dart';
+import '../../services/notification_sound_service.dart';
 import '../../services/socket_service.dart';
 import '../../theme/app_theme.dart';
 import '../../utils/constants.dart';
 import '../../widgets/user_avatar.dart';
 import '../friends/friends_screen.dart';
+import '../groups/groups_screen.dart';
 import '../messages/chat_screen.dart';
 
 class SocialScreen extends StatefulWidget {
@@ -35,6 +39,7 @@ class _SocialScreenState extends State<SocialScreen>
   List<ConversationModel> _conversations = [];
   List<Map<String, dynamic>> _friends = [];
   List<Map<String, dynamic>> _friendRequests = [];
+  List<Map<String, dynamic>> _sentFriendRequests = [];
   List<Map<String, dynamic>> _suggestions = [];
   List<GroupModel> _myGroups = [];
   List<GroupModel> _discoverGroups = [];
@@ -100,15 +105,13 @@ class _SocialScreenState extends State<SocialScreen>
       _conversations.isNotEmpty ||
       _friends.isNotEmpty ||
       _friendRequests.isNotEmpty ||
+      _sentFriendRequests.isNotEmpty ||
       _myGroups.isNotEmpty ||
       _discoverGroups.isNotEmpty ||
       _leaderboard.isNotEmpty;
 
   void _handleTabChanged() {
     if (_tabController.indexIsChanging) return;
-    if (_tabController.index == 1) {
-      context.read<AuthProvider>().clearPendingFriendRequests();
-    }
   }
 
   Future<void> _loadHub({bool silent = false}) async {
@@ -123,7 +126,7 @@ class _SocialScreenState extends State<SocialScreen>
       final results = await Future.wait<dynamic>([
         MessageService.getConversations(),
         FriendService.getFriends(),
-        FriendService.getFriendRequests(),
+        FriendService.getFriendRequestOverview(),
         FriendService.getFriendSuggestions(),
         GroupService.getMyGroups(),
         GroupService.getDiscoverGroups(),
@@ -132,26 +135,30 @@ class _SocialScreenState extends State<SocialScreen>
 
       final conversations = results[0] as List<ConversationModel>;
       final friendsPayload = results[1] as Map<String, dynamic>;
-      final requests = _toMapList(results[2]);
+      final requestsOverview = results[2] as Map<String, dynamic>;
       final suggestions = _toMapList(results[3]);
       final myGroups = results[4] as List<GroupModel>;
       final discoverGroups = results[5] as List<GroupModel>;
       final leaderboard = results[6] as List<GroupModel>;
       final onlineFriends = _toMapList(friendsPayload['online']);
       final offlineFriends = _toMapList(friendsPayload['offline']);
+      final incomingRequests = _toMapList(requestsOverview['incoming']);
+      final outgoingRequests = _toMapList(requestsOverview['outgoing']);
 
       _syncGroupSockets(myGroups);
 
       _safeSetState(() {
         _conversations = conversations;
         _friends = [...onlineFriends, ...offlineFriends];
-        _friendRequests = requests;
+        _friendRequests = incomingRequests;
+        _sentFriendRequests = outgoingRequests;
         _suggestions = suggestions;
         _myGroups = myGroups;
         _discoverGroups = discoverGroups;
         _leaderboard = leaderboard;
         _isLoading = false;
       });
+      _syncPendingRequestCount(incomingRequests.length);
     } catch (_) {
       _safeSetState(() {
         _isLoading = false;
@@ -171,7 +178,7 @@ class _SocialScreenState extends State<SocialScreen>
   Future<void> _refreshFriends() async {
     final results = await Future.wait<dynamic>([
       FriendService.getFriends(),
-      FriendService.getFriendRequests(),
+      FriendService.getFriendRequestOverview(),
       FriendService.getFriendSuggestions(),
     ]);
 
@@ -180,18 +187,18 @@ class _SocialScreenState extends State<SocialScreen>
     final friendsPayload = results[0] as Map<String, dynamic>;
     final onlineFriends = _toMapList(friendsPayload['online']);
     final offlineFriends = _toMapList(friendsPayload['offline']);
-    final requests = _toMapList(results[1]);
+    final requestsOverview = results[1] as Map<String, dynamic>;
     final suggestions = _toMapList(results[2]);
+    final incomingRequests = _toMapList(requestsOverview['incoming']);
+    final outgoingRequests = _toMapList(requestsOverview['outgoing']);
 
     _safeSetState(() {
       _friends = [...onlineFriends, ...offlineFriends];
-      _friendRequests = requests;
+      _friendRequests = incomingRequests;
+      _sentFriendRequests = outgoingRequests;
       _suggestions = suggestions;
     });
-
-    if (_tabController.index == 1) {
-      context.read<AuthProvider>().clearPendingFriendRequests();
-    }
+    _syncPendingRequestCount(incomingRequests.length);
   }
 
   Future<void> _refreshGroups() async {
@@ -258,7 +265,11 @@ class _SocialScreenState extends State<SocialScreen>
 
     if (index == -1) {
       _scheduleMessageRefresh();
-      _markLive('New direct message');
+      _announceLiveEvent(
+        title: 'New direct message',
+        detail: 'A fresh chat just landed in your inbox.',
+        color: const Color(0xFF6366F1),
+      );
       return;
     }
 
@@ -278,7 +289,11 @@ class _SocialScreenState extends State<SocialScreen>
       _conversations = updated;
     });
 
-    _markLive('New direct message');
+    _announceLiveEvent(
+      title: 'New direct message',
+      detail: 'Your inbox updated in realtime.',
+      color: const Color(0xFF6366F1),
+    );
   }
 
   void _handleFriendEvent(Map<String, dynamic> event) {
@@ -290,19 +305,30 @@ class _SocialScreenState extends State<SocialScreen>
         if (userId != null) {
           _patchPresence(userId, true);
         }
-        _markLive('A friend came online');
+        unawaited(NotificationSoundService.playFriendOnline());
+        _announceLiveEvent(
+          title: '${event['username'] ?? 'A friend'} is online',
+          detail: 'Open Circle to chat while they are active.',
+          color: const Color(0xFF10B981),
+        );
         break;
       case 'friend_offline':
         if (userId != null) {
           _patchPresence(userId, false);
         }
-        _markLive('Friend presence updated');
+        _announceLiveEvent(
+          title: 'Friend presence updated',
+          detail: '${event['username'] ?? 'Someone'} stepped away.',
+          color: const Color(0xFF64748B),
+        );
         break;
       case 'friend_request_received':
         final fromUser = event['from'];
         if (fromUser is Map) {
           final request = <String, dynamic>{
-            'from': Map<String, dynamic>.from(fromUser)
+            'direction': 'incoming',
+            'sentAt': event['sentAt'],
+            'from': Map<String, dynamic>.from(fromUser),
           };
           final fromId = request['from']?['_id']?.toString();
           _safeSetState(() {
@@ -316,11 +342,84 @@ class _SocialScreenState extends State<SocialScreen>
         } else {
           _scheduleFriendRefresh();
         }
-        _markLive('New friend request');
+        unawaited(NotificationSoundService.playFriendRequest());
+        _announceLiveEvent(
+          title:
+              '${(fromUser is Map ? fromUser['username'] : null) ?? 'New friend'} sent a request',
+          detail: 'It now appears in your received requests list.',
+          color: const Color(0xFFF59E0B),
+        );
+        break;
+      case 'friend_request_sent':
+        final sentUser = event['user'];
+        if (sentUser is Map) {
+          final sentRequest = <String, dynamic>{
+            'direction': 'outgoing',
+            'sentAt': event['sentAt'],
+            'user': Map<String, dynamic>.from(sentUser),
+          };
+          final targetId = sentRequest['user']?['_id']?.toString();
+          _safeSetState(() {
+            if (targetId != null &&
+                !_sentFriendRequests.any(
+                  (item) => item['user']?['_id']?.toString() == targetId,
+                )) {
+              _sentFriendRequests = [sentRequest, ..._sentFriendRequests];
+            }
+          });
+        } else {
+          _scheduleFriendRefresh();
+        }
+        _announceLiveEvent(
+          title: 'Request synced',
+          detail:
+              'Your sent request updated across devices and now shows under sent requests.',
+          color: const Color(0xFF2563EB),
+        );
+        break;
+      case 'friend_request_accepted':
+        _removeRequestForUser(
+          _peerUserId(event),
+          removeIncoming: false,
+          removeOutgoing: true,
+        );
+        _scheduleFriendRefresh();
+        unawaited(NotificationSoundService.playFriendUpdate());
+        _announceLiveEvent(
+          title: 'Friend request accepted',
+          detail:
+              '${_peerUsername(event) ?? 'Your request'} turned into a new friend.',
+          color: const Color(0xFF10B981),
+        );
+        break;
+      case 'friend_request_rejected':
+        _removeRequestForUser(
+          _peerUserId(event) ?? userId,
+          removeIncoming: true,
+          removeOutgoing: true,
+        );
+        _announceLiveEvent(
+          title: 'Request updated',
+          detail:
+              '${_peerUsername(event) ?? 'A request'} was declined or cleared.',
+          color: const Color(0xFFF97316),
+        );
+        break;
+      case 'friend_removed':
+        _scheduleFriendRefresh();
+        _announceLiveEvent(
+          title: 'Circle updated',
+          detail: 'Your friends list changed on another device.',
+          color: const Color(0xFF64748B),
+        );
         break;
       default:
         _scheduleFriendRefresh();
-        _markLive('Friend activity updated');
+        _announceLiveEvent(
+          title: 'Friend activity updated',
+          detail: 'Circle refreshed with the latest request and presence data.',
+          color: const Color(0xFF475569),
+        );
         break;
     }
   }
@@ -341,7 +440,11 @@ class _SocialScreenState extends State<SocialScreen>
       _groupActivityCounts[groupId] = (_groupActivityCounts[groupId] ?? 0) + 1;
     });
 
-    _markLive('New group message');
+    _announceLiveEvent(
+      title: 'New group message',
+      detail: 'Group activity just moved to the front.',
+      color: const Color(0xFF8B5CF6),
+    );
   }
 
   void _patchPresence(String userId, bool isOnline) {
@@ -430,8 +533,59 @@ class _SocialScreenState extends State<SocialScreen>
       ..addAll(nextIds);
   }
 
-  void _markLive(String label) {
-    // Intentionally left minimal after removing the hero status card.
+  void _announceLiveEvent({
+    required String title,
+    required String detail,
+    required Color color,
+  }) {}
+
+  void _syncPendingRequestCount([int? count]) {
+    if (!mounted) return;
+    context
+        .read<AuthProvider>()
+        .syncPendingFriendRequests(count ?? _friendRequests.length);
+  }
+
+  void _removeRequestForUser(
+    String? userId, {
+    required bool removeIncoming,
+    required bool removeOutgoing,
+  }) {
+    if (userId == null || userId.isEmpty) return;
+
+    _safeSetState(() {
+      if (removeIncoming) {
+        _friendRequests = _friendRequests
+            .where(
+              (item) => item['from']?['_id']?.toString() != userId,
+            )
+            .toList();
+      }
+      if (removeOutgoing) {
+        _sentFriendRequests = _sentFriendRequests
+            .where(
+              (item) => item['user']?['_id']?.toString() != userId,
+            )
+            .toList();
+      }
+    });
+    _syncPendingRequestCount();
+  }
+
+  String? _peerUserId(Map<String, dynamic> event) {
+    final user = event['user'];
+    if (user is Map) {
+      return user['_id']?.toString() ?? user['id']?.toString();
+    }
+    return event['userId']?.toString();
+  }
+
+  String? _peerUsername(Map<String, dynamic> event) {
+    final user = event['user'];
+    if (user is Map && user['username'] != null) {
+      return user['username']?.toString();
+    }
+    return event['username']?.toString();
   }
 
   Future<void> _openConversation({
@@ -457,19 +611,21 @@ class _SocialScreenState extends State<SocialScreen>
   }
 
   Future<void> _handleJoinGroup(GroupModel group) async {
-    final success = await GroupService.joinGroup(group.id);
+    final response = await GroupService.joinGroup(group.id);
     if (!mounted) return;
 
-    if (success) {
-      await _refreshGroups();
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Joined ${group.name}'),
-          backgroundColor: const Color(0xFF10B981),
+    await _refreshGroups();
+    if (!mounted) return;
+    final requested = response['pendingApproval'] == true;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          requested ? 'Request sent to ${group.name}' : 'Joined ${group.name}',
         ),
-      );
-    }
+        backgroundColor:
+            requested ? const Color(0xFFF59E0B) : const Color(0xFF10B981),
+      ),
+    );
   }
 
   Future<void> _handleLeaveGroup(GroupModel group) async {
@@ -604,9 +760,10 @@ class _SocialScreenState extends State<SocialScreen>
     final authPendingRequests = context.select<AuthProvider, int>(
       (auth) => auth.pendingFriendRequests,
     );
-    final pendingRequests = _friendRequests.length > authPendingRequests
-        ? _friendRequests.length
-        : authPendingRequests;
+    final pendingRequests = (_friendRequests.length > authPendingRequests
+            ? _friendRequests.length
+            : authPendingRequests) +
+        _sentFriendRequests.length;
     final theme = Theme.of(context);
     final mood = context.mood;
 
@@ -620,7 +777,7 @@ class _SocialScreenState extends State<SocialScreen>
               child: _buildErrorCard(),
             ),
           Padding(
-            padding: const EdgeInsets.fromLTRB(20, 16, 20, 0),
+            padding: const EdgeInsets.fromLTRB(20, 18, 20, 0),
             child: Container(
               padding: const EdgeInsets.all(4),
               decoration: BoxDecoration(
@@ -775,83 +932,7 @@ class _SocialScreenState extends State<SocialScreen>
   }
 
   Widget _buildGroupsTab() {
-    return RefreshIndicator(
-      color: AppColors.primaryBlue,
-      onRefresh: _refreshGroups,
-      child: ListView(
-        physics: const AlwaysScrollableScrollPhysics(),
-        padding: const EdgeInsets.fromLTRB(20, 18, 20, 120),
-        children: [
-          _SectionHeader(
-            title: 'Groups',
-            subtitle: _myGroups.isEmpty
-                ? 'Create or join a crew'
-                : '${_myGroups.length} group${_myGroups.length == 1 ? '' : 's'} in your orbit',
-            actionLabel: 'Create',
-            onAction: _showCreateGroupDialog,
-          ),
-          const SizedBox(height: 12),
-          if (_myGroups.isEmpty)
-            _buildEmptyCard(
-              icon: Icons.group_work_outlined,
-              title: 'No groups yet',
-              subtitle:
-                  'Start a private circle for your people or join one and group messages will update here live.',
-              actionLabel: 'Create group',
-              onAction: _showCreateGroupDialog,
-            )
-          else
-            SizedBox(
-              height: 208,
-              child: ListView.separated(
-                scrollDirection: Axis.horizontal,
-                itemCount: _myGroups.length,
-                separatorBuilder: (_, __) => const SizedBox(width: 12),
-                itemBuilder: (context, index) =>
-                    _buildMyGroupCard(_myGroups[index]),
-              ),
-            ),
-          const SizedBox(height: 20),
-          _SectionHeader(
-            title: 'Discover',
-            subtitle: _discoverGroups.isEmpty
-                ? 'No new groups to discover'
-                : 'Find new circles to join',
-          ),
-          const SizedBox(height: 12),
-          if (_discoverGroups.isEmpty)
-            _buildMiniEmptyCard(
-              'Fresh public groups will appear here when they become available.',
-            )
-          else
-            ..._discoverGroups.take(8).map(
-                  (group) => Padding(
-                    padding: const EdgeInsets.only(bottom: 12),
-                    child: _buildDiscoverGroupTile(group),
-                  ),
-                ),
-          const SizedBox(height: 20),
-          _SectionHeader(
-            title: 'Leaderboard',
-            subtitle: 'Top active circles right now',
-            actionLabel: 'Refresh',
-            onAction: _refreshGroups,
-          ),
-          const SizedBox(height: 12),
-          if (_leaderboard.isEmpty)
-            _buildMiniEmptyCard(
-              'Leaderboard data is not available yet.',
-            )
-          else
-            ..._leaderboard.take(5).toList().asMap().entries.map(
-                  (entry) => Padding(
-                    padding: const EdgeInsets.only(bottom: 12),
-                    child: _buildLeaderboardTile(entry.key + 1, entry.value),
-                  ),
-                ),
-        ],
-      ),
-    );
+    return const GroupsScreen(embedded: true);
   }
 
   Widget _buildConversationCard(
@@ -945,8 +1026,8 @@ class _SocialScreenState extends State<SocialScreen>
                   const SizedBox(height: 6),
                   Text(
                     isFromMe
-                        ? 'You: ${conversation.lastMessage.content}'
-                        : conversation.lastMessage.content,
+                        ? 'You: ${conversation.lastMessage.previewText}'
+                        : conversation.lastMessage.previewText,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(

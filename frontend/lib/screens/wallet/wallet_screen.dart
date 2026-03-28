@@ -1,10 +1,15 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../../providers/auth_provider.dart';
+import '../../services/socket_service.dart';
 import '../../services/wallet_service.dart';
 import '../../utils/constants.dart';
+import '../../widgets/currency_icon.dart';
 import '../../widgets/rounded_scaffold.dart';
+import '../../widgets/transaction_history_icon.dart';
 import 'shop_screen.dart';
 import 'transactions_screen.dart';
 
@@ -20,17 +25,41 @@ class _WalletScreenState extends State<WalletScreen> {
   bool _disposed = false;
   Map<String, dynamic> _meta = const {'tickets': 0, 'stars': 0, 'vipLevel': 0};
   List<Map<String, dynamic>> _recent = const [];
+  StreamSubscription<Map<String, dynamic>>? _walletUpdateSubscription;
+  StreamSubscription<Map<String, dynamic>>? _walletResyncSubscription;
+  Timer? _realtimeDebounce;
 
   @override
   void initState() {
     super.initState();
-    _loadWallet();
+    _subscribeToRealtime();
+    unawaited(_loadWallet());
   }
 
   @override
   void dispose() {
     _disposed = true;
+    _realtimeDebounce?.cancel();
+    _walletUpdateSubscription?.cancel();
+    _walletResyncSubscription?.cancel();
     super.dispose();
+  }
+
+  void _subscribeToRealtime() {
+    _walletUpdateSubscription = SocketService.balanceStream.listen((_) {
+      _scheduleRealtimeRefresh();
+    });
+    _walletResyncSubscription = SocketService.resyncStream.listen((_) {
+      _scheduleRealtimeRefresh();
+    });
+  }
+
+  void _scheduleRealtimeRefresh() {
+    _realtimeDebounce?.cancel();
+    _realtimeDebounce = Timer(const Duration(milliseconds: 350), () {
+      if (_disposed || !mounted) return;
+      unawaited(_loadWallet(showLoader: false));
+    });
   }
 
   Future<void> _loadWallet({bool showLoader = true}) async {
@@ -108,7 +137,7 @@ class _WalletScreenState extends State<WalletScreen> {
           decoration: const InputDecoration(
             labelText: 'Coins',
             hintText: '100 coins = 1 gem',
-            prefixIcon: Icon(Icons.monetization_on_rounded),
+            prefixIcon: CurrencyIcon.coins(size: 20),
           ),
         ),
         actions: [
@@ -182,13 +211,11 @@ class _WalletScreenState extends State<WalletScreen> {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(Icons.monetization_on_rounded,
-                  size: 15, color: Colors.amber),
+              const CurrencyIcon.coins(size: 16),
               const SizedBox(width: 4),
               Text('$coins', style: theme.textTheme.labelLarge),
               const SizedBox(width: 10),
-              const Icon(Icons.diamond_rounded,
-                  size: 15, color: Color(0xFF8B5CF6)),
+              const CurrencyIcon.gems(size: 16),
               const SizedBox(width: 4),
               Text('$gems', style: theme.textTheme.labelLarge),
             ],
@@ -288,23 +315,30 @@ class _WalletScreenState extends State<WalletScreen> {
                       Expanded(
                           child: _actionCard(
                               context,
-                              Icons.monetization_on_rounded,
+                              const CurrencyIcon.coins(size: 24),
                               'Buy coins',
                               'Top up',
                               () => _openShop(0))),
                       const SizedBox(width: 12),
                       Expanded(
-                          child: _actionCard(context, Icons.diamond_rounded,
-                              'Buy gems', 'Premium items', () => _openShop(1))),
+                          child: _actionCard(
+                              context,
+                              const CurrencyIcon.gems(size: 24),
+                              'Buy gems',
+                              'Premium items',
+                              () => _openShop(1))),
                       const SizedBox(width: 12),
                       Expanded(
-                          child: _actionCard(context, Icons.history_rounded,
-                              'History', 'Transactions', () {
+                          child: _actionCard(
+                              context,
+                              const TransactionHistoryIcon(size: 30),
+                              'History',
+                              'Transactions', () {
                         Navigator.push(
                             context,
                             MaterialPageRoute(
                                 builder: (_) => const TransactionsScreen()));
-                      })),
+                      }, iconBoxSize: 30)),
                     ],
                   ),
                   const SizedBox(height: 24),
@@ -394,8 +428,14 @@ class _WalletScreenState extends State<WalletScreen> {
     );
   }
 
-  Widget _actionCard(BuildContext context, IconData icon, String title,
-      String subtitle, VoidCallback onTap) {
+  Widget _actionCard(
+    BuildContext context,
+    Widget icon,
+    String title,
+    String subtitle,
+    VoidCallback onTap, {
+    double iconBoxSize = 24,
+  }) {
     final colorScheme = Theme.of(context).colorScheme;
     return InkWell(
       onTap: onTap,
@@ -411,7 +451,16 @@ class _WalletScreenState extends State<WalletScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Icon(icon, color: colorScheme.primary),
+            SizedBox(
+              width: iconBoxSize,
+              height: iconBoxSize,
+              child: Center(
+                child: IconTheme(
+                  data: IconThemeData(color: colorScheme.primary, size: 24),
+                  child: icon,
+                ),
+              ),
+            ),
             const SizedBox(height: 12),
             Text(title,
                 style: Theme.of(context)

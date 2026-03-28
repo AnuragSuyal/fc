@@ -12,6 +12,8 @@ import '../../utils/haptics_util.dart';
 import '../../utils/room_permissions.dart';
 import '../../utils/room_presets.dart';
 import '../../services/socket_service.dart';
+import '../../widgets/app_search_icon.dart';
+import '../../widgets/currency_icon.dart';
 import '../../widgets/gifting/gift_bottom_sheet.dart';
 import '../../widgets/gifting/gift_animation_overlay.dart';
 import '../../widgets/user_avatar.dart';
@@ -19,22 +21,25 @@ import '../../widgets/rooms/room_info_bottom_sheet.dart';
 import '../../widgets/rooms/room_members_bottom_sheet.dart';
 import 'room_settings_screen.dart';
 import '../../widgets/rooms/room_control_bottom_sheet.dart';
+import '../../widgets/rooms/room_feature_bottom_sheet.dart';
+import '../../widgets/rooms/room_feature_overlay.dart';
+import '../../widgets/rooms/invite_friends_bottom_sheet.dart';
 import '../../widgets/rooms/user_profile_bottom_sheet.dart';
 import 'package:flutter/services.dart';
 import '../../widgets/rooms/reaction_quick_panel.dart';
 import '../../widgets/rooms/reaction_animation_overlay.dart';
 // import '../../widgets/rooms/seat_reaction_overlay.dart'; // No longer needed locally
-import '../../widgets/rooms/invite_friends_bottom_sheet.dart';
 import '../../widgets/rooms/gift_sound_bottom_sheet.dart';
 import '../../services/voice_service.dart';
 import '../../services/message_service.dart';
 import '../../services/upload_service.dart';
+import '../messages/chat_screen.dart';
 import '../profile/enhanced_profile_screen.dart';
 import 'package:emoji_picker_flutter/emoji_picker_flutter.dart' as ep;
 import 'package:file_picker/file_picker.dart';
-import 'package:just_audio/just_audio.dart';
-import 'package:youtube_player_flutter/youtube_player_flutter.dart';
+import 'package:just_audio/just_audio.dart' hide PlayerState;
 import 'package:youtube_explode_dart/youtube_explode_dart.dart' as yt;
+import 'package:youtube_player_iframe/youtube_player_iframe.dart' as ypi;
 
 class RoomDetailScreen extends StatefulWidget {
   final RoomModel room;
@@ -52,7 +57,8 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
   bool _isExiting = false;
   bool _hasJoinedSocketRoom = false;
   bool _isVoiceConnected = false;
-  String? _errorMessage;
+  bool _isConnectingVoice = false;
+  String? _roomErrorMessage;
   final TextEditingController _passwordController = TextEditingController();
   final TextEditingController _messageController = TextEditingController();
   final List<Map<String, dynamic>> _chatMessages = [];
@@ -62,6 +68,7 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
   StreamSubscription? _messageSubscription;
   StreamSubscription? _updateSubscription;
   StreamSubscription? _voiceSubscription;
+  StreamSubscription? _roomFeatureSubscription;
   StreamSubscription? _resyncSubscription;
   bool _isMuted = true;
   bool _isSpeakerOn = true;
@@ -69,16 +76,37 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
   Timer? _heartbeatTimer;
   Timer? _roomRefreshTimer;
   DateTime? _lastReactionTime;
-  YoutubePlayerController? _youtubeController;
+  ypi.YoutubePlayerController? _youtubeController;
+  StreamSubscription<ypi.YoutubePlayerValue>? _youtubeValueSubscription;
+  StreamSubscription<ypi.YoutubeVideoState>? _youtubeVideoStateSubscription;
   final AudioPlayer _roomAudioPlayer = AudioPlayer();
   final yt.YoutubeExplode _youtubeExplode = yt.YoutubeExplode();
-  final Set<YoutubePlayerController> _pendingYoutubeDisposals = {};
+  final Set<ypi.YoutubePlayerController> _pendingYoutubeDisposals = {};
+  ypi.YoutubePlayerValue _youtubePlayerValue = ypi.YoutubePlayerValue();
+  ypi.YoutubeVideoState _youtubeVideoState = const ypi.YoutubeVideoState();
   String? _activeYoutubeId;
   String? _activeAudioUrl;
+  Timer? _youtubeSyncDebounceTimer;
+  Timer? _youtubePlaybackRecoveryTimer;
+  String? _lastObservedYoutubePlaybackState;
+  int? _lastObservedYoutubePositionMs;
+  DateTime? _lastObservedYoutubeAt;
+  bool _isApplyingYoutubeRemoteSync = false;
+  bool _isSendingYoutubeSync = false;
+  Map<String, dynamic>? _pendingYoutubeSyncPayload;
+  DateTime? _pauseYoutubeLocalSyncUntil;
   bool _showQuickReactions = false;
   bool _isRefreshingRoom = false;
   bool _hasPendingRoomRefresh = false;
   bool _hasAttemptedAutoJoin = false;
+  bool _showYoutubePlaybackRecovery = false;
+  bool _isRecoveringYoutubeError = false;
+  int _youtubeErrorRecoveryAttempts = 0;
+  String? _youtubeErrorRecoveryVideoId;
+  Timer? _youtubeErrorRecoveryTimer;
+  bool _isAdvancingYoutubeQueue = false;
+  double _youtubeLocalVolume = 1.0;
+  bool _youtubeMutedLocally = false;
   Timer? _quickReactionTrayTimer;
   final List<String> _gamePrompts = const [
     'Two truths and a lie',
@@ -102,6 +130,7 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
       !_room.banPhotoChat || _canBypassChatRestrictions;
   bool get _canOpenChatComposer => _canSendTextMessages || _canShareRoomImages;
   bool get _canUseRoomGifts => _permissions.canUseRoomGifts;
+  bool get _canControlRoomStream => _permissions.canManageRoomMedia;
 
   // Global Keys for mapping seat positions to global overlay
   final Map<int, GlobalKey> _seatKeyMap = {
@@ -119,6 +148,8 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
     _updateSubscription =
         SocketService.roomUpdateStream.listen(_handleRoomUpdate);
     _voiceSubscription = SocketService.voiceStream.listen(_handleVoiceEvent);
+    _roomFeatureSubscription =
+        SocketService.roomFeatureStream.listen(_handleRoomFeatureEvent);
     _resyncSubscription = SocketService.resyncStream.listen((_) {
       if (!mounted) return;
       _scheduleRoomRefresh(delay: const Duration(milliseconds: 220));
@@ -153,20 +184,27 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
 
   void _syncMediaController(RoomModel room) {
     final videoUrl = room.type == 'video' ? room.youtubeUrl : null;
-    final videoId =
-        videoUrl == null ? null : YoutubePlayer.convertUrlToId(videoUrl);
+    final videoId = _extractYoutubeVideoId(videoUrl);
     final normalizedAudioUrl =
         _normalizeRoomMediaUrl(room.type == 'music' ? room.musicUrl : null);
 
     if (videoId == null || videoId.isEmpty) {
+      _youtubeValueSubscription?.cancel();
+      _youtubeVideoStateSubscription?.cancel();
+      _queueYoutubeControllerDispose(_youtubeController);
+      _youtubeController = null;
+      _youtubePlayerValue = ypi.YoutubePlayerValue();
+      _youtubeVideoState = const ypi.YoutubeVideoState();
       _activeYoutubeId = null;
-      _runYoutubeControllerAction((controller) => controller.pause());
+      _resetYoutubeErrorRecoveryState();
+      _setYoutubePlaybackRecoveryVisible(false);
     } else if (_youtubeController == null || _activeYoutubeId != videoId) {
       _replaceYoutubeController(videoId);
       return;
     } else if (room.type == 'video') {
-      _runYoutubeControllerAction((controller) => controller.play());
-      _applyYoutubeAudioDefaults();
+      _applySharedYoutubeSync(room, force: true);
+      _applyYoutubeLocalAudioPreference();
+      _scheduleYoutubePlaybackRecoveryCheck();
     }
 
     final isLocalAudio = _isDirectAudioUrl(normalizedAudioUrl);
@@ -193,43 +231,793 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
 
   void _replaceYoutubeController(String videoId) {
     final previous = _youtubeController;
-    final controller = YoutubePlayerController(
-      initialVideoId: videoId,
-      flags: YoutubePlayerFlags(
-        autoPlay: true,
+    _youtubeValueSubscription?.cancel();
+    _youtubeVideoStateSubscription?.cancel();
+
+    final controller = ypi.YoutubePlayerController(
+      params: ypi.YoutubePlayerParams(
         mute: false,
-        disableDragSeek: false,
-        loop: false,
-        isLive: false,
-        forceHD: false,
+        showControls: _canControlRoomStream,
+        showFullscreenButton: _canControlRoomStream,
         enableCaption: false,
+        strictRelatedVideos: true,
+        pointerEvents: ypi.PointerEvents.auto,
       ),
+      onWebResourceError: (error) {
+        debugPrint('YouTube web resource error: ${error.description}');
+        _scheduleYoutubeErrorRecovery();
+        _setYoutubePlaybackRecoveryVisible(true);
+      },
     );
+
+    if (_activeYoutubeId != videoId) {
+      _resetYoutubeErrorRecoveryState();
+    }
+    _youtubePlayerValue = ypi.YoutubePlayerValue();
+    _youtubeVideoState = const ypi.YoutubeVideoState();
+    _youtubeValueSubscription = controller.listen(
+      _handleYoutubeValueChanged,
+      onError: (error) => debugPrint('YouTube value listen error: $error'),
+    );
+    _youtubeVideoStateSubscription = controller.videoStateStream.listen(
+      _handleYoutubeVideoStateChanged,
+      onError: (error) =>
+          debugPrint('YouTube video state listen error: $error'),
+    );
+
+    final startSeconds = _effectiveYoutubePositionMs(_room) / 1000;
+    if (_room.youtubePlaybackState == 'paused' && !_canControlRoomStream) {
+      unawaited(
+        controller.cueVideoById(videoId: videoId, startSeconds: startSeconds),
+      );
+    } else {
+      unawaited(
+        controller.loadVideoById(videoId: videoId, startSeconds: startSeconds),
+      );
+    }
 
     _youtubeController = controller;
     _activeYoutubeId = videoId;
+    _showYoutubePlaybackRecovery = false;
+    _pauseYoutubeLocalSyncFor(const Duration(milliseconds: 1400));
+    _lastObservedYoutubePlaybackState = null;
+    _lastObservedYoutubePositionMs = null;
+    _lastObservedYoutubeAt = null;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || _activeYoutubeId != videoId) return;
-      _applyYoutubeAudioDefaults();
+      _applyYoutubeLocalAudioPreference();
+      _applySharedYoutubeSync(_room, force: true);
+      _scheduleYoutubePlaybackRecoveryCheck();
     });
+    if (mounted) {
+      setState(() {});
+    }
     _queueYoutubeControllerDispose(previous);
   }
 
-  void _applyYoutubeAudioDefaults() {
+  void _applyYoutubeLocalAudioPreference() {
     final controller = _youtubeController;
     if (controller == null) return;
 
+    unawaited(_setYoutubeLocalAudioPreference(controller));
+  }
+
+  void _handleYoutubePlayerReady() {
+    _resetYoutubeErrorRecoveryState();
+    _applyYoutubeLocalAudioPreference();
+    _applySharedYoutubeSync(_room, force: true);
+    _scheduleYoutubePlaybackRecoveryCheck();
+  }
+
+  void _pauseYoutubeLocalSyncFor(Duration duration) {
+    _pauseYoutubeLocalSyncUntil = DateTime.now().add(duration);
+  }
+
+  String? _mapYoutubePlaybackState(ypi.PlayerState state) {
+    switch (state) {
+      case ypi.PlayerState.playing:
+        return 'playing';
+      case ypi.PlayerState.paused:
+      case ypi.PlayerState.cued:
+      case ypi.PlayerState.ended:
+        return 'paused';
+      case ypi.PlayerState.unStarted:
+      case ypi.PlayerState.buffering:
+      case ypi.PlayerState.unknown:
+        return null;
+    }
+  }
+
+  String? _extractYoutubeVideoId(String? url) {
+    if (url == null || url.isEmpty) return null;
+    return ypi.YoutubePlayerController.convertUrlToId(url);
+  }
+
+  String get _youtubeDisplayTitle {
+    final liveTitle = _youtubePlayerValue.metaData.title.trim();
+    if (liveTitle.isNotEmpty) {
+      return liveTitle;
+    }
+
+    final roomTitle = _room.youtubeTitle?.trim();
+    if (roomTitle != null && roomTitle.isNotEmpty) {
+      return roomTitle;
+    }
+
+    return _room.name;
+  }
+
+  String _normalizeUiErrorMessage(
+    Object error, {
+    bool forVoice = false,
+  }) {
+    final raw = error.toString().replaceFirst('Exception: ', '').trim();
+    if (raw.isEmpty) {
+      return forVoice
+          ? 'Voice is unavailable right now. Please try again.'
+          : 'Something went wrong. Please try again.';
+    }
+
+    final normalized = raw.toLowerCase();
+    if (normalized.contains('microphone permission denied')) {
+      return 'Microphone permission is needed to use voice.';
+    }
+    if (normalized.contains('/rtc/validate') ||
+        normalized.contains('failed to fetch') ||
+        normalized.contains('clientfailed')) {
+      return forVoice
+          ? 'Voice server is not reachable on this device right now.'
+          : 'The room could not connect right now. Please try again.';
+    }
+    if (normalized.contains('timeout') || normalized.contains('timed out')) {
+      return 'The connection timed out. Please try again.';
+    }
+    if (normalized.contains('socketexception') ||
+        normalized.contains('network error')) {
+      return 'Network connection failed. Please try again.';
+    }
+
+    final lines = raw
+        .split(RegExp(r'[\r\n]+'))
+        .map((line) => line.trim())
+        .where((line) => line.isNotEmpty)
+        .toList();
+    final singleLine = lines.isNotEmpty ? lines.first : raw;
+    if (singleLine.length > 140) {
+      return '${singleLine.substring(0, 137)}...';
+    }
+    return singleLine;
+  }
+
+  int _effectiveYoutubePositionMs(RoomModel room) {
+    var positionMs = room.youtubePositionMs;
+    if (room.isYoutubePlaying && room.youtubeSyncedAt != null) {
+      positionMs +=
+          DateTime.now().difference(room.youtubeSyncedAt!).inMilliseconds;
+    }
+
+    return positionMs < 0 ? 0 : positionMs;
+  }
+
+  void _applySharedYoutubeSync(RoomModel room, {bool force = false}) {
+    if (_canControlRoomStream && !force) {
+      return;
+    }
+
+    if (room.type != 'video' || room.youtubeUrl?.isNotEmpty != true) {
+      return;
+    }
+
+    final controller = _youtubeController;
+    if (controller == null) return;
+
+    if (_youtubePlayerValue.hasError) {
+      return;
+    }
+
+    final targetPlaybackState = room.youtubePlaybackState;
+    final targetPositionMs = _effectiveYoutubePositionMs(room);
+    final currentPositionMs = _youtubeVideoState.position.inMilliseconds;
+    final localPlaybackState =
+        _mapYoutubePlaybackState(_youtubePlayerValue.playerState);
+    final needsSeek =
+        force || (currentPositionMs - targetPositionMs).abs() > 1400;
+    final needsPause =
+        targetPlaybackState == 'paused' && localPlaybackState == 'playing';
+    final needsPlay =
+        targetPlaybackState == 'playing' && localPlaybackState != 'playing';
+
+    if (!needsSeek && !needsPause && !needsPlay) {
+      return;
+    }
+
+    _isApplyingYoutubeRemoteSync = true;
+    _pauseYoutubeLocalSyncFor(const Duration(milliseconds: 1400));
+
+    unawaited(() async {
+      try {
+        if (needsSeek) {
+          await controller.seekTo(
+            seconds: targetPositionMs / 1000,
+            allowSeekAhead: true,
+          );
+        }
+
+        if (targetPlaybackState == 'playing') {
+          await controller.playVideo();
+        } else {
+          await controller.pauseVideo();
+        }
+
+        await _setYoutubeLocalAudioPreference(controller);
+        _lastObservedYoutubePlaybackState = targetPlaybackState;
+        _lastObservedYoutubePositionMs = targetPositionMs;
+        _lastObservedYoutubeAt = DateTime.now();
+        _scheduleYoutubePlaybackRecoveryCheck();
+      } catch (error) {
+        debugPrint('YouTube sync apply skipped: $error');
+      } finally {
+        await Future<void>.delayed(const Duration(milliseconds: 900));
+        _isApplyingYoutubeRemoteSync = false;
+      }
+    }());
+  }
+
+  void _handleYoutubeValueChanged(ypi.YoutubePlayerValue value) {
+    final previousValue = _youtubePlayerValue;
+    _youtubePlayerValue = value;
+
+    final becameReady = previousValue.playerState == ypi.PlayerState.unknown &&
+        value.playerState != ypi.PlayerState.unknown;
+    if (becameReady) {
+      _handleYoutubePlayerReady();
+    }
+
+    if (value.playerState == ypi.PlayerState.playing) {
+      _resetYoutubeErrorRecoveryState();
+      _setYoutubePlaybackRecoveryVisible(false);
+    } else if (value.playerState == ypi.PlayerState.ended) {
+      unawaited(_handleYoutubeVideoEnded());
+    } else if (!value.hasError) {
+      _scheduleYoutubePlaybackRecoveryCheck();
+    }
+
+    if (value.hasError) {
+      _scheduleYoutubeErrorRecovery();
+    }
+
+    if (_canControlRoomStream &&
+        previousValue.playerState != value.playerState) {
+      _handleYoutubeControllerChanged();
+    }
+
+    final shouldRebuild = previousValue.playerState != value.playerState ||
+        previousValue.error != value.error ||
+        previousValue.metaData.title != value.metaData.title ||
+        previousValue.metaData.videoId != value.metaData.videoId;
+    if (shouldRebuild && mounted) {
+      setState(() {});
+    }
+  }
+
+  void _handleYoutubeVideoStateChanged(ypi.YoutubeVideoState videoState) {
+    _youtubeVideoState = videoState;
+    if (_canControlRoomStream) {
+      _handleYoutubeControllerChanged();
+    }
+  }
+
+  void _setYoutubePlaybackRecoveryVisible(bool visible) {
+    _youtubePlaybackRecoveryTimer?.cancel();
+    if (_showYoutubePlaybackRecovery == visible) {
+      return;
+    }
+
+    if (!mounted) {
+      _showYoutubePlaybackRecovery = visible;
+      return;
+    }
+
+    setState(() {
+      _showYoutubePlaybackRecovery = visible;
+    });
+  }
+
+  void _scheduleYoutubePlaybackRecoveryCheck() {
+    _youtubePlaybackRecoveryTimer?.cancel();
+
+    final shouldCheck = _room.type == 'video' &&
+        _activeYoutubeId != null &&
+        !_youtubePlayerValue.hasError &&
+        _room.youtubePlaybackState == 'playing' &&
+        _youtubePlayerValue.playerState != ypi.PlayerState.playing;
+    if (!shouldCheck) {
+      _setYoutubePlaybackRecoveryVisible(false);
+      return;
+    }
+
+    _youtubePlaybackRecoveryTimer = Timer(
+      const Duration(seconds: 2),
+      () => _setYoutubePlaybackRecoveryVisible(
+        _room.type == 'video' &&
+            _activeYoutubeId != null &&
+            !_youtubePlayerValue.hasError &&
+            _room.youtubePlaybackState == 'playing' &&
+            _youtubePlayerValue.playerState != ypi.PlayerState.playing,
+      ),
+    );
+  }
+
+  void _resetYoutubeErrorRecoveryState() {
+    _youtubeErrorRecoveryTimer?.cancel();
+    _youtubeErrorRecoveryAttempts = 0;
+    _youtubeErrorRecoveryVideoId = null;
+    _isRecoveringYoutubeError = false;
+  }
+
+  void _scheduleYoutubeErrorRecovery() {
+    final videoId = _activeYoutubeId;
+    if (videoId == null || _isRecoveringYoutubeError) {
+      return;
+    }
+
+    if (_youtubeErrorRecoveryVideoId != videoId) {
+      _youtubeErrorRecoveryVideoId = videoId;
+      _youtubeErrorRecoveryAttempts = 0;
+    }
+
+    if (_youtubeErrorRecoveryAttempts >= 2) {
+      _setYoutubePlaybackRecoveryVisible(true);
+      return;
+    }
+
+    if (_youtubeErrorRecoveryTimer?.isActive == true) {
+      return;
+    }
+
+    _youtubeErrorRecoveryAttempts += 1;
+    _isRecoveringYoutubeError = true;
+    _youtubeErrorRecoveryTimer = Timer(
+      Duration(milliseconds: 500 + (_youtubeErrorRecoveryAttempts * 350)),
+      () async {
+        await _recoverYoutubePlayback();
+        _isRecoveringYoutubeError = false;
+      },
+    );
+  }
+
+  Future<void> _setYoutubeLocalAudioPreference(
+    ypi.YoutubePlayerController controller,
+  ) async {
     try {
-      controller.unMute();
-      controller.setVolume(100);
+      final volume = (_youtubeLocalVolume * 100).round().clamp(0, 100).toInt();
+      await controller.setVolume(volume);
+      if (_youtubeMutedLocally || volume == 0) {
+        await controller.mute();
+      } else {
+        await controller.unMute();
+      }
     } catch (error) {
-      debugPrint('YouTube audio defaults skipped: $error');
+      debugPrint('YouTube audio preference skipped: $error');
+    }
+  }
+
+  Future<void> _recoverYoutubePlayback() async {
+    final videoId = _activeYoutubeId;
+    if (videoId == null) return;
+
+    if (_youtubePlayerValue.hasError) {
+      _replaceYoutubeController(videoId);
+      _isRecoveringYoutubeError = false;
+      return;
+    }
+
+    final controller = _youtubeController;
+    if (controller == null) return;
+
+    _pauseYoutubeLocalSyncFor(const Duration(milliseconds: 1200));
+    try {
+      await controller.seekTo(
+        seconds: _effectiveYoutubePositionMs(_room) / 1000,
+        allowSeekAhead: true,
+      );
+      await controller.playVideo();
+      await _setYoutubeLocalAudioPreference(controller);
+      _resetYoutubeErrorRecoveryState();
+      _scheduleYoutubePlaybackRecoveryCheck();
+    } catch (error) {
+      debugPrint('YouTube playback recovery skipped: $error');
+    } finally {
+      _isRecoveringYoutubeError = false;
+    }
+  }
+
+  Future<void> _setYoutubeLocalVolume(double nextVolume) async {
+    final clampedVolume = nextVolume.clamp(0.0, 1.0).toDouble();
+    if (mounted) {
+      setState(() {
+        _youtubeLocalVolume = clampedVolume;
+        if (clampedVolume > 0) {
+          _youtubeMutedLocally = false;
+        }
+      });
+    } else {
+      _youtubeLocalVolume = clampedVolume;
+      if (clampedVolume > 0) {
+        _youtubeMutedLocally = false;
+      }
+    }
+
+    final controller = _youtubeController;
+    if (controller != null) {
+      await _setYoutubeLocalAudioPreference(controller);
+    }
+  }
+
+  Future<void> _toggleYoutubeLocalMute() async {
+    if (mounted) {
+      setState(() {
+        _youtubeMutedLocally = !_youtubeMutedLocally;
+      });
+    } else {
+      _youtubeMutedLocally = !_youtubeMutedLocally;
+    }
+
+    final controller = _youtubeController;
+    if (controller != null) {
+      await _setYoutubeLocalAudioPreference(controller);
+    }
+  }
+
+  bool _didYoutubePositionJump({
+    required int positionMs,
+    required String playbackState,
+    required DateTime observedAt,
+  }) {
+    final previousPositionMs = _lastObservedYoutubePositionMs;
+    final previousObservedAt = _lastObservedYoutubeAt;
+    if (previousPositionMs == null || previousObservedAt == null) {
+      return false;
+    }
+
+    final previousState = _lastObservedYoutubePlaybackState;
+    final elapsedMs = observedAt.difference(previousObservedAt).inMilliseconds;
+    final expectedPositionMs = previousState == 'playing'
+        ? previousPositionMs + elapsedMs
+        : previousPositionMs;
+    final thresholdMs = playbackState == 'playing' ? 1800 : 900;
+    return (positionMs - expectedPositionMs).abs() > thresholdMs;
+  }
+
+  void _handleYoutubeControllerChanged() {
+    if (!_canControlRoomStream || _room.type != 'video') {
+      return;
+    }
+
+    if (_isApplyingYoutubeRemoteSync) {
+      return;
+    }
+
+    final pauseUntil = _pauseYoutubeLocalSyncUntil;
+    if (pauseUntil != null && DateTime.now().isBefore(pauseUntil)) {
+      return;
+    }
+
+    if (_youtubePlayerValue.hasError) {
+      return;
+    }
+
+    if (_youtubePlayerValue.playerState == ypi.PlayerState.ended) {
+      return;
+    }
+
+    final playbackState =
+        _mapYoutubePlaybackState(_youtubePlayerValue.playerState);
+    if (playbackState == null) {
+      return;
+    }
+
+    final observedAt = DateTime.now();
+    final positionMs = _youtubeVideoState.position.inMilliseconds;
+    final stateChanged = playbackState != _lastObservedYoutubePlaybackState;
+    final positionJumped = _didYoutubePositionJump(
+      positionMs: positionMs,
+      playbackState: playbackState,
+      observedAt: observedAt,
+    );
+
+    _lastObservedYoutubePlaybackState = playbackState;
+    _lastObservedYoutubePositionMs = positionMs;
+    _lastObservedYoutubeAt = observedAt;
+
+    if (!stateChanged && !positionJumped) {
+      return;
+    }
+
+    _queueYoutubePlaybackSync(
+      positionMs: positionMs,
+      playbackState: playbackState,
+    );
+  }
+
+  void _queueYoutubePlaybackSync({
+    required int positionMs,
+    required String playbackState,
+  }) {
+    _pendingYoutubeSyncPayload = {
+      'positionMs': positionMs,
+      'playbackState': playbackState,
+    };
+
+    _youtubeSyncDebounceTimer?.cancel();
+    _youtubeSyncDebounceTimer = Timer(
+      const Duration(milliseconds: 420),
+      () => unawaited(_flushYoutubePlaybackSync()),
+    );
+  }
+
+  Future<void> _flushYoutubePlaybackSync() async {
+    if (_isSendingYoutubeSync || !_canControlRoomStream || !mounted) {
+      return;
+    }
+
+    final pendingPayload = _pendingYoutubeSyncPayload;
+    if (pendingPayload == null) {
+      return;
+    }
+
+    final playbackState =
+        pendingPayload['playbackState']?.toString() ?? 'paused';
+    final positionMs = pendingPayload['positionMs'] is int
+        ? pendingPayload['positionMs'] as int
+        : int.tryParse('${pendingPayload['positionMs']}') ?? 0;
+
+    if (_room.youtubePlaybackState == playbackState &&
+        (_room.youtubePositionMs - positionMs).abs() < 900) {
+      _pendingYoutubeSyncPayload = null;
+      return;
+    }
+
+    _pendingYoutubeSyncPayload = null;
+    _isSendingYoutubeSync = true;
+
+    try {
+      final updated = await RoomService.updateRoom(_room.id, {
+        'theme': {
+          'youtubePlaybackState': playbackState,
+          'youtubePositionMs': positionMs,
+        },
+      });
+      if (!mounted || updated == null) return;
+      _applyRoomSnapshot(updated);
+    } finally {
+      _isSendingYoutubeSync = false;
+      if (_pendingYoutubeSyncPayload != null) {
+        final nextPositionMs = _pendingYoutubeSyncPayload!['positionMs'] is int
+            ? _pendingYoutubeSyncPayload!['positionMs'] as int
+            : int.tryParse('${_pendingYoutubeSyncPayload!['positionMs']}') ?? 0;
+        _queueYoutubePlaybackSync(
+          positionMs: nextPositionMs,
+          playbackState:
+              _pendingYoutubeSyncPayload!['playbackState']?.toString() ??
+                  'paused',
+        );
+      }
+    }
+  }
+
+  List<RoomYoutubeQueueItem> _currentYoutubeQueueItems() {
+    if (_room.youtubeQueue.isNotEmpty) {
+      return List<RoomYoutubeQueueItem>.from(_room.youtubeQueue);
+    }
+
+    final currentUrl = _room.youtubeUrl;
+    if (currentUrl == null || currentUrl.isEmpty) {
+      return const <RoomYoutubeQueueItem>[];
+    }
+
+    return [
+      RoomYoutubeQueueItem(
+        videoId: _extractYoutubeVideoId(currentUrl) ?? '',
+        url: currentUrl,
+        title: _room.youtubeTitle ?? '',
+        thumbnailUrl: _room.youtubeThumbnail ?? '',
+      ),
+    ];
+  }
+
+  String _youtubeQueueIdentity({
+    required String url,
+    String? videoId,
+  }) {
+    if (videoId != null && videoId.isNotEmpty) {
+      return 'id:$videoId';
+    }
+    return 'url:$url';
+  }
+
+  List<Map<String, dynamic>> _youtubeQueuePayload(
+    List<RoomYoutubeQueueItem> items,
+  ) {
+    return items.map((item) => item.toThemeJson()).toList(growable: false);
+  }
+
+  Future<void> _updateYoutubeQueue(
+    List<RoomYoutubeQueueItem> items, {
+    String? playbackState,
+    int? positionMs,
+    String? successMessage,
+  }) async {
+    try {
+      final themePatch = <String, dynamic>{
+        'youtubeQueue': _youtubeQueuePayload(items),
+      };
+      if (playbackState != null) {
+        themePatch['youtubePlaybackState'] = playbackState;
+      }
+      if (positionMs != null) {
+        themePatch['youtubePositionMs'] = positionMs;
+      }
+
+      final updated = await RoomService.updateRoom(_room.id, {
+        'theme': themePatch,
+      });
+      if (!mounted) return;
+
+      if (updated != null) {
+        _applyRoomSnapshot(updated, rebuildPage: true);
+        if (successMessage != null && successMessage.isNotEmpty) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(successMessage)),
+          );
+        }
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not update the room playlist.')),
+        );
+      }
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+            content: Text(error.toString().replaceFirst('Exception: ', ''))),
+      );
+    }
+  }
+
+  Future<void> _queueYoutubeOption(
+    _YoutubeVideoOption video, {
+    required bool playNow,
+  }) async {
+    final item = RoomYoutubeQueueItem(
+      videoId: video.id,
+      url: 'https://www.youtube.com/watch?v=${video.id}',
+      title: video.title,
+      thumbnailUrl: video.thumbnailUrl,
+      durationMs: video.duration?.inMilliseconds ?? 0,
+      addedBy: _currentUserId ?? '',
+      addedAt: DateTime.now(),
+    );
+    final itemIdentity =
+        _youtubeQueueIdentity(url: item.url, videoId: item.videoId);
+    final queue = _currentYoutubeQueueItems()
+        .where(
+          (entry) =>
+              _youtubeQueueIdentity(url: entry.url, videoId: entry.videoId) !=
+              itemIdentity,
+        )
+        .toList(growable: true);
+
+    if (playNow) {
+      queue.insert(0, item);
+    } else {
+      queue.add(item);
+    }
+
+    await _updateYoutubeQueue(
+      queue,
+      playbackState: playNow || queue.length == 1 ? 'playing' : null,
+      positionMs: playNow || queue.length == 1 ? 0 : null,
+      successMessage:
+          playNow ? 'Shared video updated.' : 'Video added to the playlist.',
+    );
+  }
+
+  Future<void> _playQueuedYoutubeItem(RoomYoutubeQueueItem item) async {
+    final queue = _currentYoutubeQueueItems().toList(growable: true);
+    final itemIdentity =
+        _youtubeQueueIdentity(url: item.url, videoId: item.videoId);
+    final selectedIndex = queue.indexWhere(
+      (entry) =>
+          _youtubeQueueIdentity(url: entry.url, videoId: entry.videoId) ==
+          itemIdentity,
+    );
+    if (selectedIndex <= 0) {
+      return;
+    }
+
+    final selected = queue.removeAt(selectedIndex);
+    queue.insert(0, selected);
+    await _updateYoutubeQueue(
+      queue,
+      playbackState: 'playing',
+      positionMs: 0,
+    );
+  }
+
+  Future<void> _removeQueuedYoutubeItem(RoomYoutubeQueueItem item) async {
+    final queue = _currentYoutubeQueueItems().toList(growable: true);
+    final itemIdentity =
+        _youtubeQueueIdentity(url: item.url, videoId: item.videoId);
+    final removedCurrent = queue.isNotEmpty &&
+        _youtubeQueueIdentity(
+              url: queue.first.url,
+              videoId: queue.first.videoId,
+            ) ==
+            itemIdentity;
+
+    queue.removeWhere(
+      (entry) =>
+          _youtubeQueueIdentity(url: entry.url, videoId: entry.videoId) ==
+          itemIdentity,
+    );
+
+    await _updateYoutubeQueue(
+      queue,
+      playbackState:
+          removedCurrent ? (queue.isNotEmpty ? 'playing' : 'paused') : null,
+      positionMs: removedCurrent ? 0 : null,
+      successMessage: 'Video removed from the playlist.',
+    );
+  }
+
+  Future<void> _handleYoutubeVideoEnded() async {
+    if (!_canControlRoomStream || _isAdvancingYoutubeQueue) {
+      return;
+    }
+
+    _isAdvancingYoutubeQueue = true;
+    _pendingYoutubeSyncPayload = null;
+    _youtubeSyncDebounceTimer?.cancel();
+
+    try {
+      final queue = _currentYoutubeQueueItems();
+      if (queue.length > 1) {
+        await _updateYoutubeQueue(
+          queue.sublist(1),
+          playbackState: 'playing',
+          positionMs: 0,
+        );
+        return;
+      }
+
+      final controller = _youtubeController;
+      if (controller != null) {
+        try {
+          await controller.seekTo(seconds: 0, allowSeekAhead: true);
+          await controller.pauseVideo();
+          await _setYoutubeLocalAudioPreference(controller);
+        } catch (error) {
+          debugPrint('YouTube end reset skipped: $error');
+        }
+      }
+
+      final updated = await RoomService.updateRoom(_room.id, {
+        'theme': {
+          'youtubePlaybackState': 'paused',
+          'youtubePositionMs': 0,
+        },
+      });
+      if (!mounted || updated == null) return;
+      _applyRoomSnapshot(updated, rebuildPage: true);
+    } finally {
+      _isAdvancingYoutubeQueue = false;
     }
   }
 
   bool _isDirectAudioUrl(String? url) {
     if (url == null || url.isEmpty) return false;
-    return YoutubePlayer.convertUrlToId(url) == null;
+    return _extractYoutubeVideoId(url) == null;
   }
 
   String? _normalizeRoomMediaUrl(String? url) {
@@ -240,20 +1028,7 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
     return AppConfig.normalizeBackendUrl(url);
   }
 
-  void _runYoutubeControllerAction(
-    void Function(YoutubePlayerController controller) action,
-  ) {
-    final controller = _youtubeController;
-    if (controller == null) return;
-
-    try {
-      action(controller);
-    } catch (error) {
-      debugPrint('YouTube controller action skipped: $error');
-    }
-  }
-
-  void _queueYoutubeControllerDispose(YoutubePlayerController? controller) {
+  void _queueYoutubeControllerDispose(ypi.YoutubePlayerController? controller) {
     if (controller == null || _pendingYoutubeDisposals.contains(controller)) {
       return;
     }
@@ -264,7 +1039,7 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
         if (!_pendingYoutubeDisposals.remove(controller)) return;
 
         try {
-          controller.dispose();
+          unawaited(controller.close());
         } catch (error) {
           debugPrint('YouTube controller dispose skipped: $error');
         }
@@ -375,6 +1150,27 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
   }
 
   Future<void> _connectToVoice() async {
+    if (_isConnectingVoice) {
+      return;
+    }
+
+    if (_voiceService.isConnected) {
+      if (mounted) {
+        setState(() {
+          _isMuted = !_voiceService.isMicEnabled;
+          _isSpeakerOn = _voiceService.isSpeakerEnabled;
+          _isVoiceConnected = true;
+        });
+      }
+      return;
+    }
+
+    if (mounted) {
+      setState(() {
+        _isConnectingVoice = true;
+      });
+    }
+
     try {
       final tokenResponse = await RoomService.getRoomToken(_room.id);
       final token = tokenResponse['token']?.toString();
@@ -393,16 +1189,22 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
       if (mounted) {
         setState(() {
           _isMuted = !_voiceService.isMicEnabled;
-          _isSpeakerOn = true;
+          _isSpeakerOn = _voiceService.isSpeakerEnabled;
           _isVoiceConnected = true;
+          _isConnectingVoice = false;
         });
       }
     } catch (e) {
       debugPrint('Voice connection failed: $e');
       if (!mounted) return;
+      final errorMessage = _normalizeUiErrorMessage(e, forVoice: true);
       setState(() {
         _isVoiceConnected = false;
+        _isConnectingVoice = false;
       });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(errorMessage)),
+      );
     }
   }
 
@@ -615,27 +1417,6 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
     );
   }
 
-  Future<void> _toggleSpeakerOutput() async {
-    if (!_isVoiceConnected) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Voice is offline')),
-      );
-      return;
-    }
-
-    try {
-      final nextSpeakerOn = !_isSpeakerOn;
-      await _voiceService.setSpeakerEnabled(nextSpeakerOn);
-      if (!mounted) return;
-      setState(() => _isSpeakerOn = nextSpeakerOn);
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
-      );
-    }
-  }
-
   void _showInviteFriends() {
     _hideQuickReactionTray();
     showModalBottomSheet(
@@ -649,14 +1430,293 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
     );
   }
 
+  void _showVoiceFeatureLab() {
+    _hideQuickReactionTray();
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => RoomFeatureBottomSheet(roomId: _room.id),
+    );
+  }
+
+  Future<void> _toggleSpeakerOutput() async {
+    if (!_isVoiceConnected) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Voice is offline')),
+      );
+      return;
+    }
+
+    try {
+      final nextSpeakerOn = !_voiceService.isSpeakerEnabled;
+      await _voiceService.setSpeakerEnabled(nextSpeakerOn);
+      if (!mounted) return;
+      setState(() => _isSpeakerOn = _voiceService.isSpeakerEnabled);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
+      );
+    }
+  }
+
+  void _showVoiceAudioSheet() {
+    if (!_isVoiceConnected) {
+      unawaited(_connectToVoice());
+      return;
+    }
+
+    _hideQuickReactionTray();
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (sheetContext) => StatefulBuilder(
+        builder: (context, setSheetState) {
+          final muted = _voiceService.isRemotePlaybackMuted;
+          final volume =
+              muted ? 0.0 : _voiceService.remotePlaybackVolume.clamp(0.0, 1.0);
+
+          Future<void> refreshSheet() async {
+            if (!mounted) return;
+            setState(() {});
+            setSheetState(() {});
+          }
+
+          return Container(
+            padding: const EdgeInsets.fromLTRB(20, 14, 20, 26),
+            decoration: const BoxDecoration(
+              color: Color(0xFF17161F),
+              borderRadius: BorderRadius.vertical(top: Radius.circular(30)),
+            ),
+            child: SafeArea(
+              top: false,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Center(
+                    child: Container(
+                      width: 42,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: Colors.white24,
+                        borderRadius: BorderRadius.circular(999),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 18),
+                  const Text(
+                    'Voice audio',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 18,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  const Text(
+                    'These controls only change what you hear on this device.',
+                    style: TextStyle(color: Colors.white54, fontSize: 13),
+                  ),
+                  const SizedBox(height: 18),
+                  Container(
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.05),
+                      borderRadius: BorderRadius.circular(22),
+                      border: Border.all(color: Colors.white10),
+                    ),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 40,
+                          height: 40,
+                          decoration: BoxDecoration(
+                            color: Colors.white.withValues(alpha: 0.08),
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                          child: Icon(
+                            _isSpeakerOn
+                                ? Icons.speaker_rounded
+                                : Icons.hearing_disabled_rounded,
+                            color: Colors.white,
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        const Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'Speaker output',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                              SizedBox(height: 4),
+                              Text(
+                                'Switch between loud speaker output and quieter audio routing.',
+                                style: TextStyle(
+                                  color: Colors.white60,
+                                  fontSize: 12,
+                                  height: 1.35,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        Switch(
+                          value: _isSpeakerOn,
+                          activeThumbColor: const Color(0xFF69DFFF),
+                          activeTrackColor:
+                              const Color(0xFF69DFFF).withValues(alpha: 0.4),
+                          onChanged: (_) async {
+                            await _toggleSpeakerOutput();
+                            await refreshSheet();
+                          },
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Container(
+                    padding: const EdgeInsets.fromLTRB(14, 14, 14, 10),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.05),
+                      borderRadius: BorderRadius.circular(22),
+                      border: Border.all(color: Colors.white10),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            const Icon(
+                              Icons.multitrack_audio_rounded,
+                              color: Colors.white,
+                              size: 18,
+                            ),
+                            const SizedBox(width: 8),
+                            const Expanded(
+                              child: Text(
+                                'Room volume',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ),
+                            Text(
+                              '${(volume * 100).round()}%',
+                              style: const TextStyle(
+                                color: Colors.white70,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 10),
+                        Row(
+                          children: [
+                            IconButton(
+                              onPressed: () async {
+                                await _voiceService.setRemotePlaybackMuted(
+                                  !_voiceService.isRemotePlaybackMuted,
+                                );
+                                await refreshSheet();
+                              },
+                              icon: Icon(
+                                muted || volume == 0
+                                    ? Icons.volume_off_rounded
+                                    : Icons.volume_up_rounded,
+                                color: Colors.white,
+                              ),
+                              style: IconButton.styleFrom(
+                                backgroundColor:
+                                    Colors.white.withValues(alpha: 0.08),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: SliderTheme(
+                                data: SliderTheme.of(context).copyWith(
+                                  trackHeight: 3,
+                                  thumbShape: const RoundSliderThumbShape(
+                                    enabledThumbRadius: 7,
+                                  ),
+                                ),
+                                child: Slider(
+                                  value: volume,
+                                  min: 0,
+                                  max: 1,
+                                  activeColor: const Color(0xFF69DFFF),
+                                  inactiveColor: Colors.white24,
+                                  onChanged: (value) async {
+                                    await _voiceService.setRemotePlaybackVolume(
+                                      value,
+                                    );
+                                    await refreshSheet();
+                                  },
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Future<void> _toggleParticipantAudioOnDevice(Participant participant) async {
+    if (participant.userId.isEmpty || participant.userId == _currentUserId) {
+      return;
+    }
+
+    final nextMuted =
+        !_voiceService.isParticipantMutedLocally(participant.userId);
+
+    try {
+      await _voiceService.setParticipantMutedLocally(
+        participant.userId,
+        nextMuted,
+      );
+      if (!mounted) return;
+
+      HapticFeedback.selectionClick();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            nextMuted
+                ? '${participant.username} muted on this device'
+                : '${participant.username} unmuted on this device',
+          ),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
+      );
+    }
+  }
+
   void _onModeChanged(String newType) async {
     final updated = await RoomService.updateRoom(_room.id, {'type': newType});
     if (!mounted) return;
     if (updated != null) {
-      _syncMediaController(updated);
-      setState(() {
-        _room = updated;
-      });
+      _applyRoomSnapshot(updated, rebuildPage: true);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
             content: Text('Room mode changed to ${newType.toUpperCase()}')),
@@ -776,10 +1836,16 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
     _heartbeatTimer?.cancel();
     _roomRefreshTimer?.cancel();
     _quickReactionTrayTimer?.cancel();
+    _youtubeSyncDebounceTimer?.cancel();
+    _youtubePlaybackRecoveryTimer?.cancel();
+    _youtubeErrorRecoveryTimer?.cancel();
     _messageSubscription?.cancel();
     _updateSubscription?.cancel();
     _voiceSubscription?.cancel();
+    _roomFeatureSubscription?.cancel();
     _resyncSubscription?.cancel();
+    _youtubeValueSubscription?.cancel();
+    _youtubeVideoStateSubscription?.cancel();
     _passwordController.dispose();
     _messageController.dispose();
     _queueYoutubeControllerDispose(_youtubeController);
@@ -796,7 +1862,7 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
 
     setState(() {
       _isJoining = true;
-      _errorMessage = null;
+      _roomErrorMessage = null;
     });
 
     try {
@@ -828,7 +1894,7 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
     } catch (e) {
       if (!mounted) return;
       setState(() {
-        _errorMessage = e.toString().replaceFirst('Exception: ', '');
+        _roomErrorMessage = _normalizeUiErrorMessage(e);
         _isJoining = false;
       });
     }
@@ -1317,6 +2383,35 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
   }
 
   Future<List<_YoutubeVideoOption>> _searchYoutubeVideos(String query) async {
+    try {
+      final remoteResults =
+          await RoomService.searchYoutubeVideos(_room.id, query);
+      if (remoteResults.isNotEmpty || kIsWeb) {
+        return remoteResults
+            .map(
+              (video) => _YoutubeVideoOption(
+                id: video['id']?.toString() ?? '',
+                title: video['title']?.toString() ?? 'Untitled video',
+                author: video['author']?.toString() ?? '',
+                duration: video['durationMs'] == null
+                    ? null
+                    : Duration(
+                        milliseconds:
+                            int.tryParse('${video['durationMs']}') ?? 0,
+                      ),
+                thumbnailUrl: video['thumbnailUrl']?.toString() ?? '',
+              ),
+            )
+            .where((video) => video.id.isNotEmpty)
+            .toList();
+      }
+    } catch (error) {
+      if (kIsWeb) {
+        throw Exception('Could not load YouTube results right now.');
+      }
+      debugPrint('Backend YouTube search failed, falling back locally: $error');
+    }
+
     final results = await _youtubeExplode.search.search(query);
     return results
         .take(12)
@@ -1333,12 +2428,24 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
   }
 
   Future<void> _showYouTubePicker() async {
+    if (!_canControlRoomStream) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content:
+              Text('Only the owner and admins can control the shared stream.'),
+        ),
+      );
+      return;
+    }
+
     final searchController = TextEditingController(
       text: _room.youtubeTitle?.trim().isNotEmpty == true
           ? _room.youtubeTitle!
           : _room.name,
     );
     final initialQuery = searchController.text.trim();
+    final existingQueueCount = _currentYoutubeQueueItems().length;
     var results = <_YoutubeVideoOption>[];
     _YoutubeVideoOption? selectedVideo;
     var isSearching = false;
@@ -1458,8 +2565,7 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
                         ),
                         child: Row(
                           children: [
-                            const Icon(Icons.search_rounded,
-                                color: Colors.black54),
+                            const AppSearchIcon(size: 18),
                             const SizedBox(width: 10),
                             Expanded(
                               child: TextField(
@@ -1474,6 +2580,29 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
                             ),
                           ],
                         ),
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(22, 12, 22, 0),
+                      child: Row(
+                        children: [
+                          Icon(
+                            Icons.queue_music_rounded,
+                            size: 16,
+                            color: Colors.black.withValues(alpha: 0.45),
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
+                            existingQueueCount == 0
+                                ? 'Pick a video to start the shared playlist'
+                                : '$existingQueueCount video${existingQueueCount == 1 ? '' : 's'} currently in the room playlist',
+                            style: const TextStyle(
+                              color: Colors.black54,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                     const SizedBox(height: 18),
@@ -1644,37 +2773,72 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
                       ),
                     Padding(
                       padding: const EdgeInsets.fromLTRB(20, 6, 20, 0),
-                      child: SizedBox(
-                        width: double.infinity,
-                        child: ElevatedButton.icon(
-                          onPressed: selectedVideo == null
-                              ? null
-                              : () {
-                                  final video = selectedVideo!;
-                                  Navigator.pop(sheetContext);
-                                  _applyMediaRoomUpdate(
-                                    type: 'video',
-                                    theme: {
-                                      'youtubeUrl':
-                                          'https://www.youtube.com/watch?v=${video.id}',
-                                      'youtubeTitle': video.title,
-                                      'youtubeThumbnail': video.thumbnailUrl,
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: OutlinedButton.icon(
+                              onPressed: selectedVideo == null
+                                  ? null
+                                  : () {
+                                      final video = selectedVideo!;
+                                      Navigator.pop(sheetContext);
+                                      unawaited(
+                                        _queueYoutubeOption(
+                                          video,
+                                          playNow: false,
+                                        ),
+                                      );
                                     },
-                                    successMessage: 'YouTube room updated.',
-                                  );
-                                },
-                          icon: const Icon(Icons.playlist_add_rounded),
-                          label: const Text('Add video'),
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: const Color(0xFF31C8F5),
-                            foregroundColor: Colors.white,
-                            disabledBackgroundColor: const Color(0xFFBDECF8),
-                            padding: const EdgeInsets.symmetric(vertical: 18),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(20),
+                              icon: const Icon(Icons.queue_rounded),
+                              label: const Text('Add to queue'),
+                              style: OutlinedButton.styleFrom(
+                                foregroundColor: const Color(0xFF161827),
+                                side: const BorderSide(
+                                  color: Color(0xFFCED7E3),
+                                ),
+                                padding:
+                                    const EdgeInsets.symmetric(vertical: 18),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(20),
+                                ),
+                              ),
                             ),
                           ),
-                        ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: ElevatedButton.icon(
+                              onPressed: selectedVideo == null
+                                  ? null
+                                  : () {
+                                      final video = selectedVideo!;
+                                      Navigator.pop(sheetContext);
+                                      unawaited(
+                                        _queueYoutubeOption(
+                                          video,
+                                          playNow: true,
+                                        ),
+                                      );
+                                    },
+                              icon: const Icon(Icons.play_arrow_rounded),
+                              label: Text(
+                                existingQueueCount == 0
+                                    ? 'Start now'
+                                    : 'Play now',
+                              ),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: const Color(0xFF31C8F5),
+                                foregroundColor: Colors.white,
+                                disabledBackgroundColor:
+                                    const Color(0xFFBDECF8),
+                                padding:
+                                    const EdgeInsets.symmetric(vertical: 18),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(20),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                   ],
@@ -1732,7 +2896,7 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
             const SizedBox(height: 22),
             OutlinedButton.icon(
               onPressed: onTap,
-              icon: const Icon(Icons.search_rounded),
+              icon: const AppSearchIcon(size: 18),
               label: const Text('Search now'),
               style: OutlinedButton.styleFrom(
                 foregroundColor: const Color(0xFF161827),
@@ -1795,9 +2959,21 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
 
   void _applyRoomSnapshot(RoomModel room, {bool rebuildPage = false}) {
     final previous = _room;
+    final previousQueueSignature = previous.youtubeQueue
+        .map((item) => item.videoId.isNotEmpty ? item.videoId : item.url)
+        .join('|');
+    final nextQueueSignature = room.youtubeQueue
+        .map((item) => item.videoId.isNotEmpty ? item.videoId : item.url)
+        .join('|');
+    final mediaChanged = previous.type != room.type ||
+        previous.youtubeUrl != room.youtubeUrl ||
+        previous.youtubeTitle != room.youtubeTitle ||
+        previous.youtubePlaybackState != room.youtubePlaybackState ||
+        previousQueueSignature != nextQueueSignature ||
+        previous.musicUrl != room.musicUrl ||
+        previous.musicTitle != room.musicTitle;
     final shouldRebuildShell =
-        rebuildPage || previous.background != room.background;
-    _syncMediaController(room);
+        rebuildPage || previous.background != room.background || mediaChanged;
     if (shouldRebuildShell && mounted) {
       setState(() {
         _room = room;
@@ -1805,6 +2981,8 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
     } else {
       _room = room;
     }
+    _syncMediaController(room);
+    _applySharedYoutubeSync(room);
     _announceRoomSettingChanges(previous, room);
     _notifyHeaderChanged();
     _notifyStageChanged();
@@ -2115,6 +3293,17 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
     }
   }
 
+  void _handleRoomFeatureEvent(Map<String, dynamic> data) {
+    if (data['roomId']?.toString() != _room.id || !mounted) return;
+
+    final summary = data['summary']?.toString();
+    if (summary == null) return;
+
+    final trimmedSummary = summary.trim();
+    if (trimmedSummary.isEmpty) return;
+    _appendSystemMessage(trimmedSummary);
+  }
+
   void _appendChatMessage(
     Map<String, dynamic> data, {
     bool notify = true,
@@ -2198,13 +3387,13 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
               child: _buildBackground(),
             ),
 
-            if (_errorMessage != null)
+            if (_roomErrorMessage != null)
               Positioned(
                 top: 50,
                 left: 20,
                 right: 20,
                 child: GestureDetector(
-                  onTap: () => setState(() => _errorMessage = null),
+                  onTap: () => setState(() => _roomErrorMessage = null),
                   child: Container(
                     padding: const EdgeInsets.symmetric(
                         horizontal: 16, vertical: 12),
@@ -2220,13 +3409,16 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
                       ],
                     ),
                     child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         const Icon(Icons.error_outline,
                             color: Colors.white, size: 20),
                         const SizedBox(width: 12),
                         Expanded(
                           child: Text(
-                            _errorMessage!,
+                            _roomErrorMessage!,
+                            maxLines: 3,
+                            overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
                                 color: Colors.white,
                                 fontSize: 14,
@@ -2247,35 +3439,16 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
                 children: [
                   ValueListenableBuilder<int>(
                     valueListenable: _headerRevision,
-                    builder: (_, __, ___) => Column(
-                      children: [
-                        SafeArea(
-                          bottom: false,
-                          child: _buildMinimalHeader(),
-                        ),
-                        if (_room.announcement.isNotEmpty)
-                          _buildAnnouncementBar(),
-                      ],
+                    builder: (_, __, ___) => SafeArea(
+                      bottom: false,
+                      child: _buildMinimalHeader(),
                     ),
                   ),
 
                   Expanded(
-                    child: Column(
-                      children: [
-                        ValueListenableBuilder<int>(
-                          valueListenable: _chatRevision,
-                          builder: (_, __, ___) => AnimatedSwitcher(
-                            duration: const Duration(milliseconds: 220),
-                            child: _buildChatDock(),
-                          ),
-                        ),
-                        Expanded(
-                          child: ValueListenableBuilder<int>(
-                            valueListenable: _stageRevision,
-                            builder: (_, __, ___) => _buildMainArea(),
-                          ),
-                        ),
-                      ],
+                    child: ValueListenableBuilder<int>(
+                      valueListenable: _stageRevision,
+                      builder: (_, __, ___) => _buildMainArea(),
                     ),
                   ),
 
@@ -2326,6 +3499,9 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
             ),
             Positioned.fill(
               child: ReactionAnimationOverlay(seatKeys: _seatKeyMap),
+            ),
+            Positioned.fill(
+              child: RoomFeatureOverlay(roomId: _room.id),
             ),
 
             // 4. Floating Reactions (Secondary Overlay for additional visibility)
@@ -2583,9 +3759,11 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
     );
   }
 
-  Widget _buildAnnouncementBar() {
+  Widget _buildAnnouncementBar({
+    EdgeInsetsGeometry margin = const EdgeInsets.fromLTRB(16, 4, 16, 10),
+  }) {
     return Container(
-      margin: const EdgeInsets.fromLTRB(16, 4, 16, 10),
+      margin: margin,
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
         color: Colors.white.withValues(alpha: 0.08),
@@ -2750,8 +3928,7 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
                 ),
                 child: Row(
                   children: [
-                    const Icon(Icons.monetization_on,
-                        size: 12, color: Colors.amber),
+                    const CurrencyIcon.coins(size: 12),
                     const SizedBox(width: 4),
                     Selector<AuthProvider, int>(
                       selector: (_, provider) => provider.user?.coins ?? 0,
@@ -2764,8 +3941,7 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
                       ),
                     ),
                     const SizedBox(width: 8),
-                    const Icon(Icons.diamond,
-                        size: 12, color: Colors.purpleAccent),
+                    const CurrencyIcon.gems(size: 12),
                     const SizedBox(width: 4),
                     Selector<AuthProvider, int>(
                       selector: (_, provider) => provider.user?.gems ?? 0,
@@ -3162,11 +4338,7 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    const Icon(
-                      Icons.monetization_on_rounded,
-                      size: 12,
-                      color: Colors.amber,
-                    ),
+                    const CurrencyIcon.coins(size: 12),
                     const SizedBox(width: 4),
                     Selector<AuthProvider, int>(
                       selector: (_, provider) => provider.user?.coins ?? 0,
@@ -3180,11 +4352,7 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
                       ),
                     ),
                     const SizedBox(width: 8),
-                    const Icon(
-                      Icons.diamond_rounded,
-                      size: 12,
-                      color: Colors.purpleAccent,
-                    ),
+                    const CurrencyIcon.gems(size: 12),
                     const SizedBox(width: 4),
                     Selector<AuthProvider, int>(
                       selector: (_, provider) => provider.user?.gems ?? 0,
@@ -3309,6 +4477,8 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
 
   Widget _buildMainArea() {
     switch (_room.type) {
+      case 'voice':
+        return _buildVoiceView();
       case 'auction':
         return _buildAuctionView();
       case 'video':
@@ -3322,87 +4492,116 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
     }
   }
 
-  Widget _buildAuctionView() {
-    return Column(
-      children: [
-        Container(
-          height: 120,
-          margin: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            gradient: const LinearGradient(
-              colors: [Color(0xFF8E24AA), Color(0xFFD81B60)],
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-            ),
-            borderRadius: BorderRadius.circular(20),
-            boxShadow: [
-              BoxShadow(
-                  color: Colors.pink.withValues(alpha: 0.3),
-                  blurRadius: 10,
-                  offset: const Offset(0, 4)),
-            ],
-          ),
-          child: Row(
+  Widget _buildVoiceView() {
+    return LayoutBuilder(
+      builder: (context, constraints) => SizedBox(
+        height: constraints.maxHeight,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+          child: Column(
             children: [
-              const Icon(Icons.gavel_rounded, color: Colors.white, size: 40),
-              const SizedBox(width: 16),
+              Center(child: _buildMainSpeaker()),
+              const SizedBox(height: 20),
+              _buildVoiceSeatWrap(),
+              const SizedBox(height: 16),
               Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    const Text('Current Bid',
-                        style: TextStyle(color: Colors.white70, fontSize: 12)),
-                    const SizedBox(height: 4),
-                    Row(
-                      children: [
-                        const Icon(Icons.monetization_on,
-                            color: Colors.amber, size: 20),
-                        const SizedBox(width: 4),
-                        const Text('12,000',
-                            style: TextStyle(
-                                color: Colors.white,
-                                fontSize: 24,
-                                fontWeight: FontWeight.bold)),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-              Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Container(
-                    width: 44,
-                    height: 44,
-                    decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        border: Border.all(color: Colors.white, width: 2)),
-                    child: const CircleAvatar(
-                        backgroundColor: Colors.white24,
-                        child:
-                            Icon(Icons.person, color: Colors.white, size: 28)),
-                  ),
-                  const SizedBox(height: 4),
-                  const Text('Top Bidder',
-                      style: TextStyle(color: Colors.white70, fontSize: 9)),
-                ],
+                child: _buildRoomActivitySection(),
               ),
             ],
           ),
         ),
-        _buildSeatGrid(compact: true),
-      ],
+      ),
+    );
+  }
+
+  Widget _buildAuctionView() {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.only(bottom: 228),
+      child: Column(
+        children: [
+          Container(
+            height: 120,
+            margin: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(
+                colors: [Color(0xFF8E24AA), Color(0xFFD81B60)],
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+              ),
+              borderRadius: BorderRadius.circular(20),
+              boxShadow: [
+                BoxShadow(
+                    color: Colors.pink.withValues(alpha: 0.3),
+                    blurRadius: 10,
+                    offset: const Offset(0, 4)),
+              ],
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.gavel_rounded, color: Colors.white, size: 40),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const Text('Current Bid',
+                          style:
+                              TextStyle(color: Colors.white70, fontSize: 12)),
+                      const SizedBox(height: 4),
+                      Row(
+                        children: [
+                          const CurrencyIcon.coins(size: 20),
+                          const SizedBox(width: 4),
+                          const Text('12,000',
+                              style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 24,
+                                  fontWeight: FontWeight.bold)),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Container(
+                      width: 44,
+                      height: 44,
+                      decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          border: Border.all(color: Colors.white, width: 2)),
+                      child: const CircleAvatar(
+                          backgroundColor: Colors.white24,
+                          child: Icon(Icons.person,
+                              color: Colors.white, size: 28)),
+                    ),
+                    const SizedBox(height: 4),
+                    const Text('Top Bidder',
+                        style: TextStyle(color: Colors.white70, fontSize: 9)),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          _buildSeatGrid(compact: true),
+          const SizedBox(height: 18),
+          _buildRoomActivitySection(compact: true),
+        ],
+      ),
     );
   }
 
   Widget _buildVideoView() {
     final hasVideo = _room.youtubeUrl?.isNotEmpty == true &&
-        YoutubePlayer.convertUrlToId(_room.youtubeUrl!) != null &&
+        _extractYoutubeVideoId(_room.youtubeUrl!) != null &&
         _youtubeController != null;
-    final videoId = _activeYoutubeId ??
-        YoutubePlayer.convertUrlToId(_room.youtubeUrl ?? '');
+    final videoId =
+        _activeYoutubeId ?? _extractYoutubeVideoId(_room.youtubeUrl ?? '');
+    final canControlStream = _canControlRoomStream;
+    final youtubeQueue = _currentYoutubeQueueItems();
 
     return SingleChildScrollView(
       padding: const EdgeInsets.only(bottom: 228),
@@ -3495,28 +4694,38 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
                           ),
                         ),
                         const SizedBox(height: 26),
-                        ElevatedButton(
-                          onPressed: _showYouTubePicker,
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: const Color(0xFF0C2C36),
-                            foregroundColor: const Color(0xFF3CD5FF),
-                            elevation: 0,
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 28,
-                              vertical: 16,
+                        if (canControlStream)
+                          ElevatedButton(
+                            onPressed: _showYouTubePicker,
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: const Color(0xFF0C2C36),
+                              foregroundColor: const Color(0xFF3CD5FF),
+                              elevation: 0,
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 28,
+                                vertical: 16,
+                              ),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(999),
+                              ),
                             ),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(999),
+                            child: const Text(
+                              'Add video',
+                              style: TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.w700,
+                              ),
                             ),
-                          ),
-                          child: const Text(
-                            'Add video',
+                          )
+                        else
+                          const Text(
+                            'The owner or admins will start the shared stream here.',
+                            textAlign: TextAlign.center,
                             style: TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.w700,
+                              color: Colors.white54,
+                              fontSize: 14,
                             ),
                           ),
-                        ),
                       ],
                     ),
                   )
@@ -3529,46 +4738,65 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
                         children: [
                           AspectRatio(
                             aspectRatio: 16 / 9,
-                            child: YoutubePlayer(
+                            child: ypi.YoutubePlayer(
                               controller: _youtubeController!,
-                              showVideoProgressIndicator: true,
-                              progressIndicatorColor: Colors.white,
-                              topActions: <Widget>[
-                                const SizedBox(width: 8),
-                                Expanded(
-                                  child: Text(
-                                    _room.youtubeTitle ?? _room.name,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: const TextStyle(
-                                      color: Colors.white,
-                                      fontSize: 13,
-                                      fontWeight: FontWeight.w600,
-                                    ),
-                                  ),
-                                ),
-                                IconButton(
-                                  onPressed: _showYouTubePicker,
-                                  icon: const Icon(
-                                    Icons.playlist_play_rounded,
-                                    color: Colors.white,
-                                  ),
-                                ),
-                              ],
-                              bottomActions: const [
-                                CurrentPosition(),
-                                SizedBox(width: 8),
-                                ProgressBar(isExpanded: true),
-                                SizedBox(width: 8),
-                                RemainingDuration(),
-                                FullScreenButton(),
-                              ],
-                              onReady: _applyYoutubeAudioDefaults,
+                              aspectRatio: 16 / 9,
                             ),
                           ),
                           Positioned(
                             left: 12,
+                            right: 12,
                             top: 12,
+                            child: Row(
+                              children: [
+                                Expanded(
+                                  child: Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 12,
+                                      vertical: 9,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: Colors.black.withValues(
+                                        alpha: 0.42,
+                                      ),
+                                      borderRadius: BorderRadius.circular(16),
+                                    ),
+                                    child: Text(
+                                      _youtubeDisplayTitle,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 13,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                                if (canControlStream) ...[
+                                  const SizedBox(width: 10),
+                                  Material(
+                                    color: Colors.black.withValues(alpha: 0.42),
+                                    borderRadius: BorderRadius.circular(16),
+                                    child: InkWell(
+                                      onTap: _showYouTubePicker,
+                                      borderRadius: BorderRadius.circular(16),
+                                      child: const Padding(
+                                        padding: EdgeInsets.all(10),
+                                        child: Icon(
+                                          Icons.playlist_play_rounded,
+                                          color: Colors.white,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ],
+                            ),
+                          ),
+                          Positioned(
+                            left: 12,
+                            top: 58,
                             child: Container(
                               padding: const EdgeInsets.symmetric(
                                 horizontal: 10,
@@ -3599,14 +4827,399 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
                               ),
                             ),
                           ),
+                          if (_youtubePlayerValue.hasError ||
+                              _showYoutubePlaybackRecovery)
+                            Positioned.fill(
+                              child: Container(
+                                color: Colors.black.withValues(alpha: 0.48),
+                                padding: const EdgeInsets.all(24),
+                                child: Center(
+                                  child: ConstrainedBox(
+                                    constraints: const BoxConstraints(
+                                      maxWidth: 280,
+                                    ),
+                                    child: Column(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Icon(
+                                          _youtubePlayerValue.hasError
+                                              ? Icons.error_outline_rounded
+                                              : Icons.play_circle_fill_rounded,
+                                          size: 42,
+                                          color: Colors.white,
+                                        ),
+                                        const SizedBox(height: 14),
+                                        Text(
+                                          _youtubePlayerValue.hasError
+                                              ? 'This video needs to be reloaded on this device.'
+                                              : 'Tap once to start the shared video in Chrome.',
+                                          textAlign: TextAlign.center,
+                                          style: const TextStyle(
+                                            color: Colors.white,
+                                            fontSize: 14,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
+                                        const SizedBox(height: 8),
+                                        Text(
+                                          _youtubePlayerValue.hasError
+                                              ? 'The player reported a loading error.'
+                                              : 'Some browsers block autoplay until you interact with the player.',
+                                          textAlign: TextAlign.center,
+                                          style: const TextStyle(
+                                            color: Colors.white70,
+                                            fontSize: 12,
+                                          ),
+                                        ),
+                                        const SizedBox(height: 16),
+                                        ElevatedButton.icon(
+                                          onPressed: () => unawaited(
+                                            _recoverYoutubePlayback(),
+                                          ),
+                                          style: ElevatedButton.styleFrom(
+                                            backgroundColor: Colors.white,
+                                            foregroundColor:
+                                                const Color(0xFF10151D),
+                                            elevation: 0,
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 18,
+                                              vertical: 12,
+                                            ),
+                                            shape: RoundedRectangleBorder(
+                                              borderRadius:
+                                                  BorderRadius.circular(999),
+                                            ),
+                                          ),
+                                          icon: Icon(
+                                            _youtubePlayerValue.hasError
+                                                ? Icons.refresh_rounded
+                                                : Icons.play_arrow_rounded,
+                                          ),
+                                          label: Text(
+                                            _youtubePlayerValue.hasError
+                                                ? 'Reload video'
+                                                : 'Start video',
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          if (!canControlStream)
+                            Positioned(
+                              right: 12,
+                              top: 12,
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 10,
+                                  vertical: 6,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFF0F3140)
+                                      .withValues(alpha: 0.78),
+                                  borderRadius: BorderRadius.circular(999),
+                                ),
+                                child: const Text(
+                                  'Synced with host',
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              ),
+                            ),
                         ],
                       ),
                     ),
                   ),
+                if (hasVideo) ...[
+                  const SizedBox(height: 12),
+                  _buildYoutubeVolumeControl(),
+                ],
+                const SizedBox(height: 12),
+                _buildYoutubeQueuePanel(
+                  queue: youtubeQueue,
+                  canControlStream: canControlStream,
+                ),
               ],
             ),
           ),
           _buildSeatGrid(compact: true),
+          const SizedBox(height: 18),
+          _buildRoomActivitySection(compact: true),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildYoutubeVolumeControl() {
+    final volumeLabel = '${(_youtubeLocalVolume * 100).round()}%';
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.06),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: Colors.white10),
+      ),
+      child: Row(
+        children: [
+          Material(
+            color: Colors.transparent,
+            child: InkWell(
+              onTap: () => unawaited(_toggleYoutubeLocalMute()),
+              borderRadius: BorderRadius.circular(999),
+              child: Padding(
+                padding: const EdgeInsets.all(6),
+                child: Icon(
+                  _youtubeMutedLocally || _youtubeLocalVolume == 0
+                      ? Icons.volume_off_rounded
+                      : Icons.volume_up_rounded,
+                  color: Colors.white,
+                  size: 20,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: SliderTheme(
+              data: SliderTheme.of(context).copyWith(
+                trackHeight: 3,
+                thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 7),
+              ),
+              child: Slider(
+                value: _youtubeMutedLocally ? 0.0 : _youtubeLocalVolume,
+                onChanged: (value) => unawaited(_setYoutubeLocalVolume(value)),
+                min: 0,
+                max: 1,
+                activeColor: const Color(0xFF31C8F5),
+                inactiveColor: Colors.white24,
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            volumeLabel,
+            style: const TextStyle(
+              color: Colors.white70,
+              fontSize: 12,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildYoutubeQueuePanel({
+    required List<RoomYoutubeQueueItem> queue,
+    required bool canControlStream,
+  }) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.05),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.white10),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(
+                Icons.queue_music_rounded,
+                color: Colors.white,
+                size: 18,
+              ),
+              const SizedBox(width: 8),
+              Text(
+                'Playlist',
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const Spacer(),
+              Text(
+                '${queue.length} video${queue.length == 1 ? '' : 's'}',
+                style: const TextStyle(
+                  color: Colors.white54,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          if (queue.isEmpty)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: Colors.black.withValues(alpha: 0.18),
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(color: Colors.white10),
+              ),
+              child: Text(
+                canControlStream
+                    ? 'Added videos will appear here. Use Add video to build the shared playlist.'
+                    : 'The room playlist will appear here once the host or an admin adds videos.',
+                style: const TextStyle(
+                  color: Colors.white60,
+                  fontSize: 12,
+                  height: 1.4,
+                ),
+              ),
+            )
+          else
+            ...List.generate(queue.length, (index) {
+              final item = queue[index];
+              return Padding(
+                padding: EdgeInsets.only(
+                  bottom: index == queue.length - 1 ? 0 : 10,
+                ),
+                child: _buildYoutubeQueueTile(
+                  item: item,
+                  index: index,
+                  canControlStream: canControlStream,
+                ),
+              );
+            }),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildYoutubeQueueTile({
+    required RoomYoutubeQueueItem item,
+    required int index,
+    required bool canControlStream,
+  }) {
+    final isCurrent = index == 0;
+    final title = item.title.isNotEmpty
+        ? item.title
+        : 'Video ${item.videoId.isNotEmpty ? item.videoId : index + 1}';
+
+    return Container(
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: isCurrent
+            ? const Color(0xFF31C8F5).withValues(alpha: 0.14)
+            : Colors.black.withValues(alpha: 0.20),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: isCurrent ? const Color(0xFF31C8F5) : Colors.white10,
+        ),
+      ),
+      child: Row(
+        children: [
+          ClipRRect(
+            borderRadius: BorderRadius.circular(12),
+            child: item.thumbnailUrl.isNotEmpty
+                ? Image.network(
+                    item.thumbnailUrl,
+                    width: 74,
+                    height: 46,
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) => Container(
+                      width: 74,
+                      height: 46,
+                      color: Colors.white10,
+                      alignment: Alignment.center,
+                      child: const Icon(
+                        Icons.smart_display_rounded,
+                        color: Colors.white38,
+                      ),
+                    ),
+                  )
+                : Container(
+                    width: 74,
+                    height: 46,
+                    color: Colors.white10,
+                    alignment: Alignment.center,
+                    child: const Icon(
+                      Icons.smart_display_rounded,
+                      color: Colors.white38,
+                    ),
+                  ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    if (isCurrent)
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 4,
+                        ),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF31C8F5),
+                          borderRadius: BorderRadius.circular(999),
+                        ),
+                        child: const Text(
+                          'Now',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 10,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      )
+                    else
+                      Text(
+                        'Up next $index',
+                        style: const TextStyle(
+                          color: Colors.white54,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  title,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (canControlStream) ...[
+            if (!isCurrent)
+              IconButton(
+                onPressed: () => unawaited(_playQueuedYoutubeItem(item)),
+                icon: const Icon(
+                  Icons.play_arrow_rounded,
+                  color: Colors.white,
+                ),
+                tooltip: 'Play now',
+              ),
+            IconButton(
+              onPressed: () => unawaited(_removeQueuedYoutubeItem(item)),
+              icon: const Icon(
+                Icons.delete_outline_rounded,
+                color: Colors.white70,
+              ),
+              tooltip: 'Remove',
+            ),
+          ],
         ],
       ),
     );
@@ -3716,122 +5329,128 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
 
   Widget _buildGameView() {
     final prompt = _gamePrompts[_gamePromptIndex % _gamePrompts.length];
-    return Column(
-      children: [
-        Container(
-          margin: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
-          padding: const EdgeInsets.all(18),
-          decoration: BoxDecoration(
-            color: Colors.white.withValues(alpha: 0.05),
-            borderRadius: BorderRadius.circular(24),
-            border: Border.all(color: Colors.white10),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Container(
-                    padding: const EdgeInsets.all(10),
-                    decoration: BoxDecoration(
-                      color: Colors.greenAccent.withValues(alpha: 0.12),
-                      borderRadius: BorderRadius.circular(16),
-                    ),
-                    child: const Icon(
-                      Icons.sports_esports_rounded,
-                      color: Colors.greenAccent,
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  const Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Party Game Room',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 17,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                        SizedBox(height: 4),
-                        Text(
-                          'Switch prompts and mini challenges while everyone stays in voice.',
-                          style: TextStyle(
-                            color: Colors.white54,
-                            fontSize: 12,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 18),
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: Colors.black,
-                  borderRadius: BorderRadius.circular(18),
-                  border: Border.all(color: Colors.white10),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+    return SingleChildScrollView(
+      padding: const EdgeInsets.only(bottom: 228),
+      child: Column(
+        children: [
+          Container(
+            margin: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
+            padding: const EdgeInsets.all(18),
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: 0.05),
+              borderRadius: BorderRadius.circular(24),
+              border: Border.all(color: Colors.white10),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
                   children: [
-                    const Text(
-                      'Current Prompt',
-                      style: TextStyle(color: Colors.white54, fontSize: 12),
+                    Container(
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: Colors.greenAccent.withValues(alpha: 0.12),
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                      child: const Icon(
+                        Icons.sports_esports_rounded,
+                        color: Colors.greenAccent,
+                      ),
                     ),
-                    const SizedBox(height: 8),
-                    Text(
-                      prompt,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 18,
-                        fontWeight: FontWeight.w700,
+                    const SizedBox(width: 12),
+                    const Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Party Game Room',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 17,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                          SizedBox(height: 4),
+                          Text(
+                            'Switch prompts and mini challenges while everyone stays in voice.',
+                            style: TextStyle(
+                              color: Colors.white54,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                   ],
                 ),
-              ),
-              const SizedBox(height: 14),
-              Row(
-                children: [
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      onPressed: () {
-                        setState(() {
-                          _gamePromptIndex =
-                              (_gamePromptIndex + 1) % _gamePrompts.length;
-                        });
-                      },
-                      icon: const Icon(Icons.shuffle_rounded),
-                      label: const Text('New Prompt'),
-                    ),
+                const SizedBox(height: 18),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: Colors.black,
+                    borderRadius: BorderRadius.circular(18),
+                    border: Border.all(color: Colors.white10),
                   ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: ElevatedButton.icon(
-                      onPressed: () {
-                        setState(() {
-                          _diceValue =
-                              ((DateTime.now().microsecondsSinceEpoch % 6) + 1)
-                                  .toInt();
-                        });
-                      },
-                      icon: const Icon(Icons.casino_rounded),
-                      label: Text('Roll d$_diceValue'),
-                    ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Current Prompt',
+                        style: TextStyle(color: Colors.white54, fontSize: 12),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        prompt,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 18,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ],
                   ),
-                ],
-              ),
-            ],
+                ),
+                const SizedBox(height: 14),
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: () {
+                          setState(() {
+                            _gamePromptIndex =
+                                (_gamePromptIndex + 1) % _gamePrompts.length;
+                          });
+                        },
+                        icon: const Icon(Icons.shuffle_rounded),
+                        label: const Text('New Prompt'),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: ElevatedButton.icon(
+                        onPressed: () {
+                          setState(() {
+                            _diceValue =
+                                ((DateTime.now().microsecondsSinceEpoch % 6) +
+                                        1)
+                                    .toInt();
+                          });
+                        },
+                        icon: const Icon(Icons.casino_rounded),
+                        label: Text('Roll d$_diceValue'),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
           ),
-        ),
-        _buildSeatGrid(compact: true),
-      ],
+          _buildSeatGrid(compact: true),
+          const SizedBox(height: 18),
+          _buildRoomActivitySection(compact: true),
+        ],
+      ),
     );
   }
 
@@ -4048,8 +5667,7 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
     final videoUrl = _room.youtubeUrl;
     if (videoUrl == null || videoUrl.isEmpty) return false;
 
-    return _activeYoutubeId != null ||
-        YoutubePlayer.convertUrlToId(videoUrl) != null;
+    return _activeYoutubeId != null || _extractYoutubeVideoId(videoUrl) != null;
   }
 
   Widget _buildSeatGrid({bool compact = false}) {
@@ -4099,15 +5717,242 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
         height: constraints.maxHeight,
         child: Column(
           children: [
-            Center(child: _buildMainSpeaker()),
-            const SizedBox(height: 20),
+            if (_room.type != 'video') ...[
+              Center(child: _buildMainSpeaker()),
+              const SizedBox(height: 20),
+            ],
             seatGrid,
             const Spacer(),
-            Padding(
-              padding: const EdgeInsets.only(top: 18, bottom: 8),
-              child: _buildAudienceStrip(),
+            if (_room.type != 'voice')
+              Padding(
+                padding: const EdgeInsets.only(top: 18, bottom: 12),
+                child: _buildAudienceStrip(),
+              ),
+            _buildRoomActivitySection(compact: _room.type != 'voice'),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildRoomActivitySection({bool compact = false}) {
+    return ValueListenableBuilder<int>(
+      valueListenable: _headerRevision,
+      builder: (_, __, ___) => ValueListenableBuilder<int>(
+        valueListenable: _chatRevision,
+        builder: (_, __, ___) => AnimatedSwitcher(
+          duration: const Duration(milliseconds: 220),
+          transitionBuilder: (child, animation) => FadeTransition(
+            opacity: animation,
+            child: SizeTransition(
+              sizeFactor: animation,
+              axisAlignment: 1,
+              child: child,
+            ),
+          ),
+          child: _buildRoomActivityPanel(compact: compact),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildRoomActivityPanel({bool compact = false}) {
+    final hasAnnouncement = _room.announcement.trim().isNotEmpty;
+    final hasMessages = _chatMessages.isNotEmpty;
+    final showVoiceChatPlaceholder =
+        _room.type == 'voice' && !compact && !hasAnnouncement && !hasMessages;
+    final useOpenVoiceFeed = _room.type == 'voice' && !compact;
+
+    if (!hasAnnouncement && !hasMessages && !showVoiceChatPlaceholder) {
+      return SizedBox(
+        key: ValueKey('room-activity-hidden-${compact ? 'compact' : 'full'}'),
+        height: compact ? 8 : 12,
+      );
+    }
+
+    final feedHeight = compact
+        ? (hasAnnouncement ? 104.0 : 132.0)
+        : (hasAnnouncement ? 118.0 : 156.0);
+
+    if (useOpenVoiceFeed) {
+      return Padding(
+        key: ValueKey(
+          'room-activity-${compact ? 'compact' : 'full'}-${hasAnnouncement ? 1 : 0}-${_chatMessages.length}',
+        ),
+        padding: const EdgeInsets.only(bottom: 8),
+        child: SizedBox.expand(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (hasAnnouncement)
+                _buildAnnouncementBar(
+                    margin: const EdgeInsets.only(bottom: 10)),
+              if (hasMessages)
+                Expanded(
+                  child: RepaintBoundary(
+                    child: _buildChatOverlay(),
+                  ),
+                )
+              else if (showVoiceChatPlaceholder)
+                _buildVoiceChatEmptyState(),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return Padding(
+      key: ValueKey(
+        'room-activity-${compact ? 'compact' : 'full'}-${hasAnnouncement ? 1 : 0}-${_chatMessages.length}',
+      ),
+      padding: EdgeInsets.fromLTRB(16, 0, 16, compact ? 16 : 12),
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.fromLTRB(12, 12, 8, 10),
+        decoration: BoxDecoration(
+          color: const Color(0xFF0E1015).withValues(alpha: 0.78),
+          borderRadius: BorderRadius.circular(24),
+          border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.22),
+              blurRadius: 24,
+              offset: const Offset(0, 12),
             ),
           ],
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Container(
+                  width: 24,
+                  height: 24,
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: 0.08),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: const Icon(
+                    Icons.dynamic_feed_rounded,
+                    color: Colors.white70,
+                    size: 14,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                const Expanded(
+                  child: Text(
+                    'Room feed',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+                Text(
+                  hasMessages ? '${_chatMessages.length}' : 'Live',
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.5),
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+            ),
+            if (hasAnnouncement) ...[
+              const SizedBox(height: 10),
+              _buildAnnouncementBar(margin: EdgeInsets.zero),
+            ],
+            if (hasMessages) ...[
+              const SizedBox(height: 10),
+              SizedBox(
+                height: feedHeight,
+                child: RepaintBoundary(
+                  child: _buildChatOverlay(),
+                ),
+              ),
+            ] else if (showVoiceChatPlaceholder) ...[
+              const SizedBox(height: 10),
+              _buildVoiceChatEmptyState(),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildVoiceChatEmptyState() {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(18),
+        onTap: _canOpenChatComposer
+            ? _showChatInput
+            : _showChatComposerRestriction,
+        child: Ink(
+          padding: const EdgeInsets.fromLTRB(12, 12, 12, 14),
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: 0.04),
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.08),
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: const Icon(
+                  Icons.chat_bubble_outline_rounded,
+                  color: Colors.white70,
+                  size: 18,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Room chat space',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      _canOpenChatComposer
+                          ? 'Messages and photos from the room will appear here. Tap to send the first one.'
+                          : 'Messages from the room will appear here once chat is opened for guests.',
+                      style: const TextStyle(
+                        color: Colors.white60,
+                        fontSize: 12,
+                        height: 1.35,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 10),
+              Text(
+                _canOpenChatComposer ? 'Open' : 'Locked',
+                style: TextStyle(
+                  color: _canOpenChatComposer
+                      ? const Color(0xFF69DFFF)
+                      : Colors.white54,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -4115,20 +5960,6 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
 
   Widget _buildCompactVideoSeatWrap() {
     final entries = <Widget>[];
-    final host = _getHostParticipant();
-
-    if (host != null) {
-      entries.add(
-        SizedBox(
-          width: 64,
-          child: _buildParticipantSeatAvatar(
-            host,
-            seatKeyIndex: 0,
-            size: 56,
-          ),
-        ),
-      );
-    }
 
     for (var seatIndex = 1; seatIndex <= 8; seatIndex++) {
       final participant = _getParticipantAtSeat(seatIndex);
@@ -4156,6 +5987,65 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
         spacing: 8,
         runSpacing: 14,
         children: entries,
+      ),
+    );
+  }
+
+  Widget _buildVoiceSeatWrap() {
+    final entries = <Widget>[];
+
+    for (var seatIndex = 1; seatIndex <= 8; seatIndex++) {
+      final participant = _getParticipantAtSeat(seatIndex);
+      entries.add(
+        SizedBox(
+          width: 78,
+          child: participant == null
+              ? _buildEmptySeat(seatIndex)
+              : _buildParticipantSeatAvatar(
+                  participant,
+                  seatKeyIndex: seatIndex,
+                  size: 58,
+                ),
+        ),
+      );
+    }
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(14, 14, 14, 12),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.05),
+        borderRadius: BorderRadius.circular(28),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Speaker seats',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 14,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'Tap any open seat to join the stage. The host stays pinned at the top.',
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: 0.58),
+              fontSize: 11,
+              height: 1.35,
+            ),
+          ),
+          const SizedBox(height: 14),
+          Wrap(
+            alignment: WrapAlignment.center,
+            spacing: 10,
+            runSpacing: 18,
+            children: entries,
+          ),
+        ],
       ),
     );
   }
@@ -4209,7 +6099,9 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
 
   Participant? _getParticipantAtSeat(int seatIndex) {
     for (final participant in _room.participants) {
-      if (participant.userId == _room.hostId) continue;
+      if (_room.type != 'video' && participant.userId == _room.hostId) {
+        continue;
+      }
       if (participant.seatIndex == seatIndex) {
         return participant;
       }
@@ -4406,6 +6298,21 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
       return;
     }
 
+    final currentSeatIndex = _getMySeatIndex();
+    if (currentSeatIndex == seatIndex) {
+      return;
+    }
+
+    if (currentSeatIndex > 0) {
+      final shouldMove = await _confirmSeatChange(
+        fromSeat: currentSeatIndex,
+        toSeat: seatIndex,
+      );
+      if (!shouldMove) {
+        return;
+      }
+    }
+
     try {
       final updatedRoom = await RoomService.takeSeat(_room.id, seatIndex);
       if (updatedRoom != null) {
@@ -4439,6 +6346,91 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
         SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
       );
     }
+  }
+
+  Future<bool> _confirmSeatChange({
+    required int fromSeat,
+    required int toSeat,
+  }) async {
+    if (!mounted) return false;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: const Color(0xFF1A1921),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(24),
+        ),
+        titlePadding: const EdgeInsets.fromLTRB(22, 22, 22, 12),
+        contentPadding: const EdgeInsets.fromLTRB(22, 0, 22, 18),
+        actionsPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+        title: Row(
+          children: [
+            Container(
+              width: 38,
+              height: 38,
+              decoration: BoxDecoration(
+                color: const Color(0xFF11B9E8).withValues(alpha: 0.14),
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: const Icon(
+                Icons.swap_horiz_rounded,
+                color: Color(0xFF69DFFF),
+              ),
+            ),
+            const SizedBox(width: 12),
+            const Expanded(
+              child: Text(
+                'Change seat?',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+          ],
+        ),
+        content: Text(
+          'You are already in seat $fromSeat. Move to seat $toSeat now?',
+          style: const TextStyle(
+            color: Colors.white70,
+            fontSize: 14,
+            height: 1.45,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            style: TextButton.styleFrom(
+              foregroundColor: Colors.white60,
+            ),
+            child: const Text('No'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF11B9E8),
+              foregroundColor: const Color(0xFF07151A),
+              elevation: 0,
+              padding: const EdgeInsets.symmetric(
+                horizontal: 18,
+                vertical: 12,
+              ),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(999),
+              ),
+            ),
+            child: const Text(
+              'Yes, move',
+              style: TextStyle(fontWeight: FontWeight.w700),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    return confirmed ?? false;
   }
 
   Future<void> _leaveSeat() async {
@@ -4476,6 +6468,8 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
         canManageSpeakerState:
             userPermissions.canManageSpeakerState(participant),
         canSendGifts: userPermissions.canUseRoomGifts,
+        isLocallyMuted: !isMe &&
+            _voiceService.isParticipantMutedLocally(participant.userId),
         onViewProfile: () {
           Navigator.pop(sheetContext);
           Navigator.push(
@@ -4487,6 +6481,19 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
             ),
           );
         },
+        onOpenChat: () {
+          Navigator.pop(sheetContext);
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => ChatScreen(
+                userId: participant.userId,
+                username: participant.username,
+                avatar: participant.avatar,
+              ),
+            ),
+          );
+        },
         onSendGift: () {
           Navigator.pop(sheetContext);
           _showGiftPanelForUser(participant.userId, participant.username);
@@ -4495,35 +6502,15 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
           Navigator.pop(sheetContext);
           _leaveSeat();
         },
+        onToggleLocalAudio: isMe
+            ? null
+            : () async {
+                Navigator.pop(sheetContext);
+                await _toggleParticipantAudioOnDevice(participant);
+              },
         onRefreshRoom: () async {
           await _refreshRoom();
         },
-      ),
-    );
-  }
-
-  Widget _buildChatDock() {
-    if (_chatMessages.isEmpty) {
-      return const SizedBox(
-        key: ValueKey('chat-dock-hidden'),
-        height: 6,
-      );
-    }
-
-    return Padding(
-      key: const ValueKey('chat-dock-visible'),
-      padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-      child: Align(
-        alignment: Alignment.centerLeft,
-        child: ConstrainedBox(
-          constraints: BoxConstraints(
-            maxWidth: MediaQuery.of(context).size.width * 0.84,
-            maxHeight: 176,
-          ),
-          child: RepaintBoundary(
-            child: _buildChatOverlay(),
-          ),
-        ),
       ),
     );
   }
@@ -4861,7 +6848,7 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
                         const SizedBox(width: 10),
                       ],
                       Text(
-                        _errorMessage != null
+                        _roomErrorMessage != null
                             ? 'Unable to enter room'
                             : _room.isPrivate
                                 ? 'Checking room access...'
@@ -4890,12 +6877,23 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
         child: Row(
           children: [
             _buildBottomDockActionButton(
-              Icons.graphic_eq_rounded,
-              _isSpeakerOn ? Colors.white70 : Colors.white38,
-              _toggleSpeakerOutput,
-              backgroundColor: _isSpeakerOn
-                  ? Colors.white.withValues(alpha: 0.06)
-                  : Colors.black.withValues(alpha: 0.12),
+              !_isVoiceConnected
+                  ? Icons.play_circle_fill_rounded
+                  : (_voiceService.isRemotePlaybackMuted ||
+                          _voiceService.remotePlaybackVolume == 0)
+                      ? Icons.volume_off_rounded
+                      : Icons.volume_up_rounded,
+              !_isVoiceConnected
+                  ? const Color(0xFF69DFFF)
+                  : (_isSpeakerOn ? Colors.white70 : Colors.white38),
+              _isVoiceConnected
+                  ? _showVoiceAudioSheet
+                  : () => unawaited(_connectToVoice()),
+              backgroundColor: !_isVoiceConnected
+                  ? const Color(0xFF0C2C36).withValues(alpha: 0.9)
+                  : _isSpeakerOn
+                      ? Colors.white.withValues(alpha: 0.06)
+                      : Colors.black.withValues(alpha: 0.12),
             ),
             const SizedBox(width: 6),
             _buildBottomDockActionButton(
@@ -4908,9 +6906,22 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
                   );
                   return;
                 }
-                setState(() => _isMuted = !_isMuted);
-                await _voiceService.setMicEnabled(!_isMuted);
-                HapticsUtil.giftReceived();
+
+                final nextMicEnabled = !_voiceService.isMicEnabled;
+                try {
+                  await _voiceService.setMicEnabled(nextMicEnabled);
+                  if (!mounted) return;
+                  setState(() => _isMuted = !_voiceService.isMicEnabled);
+                  HapticsUtil.giftReceived();
+                } catch (e) {
+                  if (!mounted) return;
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content:
+                          Text(e.toString().replaceFirst('Exception: ', '')),
+                    ),
+                  );
+                }
               },
               backgroundColor: _isMuted
                   ? const Color(0xFFFF3B30).withValues(alpha: 0.14)
@@ -4918,51 +6929,7 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
             ),
             const SizedBox(width: 8),
             Expanded(
-              child: GestureDetector(
-                onTap: _canOpenChatComposer
-                    ? _showChatInput
-                    : _showChatComposerRestriction,
-                child: Container(
-                  height: 40,
-                  padding: const EdgeInsets.symmetric(horizontal: 14),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(20),
-                    border:
-                        Border.all(color: Colors.white.withValues(alpha: 0.8)),
-                  ),
-                  child: Row(
-                    children: [
-                      Icon(
-                        _canSendTextMessages
-                            ? Icons.chat_bubble_outline_rounded
-                            : _canShareRoomImages
-                                ? Icons.photo_library_outlined
-                                : Icons.block_rounded,
-                        color: Colors.black54,
-                        size: 17,
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          _canSendTextMessages
-                              ? 'Share your energy'
-                              : _canShareRoomImages
-                                  ? 'Photos only right now'
-                                  : 'Chat locked for guests',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            color: Colors.black54,
-                            fontSize: 13,
-                            fontWeight: FontWeight.w500,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
+              child: _buildVoiceRoomComposerAction(),
             ),
             const SizedBox(width: 8),
             _buildBottomDockActionButton(
@@ -4993,15 +6960,20 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
             ),
             const SizedBox(width: 6),
             _buildBottomDockActionButton(
-              Icons.person_add_alt_1_rounded,
+              _room.type == 'voice'
+                  ? Icons.auto_awesome_rounded
+                  : Icons.grid_view_rounded,
               Colors.white,
-              _showInviteFriends,
-            ),
-            const SizedBox(width: 6),
-            _buildBottomDockActionButton(
-              Icons.grid_view_rounded,
-              Colors.white,
-              _showRoomControl,
+              _room.type == 'voice' ? _showVoiceFeatureLab : _showRoomControl,
+              gradient: _room.type == 'voice'
+                  ? const LinearGradient(
+                      colors: [Color(0xFFFF7A45), Color(0xFF8C52FF)],
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                    )
+                  : null,
+              shadowColor:
+                  _room.type == 'voice' ? const Color(0xFF8C52FF) : null,
             ),
           ],
         ),
@@ -5025,6 +6997,102 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
         backgroundColor: bgColor ?? Colors.white.withValues(alpha: 0.05),
         padding: const EdgeInsets.all(10),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+      ),
+    );
+  }
+
+  Widget _buildVoiceRoomComposerAction() {
+    final isPhotoOnly = !_canSendTextMessages && _canShareRoomImages;
+    final isLocked = !_canOpenChatComposer;
+    final accent = isLocked
+        ? Colors.white54
+        : isPhotoOnly
+            ? const Color(0xFFFFB703)
+            : Colors.white;
+
+    final title = _canSendTextMessages
+        ? 'Share your energy'
+        : isPhotoOnly
+            ? 'Share a room photo'
+            : 'Stage chat locked';
+    final icon = _canSendTextMessages
+        ? Icons.chat_bubble_outline_rounded
+        : isPhotoOnly
+            ? Icons.photo_library_outlined
+            : Icons.shield_moon_rounded;
+
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(18),
+        onTap: _canOpenChatComposer
+            ? _showChatInput
+            : _showChatComposerRestriction,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          height: 48,
+          padding: const EdgeInsets.symmetric(horizontal: 10),
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: 0.08),
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 28,
+                height: 28,
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.08),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Icon(
+                  icon,
+                  color: accent.withValues(alpha: isLocked ? 0.76 : 0.9),
+                  size: 16,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color:
+                        Colors.white.withValues(alpha: isLocked ? 0.7 : 0.92),
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              if (isLocked || isPhotoOnly)
+                Container(
+                  margin: const EdgeInsets.only(left: 8),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: 0.08),
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  child: Text(
+                    isLocked ? 'Locked' : 'Photo',
+                    style: TextStyle(
+                      color: accent.withValues(alpha: 0.9),
+                      fontSize: 10,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                )
+              else
+                Icon(
+                  Icons.chevron_right_rounded,
+                  color: Colors.white.withValues(alpha: 0.36),
+                  size: 18,
+                ),
+            ],
+          ),
+        ),
       ),
     );
   }

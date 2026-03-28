@@ -22,6 +22,145 @@ const compression    = require('compression');
 const { apiLimiter } = require('./src/middleware/rateLimit');
 const requestLogger  = require('./src/middleware/requestLogger');
 const RALLY_DURATION_MS = 5 * 60 * 1000;
+const ROOM_STAGE_FEATURE_LABELS = {
+    aura_pick: 'Aura Pick',
+    crown_drop: 'Crown Drop',
+    number_rush: 'Number Rush',
+    fortune_digits: 'Fortune Digits'
+};
+
+function pickRandomItem(items = []) {
+    if (!Array.isArray(items) || items.length === 0) return null;
+    return items[Math.floor(Math.random() * items.length)] || null;
+}
+
+function buildUniqueNumbers({ count, min, max }) {
+    const values = new Set();
+    while (values.size < count) {
+        const value = Math.floor(Math.random() * (max - min + 1)) + min;
+        values.add(value);
+    }
+    return Array.from(values).sort((a, b) => a - b);
+}
+
+function normalizeRoomParticipants(room, socket) {
+    const participants = Array.isArray(room?.participants)
+        ? room.participants.map((entry) => {
+            const user = entry?.userId && typeof entry.userId === 'object'
+                ? entry.userId
+                : null;
+
+            return {
+                userId: user?._id?.toString() || entry?.userId?.toString() || '',
+                username: user?.username || 'Guest',
+                avatar: user?.avatar || '',
+                role: entry?.role || 'listener',
+                seatIndex: Number.isInteger(entry?.seatIndex) ? entry.seatIndex : -1,
+                contribution: Number(entry?.contribution || 0)
+            };
+        }).filter((participant) => participant.userId)
+        : [];
+
+    if (!participants.some((participant) => participant.userId === socket.userId)) {
+        participants.unshift({
+            userId: socket.userId,
+            username: socket.username || 'Guest',
+            avatar: socket.avatar || '',
+            role: 'listener',
+            seatIndex: -1,
+            contribution: 0
+        });
+    }
+
+    return participants;
+}
+
+function buildRoomStageFeaturePayload({ featureId, room, participants, socket }) {
+    const featureName = ROOM_STAGE_FEATURE_LABELS[featureId];
+    if (!featureName) return null;
+
+    const actor = {
+        userId: socket.userId,
+        username: socket.username || 'Someone',
+        avatar: socket.avatar || ''
+    };
+    const speakers = participants.filter((participant) =>
+        participant.seatIndex >= 0 ||
+        ['host', 'cohost', 'moderator', 'speaker'].includes(participant.role)
+    );
+
+    if (featureId === 'aura_pick') {
+        const winner = pickRandomItem(participants) || actor;
+        return {
+            roomId: room._id.toString(),
+            featureId,
+            featureName,
+            actor,
+            winner,
+            summary: `${actor.username} launched Aura Pick. ${winner.username} caught the spotlight.`,
+            detail: `${winner.username} is the room's fresh spotlight pick for this round.`,
+            triggeredAt: new Date().toISOString()
+        };
+    }
+
+    if (featureId === 'crown_drop') {
+        const highestContribution = participants.reduce(
+            (max, participant) => Math.max(max, participant.contribution || 0),
+            0
+        );
+        const contributionLeaders = highestContribution > 0
+            ? participants.filter((participant) => participant.contribution === highestContribution)
+            : [];
+        const winnerPool = contributionLeaders.length > 0
+            ? contributionLeaders
+            : (speakers.length > 0 ? speakers : participants);
+        const winner = pickRandomItem(winnerPool) || actor;
+        const detail = highestContribution > 0
+            ? `${winner.username} leads the room right now with ${highestContribution} room points.`
+            : `${winner.username} gets the live-stage crown for this round.`;
+
+        return {
+            roomId: room._id.toString(),
+            featureId,
+            featureName,
+            actor,
+            winner,
+            summary: `${actor.username} dropped a Crown Drop. ${winner.username} takes the crown.`,
+            detail,
+            triggeredAt: new Date().toISOString()
+        };
+    }
+
+    if (featureId === 'number_rush') {
+        const numbers = buildUniqueNumbers({ count: 5, min: 1, max: 60 });
+        return {
+            roomId: room._id.toString(),
+            featureId,
+            featureName,
+            actor,
+            numbers,
+            summary: `${actor.username} fired Number Rush: ${numbers.map((number) => number.toString().padStart(2, '0')).join(' • ')}.`,
+            detail: 'Everyone sees the same fast board numbers in realtime.',
+            triggeredAt: new Date().toISOString()
+        };
+    }
+
+    if (featureId === 'fortune_digits') {
+        const luckyNumber = buildUniqueNumbers({ count: 1, min: 1, max: 99 })[0];
+        return {
+            roomId: room._id.toString(),
+            featureId,
+            featureName,
+            actor,
+            luckyNumber,
+            summary: `${actor.username} unlocked Fortune Digits ${luckyNumber.toString().padStart(2, '0')}.`,
+            detail: `Today's room fortune number landed on ${luckyNumber}.`,
+            triggeredAt: new Date().toISOString()
+        };
+    }
+
+    return null;
+}
 
 // ── Redis ───────────────────────────────────────────────────────────────────────
 const redisClient = redis.createClient({ url: process.env.REDIS_URL || 'redis://localhost:6379' });
@@ -199,21 +338,30 @@ function broadcastToFriends(socket, event, extraData = {}) {
     socket.friendIds.forEach(fid => io.to(`user:${fid}`).emit(event, payload));
 }
 
+const activeSocketIdsByUserId = new Map();
+
 // ── Socket.IO connection ────────────────────────────────────────────────────────
 io.on('connection', (socket) => {
     console.log('🔌 User connected:', socket.userId);
 
     socket.joinedRoomIds = new Set();
+    socket.joinedProfileIds = new Set();
     socket.activePresenceRoomIds = new Set();
     const voiceStateByRoom = new Map();
     const questHeartbeatByRoom = new Map();
     socket.join(`user:${socket.userId}`);
     const isActiveRoomParticipant = (roomId) => socket.activePresenceRoomIds.has(roomId);
+    const resolvedUserId = socket.userId.toString();
+    const activeSocketsForUser = activeSocketIdsByUserId.get(resolvedUserId) || new Set();
+    const wasOfflineBeforeConnect = activeSocketsForUser.size === 0;
+    activeSocketsForUser.add(socket.id);
+    activeSocketIdsByUserId.set(resolvedUserId, activeSocketsForUser);
 
     // Mark online
     (async () => {
         try {
-            if (redisClient.isReady) await redisClient.sAdd('online:users', socket.userId.toString());
+            if (!wasOfflineBeforeConnect) return;
+            if (redisClient.isReady) await redisClient.sAdd('online:users', resolvedUserId);
             const User = require('./src/models/User');
             await User.findByIdAndUpdate(socket.userId, {
                 'status.isOnline': true, 'status.lastActive': new Date()
@@ -304,6 +452,18 @@ io.on('connection', (socket) => {
         if (!groupId) return;
         socket.leave(`group:${groupId}`);
     });
+    socket.on('profile:join', ({ userId } = {}) => {
+        if (!userId) return;
+        const resolvedUserId = userId.toString();
+        socket.join(`profile:${resolvedUserId}`);
+        socket.joinedProfileIds.add(resolvedUserId);
+    });
+    socket.on('profile:leave', ({ userId } = {}) => {
+        if (!userId) return;
+        const resolvedUserId = userId.toString();
+        socket.leave(`profile:${resolvedUserId}`);
+        socket.joinedProfileIds.delete(resolvedUserId);
+    });
 
     // ── Room chat ─────────────────────────────────────────────────────────────
     socket.on('room:message', async (data) => {
@@ -329,7 +489,14 @@ io.on('connection', (socket) => {
 
     // ── Typing ────────────────────────────────────────────────────────────────
     socket.on('typing', ({ roomId, groupId, recipientId, isTyping } = {}) => {
-        const payload = { userId: socket.userId, username: socket.username, isTyping };
+        const payload = {
+            userId: socket.userId,
+            username: socket.username,
+            isTyping,
+            roomId: roomId || null,
+            groupId: groupId || null,
+            recipientId: recipientId || null
+        };
         if (roomId)      socket.to(`room:${roomId}`).emit('typing', payload);
         else if (groupId)     socket.to(`group:${groupId}`).emit('typing', payload);
         else if (recipientId) socket.to(`user:${recipientId}`).emit('typing', payload);
@@ -375,6 +542,34 @@ io.on('connection', (socket) => {
         if (roomId) io.to(`room:${roomId}`).emit('room:sound_effect', {
             userId: socket.userId, soundId, seatIndex
         });
+    });
+    socket.on('room:stage_feature', async ({ roomId, featureId } = {}) => {
+        if (!roomId || !featureId) return;
+        if (!isActiveRoomParticipant(roomId)) return;
+        if (!ROOM_STAGE_FEATURE_LABELS[featureId]) return;
+
+        try {
+            const Room = require('./src/models/Room');
+            const room = await Room.findById(roomId)
+                .populate('participants.userId', 'username avatar')
+                .lean();
+
+            if (!room || room.type !== 'voice') return;
+
+            const participants = normalizeRoomParticipants(room, socket);
+            const payload = buildRoomStageFeaturePayload({
+                featureId,
+                room,
+                participants,
+                socket
+            });
+
+            if (!payload) return;
+
+            io.to(`room:${roomId}`).emit('room:stage_feature', payload);
+        } catch (err) {
+            console.error('room:stage_feature error:', err.message);
+        }
     });
 
     // ── XP heartbeat ──────────────────────────────────────────────────────────
@@ -508,22 +703,36 @@ io.on('connection', (socket) => {
     // ── Disconnect ────────────────────────────────────────────────────────────
     socket.on('disconnect', async () => {
         console.log('🔌 User disconnected:', socket.userId);
+        const activeSockets = activeSocketIdsByUserId.get(resolvedUserId);
+        let isLastActiveSocket = true;
+        if (activeSockets) {
+            activeSockets.delete(socket.id);
+            if (activeSockets.size === 0) {
+                activeSocketIdsByUserId.delete(resolvedUserId);
+            } else {
+                isLastActiveSocket = false;
+            }
+        }
         if (redisClient.isReady) {
-            redisClient.sRem('online:users', socket.userId.toString()).catch(() => {});
+            if (isLastActiveSocket) {
+                redisClient.sRem('online:users', resolvedUserId).catch(() => {});
+            }
             socket.activePresenceRoomIds.forEach(rid => {
                 const key = `room:${rid}:users`;
-                redisClient.sRem(key, socket.userId.toString())
+                redisClient.sRem(key, resolvedUserId)
                     .then(() => redisClient.sCard(key))
                     .then(cnt => redisClient.set(`room:${rid}:count`, cnt.toString()))
                     .catch(() => {});
             });
         }
         try {
-            const User = require('./src/models/User');
-            await User.findByIdAndUpdate(socket.userId, {
-                'status.isOnline': false, 'status.lastActive': new Date()
-            });
-            broadcastToFriends(socket, 'friend:offline');
+            if (isLastActiveSocket) {
+                const User = require('./src/models/User');
+                await User.findByIdAndUpdate(socket.userId, {
+                    'status.isOnline': false, 'status.lastActive': new Date()
+                });
+                broadcastToFriends(socket, 'friend:offline');
+            }
         } catch (err) { console.error('disconnect user update error:', err.message); }
 
         if (socket.currentRoomId && socket.activePresenceRoomIds.has(socket.currentRoomId)) {

@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import '../../providers/auth_provider.dart';
 import '../../services/wallet_service.dart';
 import '../../utils/constants.dart';
+import '../../widgets/currency_icon.dart';
 
 class ShopScreen extends StatefulWidget {
   final int initialTab;
@@ -139,14 +140,9 @@ class _ShopScreenState extends State<ShopScreen> {
                           backgroundColor:
                               (isGem ? const Color(0xFF8B5CF6) : Colors.amber)
                                   .withValues(alpha: 0.14),
-                          child: Icon(
-                            isGem
-                                ? Icons.diamond_rounded
-                                : Icons.monetization_on_rounded,
-                            color: isGem
-                                ? const Color(0xFF8B5CF6)
-                                : Colors.amber.shade800,
-                          ),
+                          child: isGem
+                              ? const CurrencyIcon.gems(size: 26)
+                              : const CurrencyIcon.coins(size: 26),
                         ),
                         const SizedBox(width: 12),
                         Expanded(

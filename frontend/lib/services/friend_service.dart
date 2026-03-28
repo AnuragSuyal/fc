@@ -24,6 +24,22 @@ class FriendService {
     }
   }
 
+  static Future<Map<String, dynamic>> getFriendRequestOverview() async {
+    try {
+      final response = await ApiService.get('/friends/requests/overview');
+      if (response is Map<String, dynamic>) {
+        return response;
+      }
+      if (response is Map) {
+        return Map<String, dynamic>.from(response);
+      }
+      return {'incoming': [], 'outgoing': [], 'total': 0};
+    } catch (e) {
+      debugPrint('Error getting friend request overview: $e');
+      return {'incoming': [], 'outgoing': [], 'total': 0};
+    }
+  }
+
   // Get friend suggestions
   static Future<List<dynamic>> getFriendSuggestions() async {
     try {
@@ -112,9 +128,3 @@ class FriendService {
     }
   }
 }
-
-
-
-
-
-

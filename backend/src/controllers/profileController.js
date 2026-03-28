@@ -1,14 +1,202 @@
 const User = require('../models/User');
 const Post = require('../models/Post');
+const Message = require('../models/Message');
 const { applyAvatarUpdate } = require('../utils/avatarUploadLimit');
 
 const getResolvedUser = (identifier) => User.findByIdOrUid(identifier);
+const INTRO_MESSAGE_LIMIT = 3;
+
+const idsEqual = (left, right) =>
+    !!left && !!right && left.toString() === right.toString();
+
+const buildProfileStats = (user) => {
+    const visitorCount = user.profileVisitors?.length || 0;
+    const totalGames =
+        (user.gameStats?.werewolf?.played || 0) +
+        (user.gameStats?.drawing?.played || 0) +
+        (user.gameStats?.karaoke?.played || 0) +
+        (user.gameStats?.uno?.played || 0);
+
+    const totalWins =
+        (user.gameStats?.werewolf?.won || 0) +
+        (user.gameStats?.drawing?.won || 0) +
+        (user.gameStats?.karaoke?.won || 0) +
+        (user.gameStats?.uno?.won || 0);
+
+    const winRate = totalGames > 0 ? ((totalWins / totalGames) * 100).toFixed(1) : 0;
+
+    return {
+        totalGames,
+        totalWins,
+        winRate,
+        visitorCount,
+        friendCount: user.friends?.length || 0,
+        followerCount: user.followers?.length || 0,
+        followingCount: user.following?.length || 0,
+        giftsSent: user.stats?.giftsSent || 0,
+        giftsReceived: user.stats?.giftsReceived || 0
+    };
+};
+
+const buildRealtimeProfileUser = (user) => ({
+    id: user._id,
+    uid: user.uid,
+    username: user.username,
+    avatar: user.avatar,
+    coverPhoto: user.coverPhoto,
+    bio: user.bio,
+    region: user.region || 'Global',
+    level: user.level,
+    xp: user.xp,
+    coins: user.coins,
+    gems: user.gems,
+    vipLevel: user.vipLevel,
+    status: user.status,
+    lastActive: user.status?.lastActive,
+    gameStats: user.gameStats,
+    badges: user.badges,
+    stats: buildProfileStats(user)
+});
+
+const emitProfileRealtime = (req, user, event, payload = {}) => {
+    const io = req.app.get('io');
+    if (!io || !user?._id) return;
+
+    const userId = user._id.toString();
+    const basePayload = {
+        userId,
+        timestamp: new Date().toISOString(),
+        ...payload
+    };
+
+    io.to(`user:${userId}`).emit(event, basePayload);
+    io.to(`profile:${userId}`).emit(event, basePayload);
+};
+
+const buildRelationship = async ({ viewer, targetUser }) => {
+    const base = {
+        isSelf: false,
+        isFriend: false,
+        hasIncomingRequest: false,
+        hasOutgoingRequest: false,
+        canSendFriendRequest: false,
+        canMessage: false,
+        isBlocked: false,
+        introMessageLimit: INTRO_MESSAGE_LIMIT,
+        introMessagesUsed: 0,
+        introMessagesRemaining: 0,
+        requiresFriendshipForMore: false
+    };
+
+    if (!viewer || !targetUser) {
+        return base;
+    }
+
+    if (idsEqual(viewer._id, targetUser._id)) {
+        return {
+            ...base,
+            isSelf: true,
+            canMessage: true,
+            introMessagesRemaining: INTRO_MESSAGE_LIMIT
+        };
+    }
+
+    const isFriend = (viewer.friends || []).some(id => idsEqual(id, targetUser._id));
+    const hasIncomingRequest = (viewer.friendRequests || []).some(
+        request => idsEqual(request.from, targetUser._id) && request.status === 'pending'
+    );
+    const hasOutgoingRequest = (targetUser.friendRequests || []).some(
+        request => idsEqual(request.from, viewer._id) && request.status === 'pending'
+    );
+    const isBlocked = (viewer.blockedUsers || []).some(id => idsEqual(id, targetUser._id)) ||
+        (targetUser.blockedUsers || []).some(id => idsEqual(id, viewer._id));
+    const canSendFriendRequest = !isFriend &&
+        !hasIncomingRequest &&
+        !hasOutgoingRequest &&
+        !isBlocked &&
+        targetUser.settings?.privacy?.allowFriendRequests !== false;
+
+    let introMessagesUsed = 0;
+    if (!isFriend && !isBlocked) {
+        introMessagesUsed = await Message.countDocuments({
+            senderId: viewer._id,
+            recipientId: targetUser._id,
+            isDeleted: false,
+            type: { $ne: 'system' }
+        });
+    }
+    const introMessagesRemaining = isFriend
+        ? INTRO_MESSAGE_LIMIT
+        : Math.max(0, INTRO_MESSAGE_LIMIT - introMessagesUsed);
+
+    return {
+        isSelf: false,
+        isFriend,
+        hasIncomingRequest,
+        hasOutgoingRequest,
+        canSendFriendRequest,
+        canMessage: !isBlocked && (isFriend || introMessagesRemaining > 0),
+        isBlocked,
+        introMessageLimit: INTRO_MESSAGE_LIMIT,
+        introMessagesUsed,
+        introMessagesRemaining,
+        requiresFriendshipForMore: !isFriend && introMessagesRemaining <= 0
+    };
+};
+
+const buildProfileResponse = async ({ user, viewerId, postsLimit = 20 }) => {
+    const rawPosts = await Post.find({ userId: user._id, isDeleted: false })
+        .sort({ createdAt: -1 })
+        .limit(postsLimit)
+        .populate('userId', 'username avatar level');
+
+    const viewerIdString = viewerId?.toString?.() || '';
+    const posts = rawPosts.map((post) => {
+        const postObj = post.toObject();
+        postObj.isLikedByUser = viewerIdString
+            ? post.likes.some((like) => like.userId?.toString() === viewerIdString)
+            : false;
+        return postObj;
+    });
+
+    let viewer = null;
+    if (viewerId) {
+        viewer = idsEqual(user._id, viewerId)
+            ? user
+            : await User.findById(viewerId)
+                .select('friends friendRequests blockedUsers');
+    }
+
+    return {
+        user: {
+            id: user._id,
+            uid: user.uid,
+            username: user.username,
+            avatar: user.avatar,
+            coverPhoto: user.coverPhoto,
+            bio: user.bio,
+            region: user.region || 'Global',
+            level: user.level,
+            xp: user.xp,
+            coins: user.coins,
+            gems: user.gems,
+            vipLevel: user.vipLevel,
+            status: user.status,
+            lastActive: user.status?.lastActive,
+            gameStats: user.gameStats,
+            badges: user.badges,
+            stats: buildProfileStats(user)
+        },
+        relationship: await buildRelationship({ viewer, targetUser: user }),
+        posts
+    };
+};
 
 // @desc    Get current user profile
 exports.getMyProfile = async (req, res, next) => {
     try {
         const user = await User.findById(req.userId)
-            .select('uid username avatar coverPhoto bio level xp coins gems vipLevel status lastActive gameStats badges profileVisitors')
+            .select('uid username avatar coverPhoto bio region level xp coins gems vipLevel status lastActive gameStats badges profileVisitors friends followers following stats friendRequests blockedUsers settings')
             .populate('badges');
 
         if (!user) {
@@ -17,47 +205,7 @@ exports.getMyProfile = async (req, res, next) => {
             throw error;
         }
 
-        const posts = await Post.find({ userId: req.userId, isDeleted: false })
-            .sort({ createdAt: -1 })
-            .limit(5)
-            .populate('userId', 'username avatar');
-
-        const visitorCount = user.profileVisitors?.length || 0;
-        const totalGames =
-            (user.gameStats?.werewolf?.played || 0) +
-            (user.gameStats?.drawing?.played || 0) +
-            (user.gameStats?.karaoke?.played || 0) +
-            (user.gameStats?.uno?.played || 0);
-
-        const totalWins =
-            (user.gameStats?.werewolf?.won || 0) +
-            (user.gameStats?.drawing?.won || 0) +
-            (user.gameStats?.karaoke?.won || 0) +
-            (user.gameStats?.uno?.won || 0);
-
-        const winRate = totalGames > 0 ? ((totalWins / totalGames) * 100).toFixed(1) : 0;
-
-        res.json({
-            user: {
-                id: user._id,
-                uid: user.uid,
-                username: user.username,
-                avatar: user.avatar,
-                coverPhoto: user.coverPhoto,
-                bio: user.bio,
-                level: user.level,
-                xp: user.xp,
-                coins: user.coins,
-                gems: user.gems,
-                vipLevel: user.vipLevel,
-                status: user.status,
-                lastActive: user.status?.lastActive,
-                gameStats: user.gameStats,
-                badges: user.badges,
-                stats: { totalGames, totalWins, winRate, visitorCount }
-            },
-            posts
-        });
+        res.json(await buildProfileResponse({ user, viewerId: req.userId }));
     } catch (error) {
         next(error);
     }
@@ -68,7 +216,7 @@ exports.getProfile = async (req, res, next) => {
     try {
         const { userId } = req.params;
         const user = await getResolvedUser(userId)
-            .select('uid username avatar coverPhoto bio level xp coins gems vipLevel status lastActive gameStats badges profileVisitors')
+            .select('uid username avatar coverPhoto bio region level xp coins gems vipLevel status lastActive gameStats badges profileVisitors friends followers following stats friendRequests blockedUsers settings')
             .populate('badges');
 
         if (!user) {
@@ -77,37 +225,7 @@ exports.getProfile = async (req, res, next) => {
             throw error;
         }
 
-        const posts = await Post.find({ userId: user._id, isDeleted: false })
-            .sort({ createdAt: -1 })
-            .limit(5)
-            .populate('userId', 'username avatar');
-
-        const visitorCount = user.profileVisitors?.length || 0;
-        const totalGames = (user.gameStats?.werewolf?.played || 0) + (user.gameStats?.drawing?.played || 0) + (user.gameStats?.karaoke?.played || 0) + (user.gameStats?.uno?.played || 0);
-        const totalWins = (user.gameStats?.werewolf?.won || 0) + (user.gameStats?.drawing?.won || 0) + (user.gameStats?.karaoke?.won || 0) + (user.gameStats?.uno?.won || 0);
-        const winRate = totalGames > 0 ? ((totalWins / totalGames) * 100).toFixed(1) : 0;
-
-        res.json({
-            user: {
-                id: user._id,
-                uid: user.uid,
-                username: user.username,
-                avatar: user.avatar,
-                coverPhoto: user.coverPhoto,
-                bio: user.bio,
-                level: user.level,
-                xp: user.xp,
-                coins: user.coins,
-                gems: user.gems,
-                vipLevel: user.vipLevel,
-                status: user.status,
-                lastActive: user.status?.lastActive,
-                gameStats: user.gameStats,
-                badges: user.badges,
-                stats: { totalGames, totalWins, winRate, visitorCount }
-            },
-            posts
-        });
+        res.json(await buildProfileResponse({ user, viewerId: req.userId }));
     } catch (error) {
         next(error);
     }
@@ -116,7 +234,7 @@ exports.getProfile = async (req, res, next) => {
 // @desc    Update profile
 exports.updateProfile = async (req, res, next) => {
     try {
-        const { bio, avatar, coverPhoto } = req.body;
+        const { bio, avatar, coverPhoto, region } = req.body;
         const user = await User.findById(req.userId);
 
         if (!user) {
@@ -128,6 +246,7 @@ exports.updateProfile = async (req, res, next) => {
         if (bio !== undefined) user.bio = bio;
         if (avatar !== undefined) applyAvatarUpdate(user, avatar);
         if (coverPhoto !== undefined) user.coverPhoto = coverPhoto;
+        if (region !== undefined) user.region = String(region).trim() || 'Global';
 
         await user.save();
 
@@ -135,6 +254,16 @@ exports.updateProfile = async (req, res, next) => {
         if (redis && redis.isReady) {
             await redis.del(`cache:user:${req.userId}`);
         }
+
+        emitProfileRealtime(req, user, 'profile:updated', {
+            user: buildRealtimeProfileUser(user),
+            fields: {
+                bio: user.bio,
+                avatar: user.avatar,
+                coverPhoto: user.coverPhoto,
+                region: user.region
+            }
+        });
 
         res.json({ success: true, user: user.toJSON() });
     } catch (error) {
@@ -231,6 +360,28 @@ exports.addVisitor = async (req, res, next) => {
         }
 
         await user.save();
+        const visitorUser = await User.findById(req.userId)
+            .select('uid username avatar level');
+
+        const io = req.app.get('io');
+        if (io) {
+            io.to(`user:${user._id.toString()}`).emit('profile:visitor', {
+                userId: user._id.toString(),
+                timestamp: new Date().toISOString(),
+                visitorCount: user.profileVisitors.length,
+                visitor: visitorUser
+                    ? {
+                        id: visitorUser._id,
+                        uid: visitorUser.uid,
+                        username: visitorUser.username,
+                        avatar: visitorUser.avatar,
+                        level: visitorUser.level
+                    }
+                    : null,
+                message: req.body.message || null
+            });
+        }
+
         res.json({ success: true });
     } catch (error) {
         next(error);
@@ -259,6 +410,11 @@ exports.updateGameStats = async (req, res, next) => {
         user.gameStats[game].level = Math.floor(wins / 10) + 1;
 
         await user.save();
+        emitProfileRealtime(req, user, 'profile:stats_updated', {
+            game,
+            gameStats: user.gameStats[game],
+            stats: buildProfileStats(user)
+        });
         res.json({ success: true, gameStats: user.gameStats[game] });
     } catch (error) {
         next(error);
@@ -281,12 +437,12 @@ exports.addBadge = async (req, res, next) => {
 
         user.badges.push({ id: badgeId, name, description, icon, rarity, earnedAt: Date.now() });
         await user.save();
+        emitProfileRealtime(req, user, 'profile:badge_awarded', {
+            badge: user.badges[user.badges.length - 1],
+            user: buildRealtimeProfileUser(user)
+        });
         res.json({ success: true, badge: user.badges[user.badges.length - 1] });
     } catch (error) {
         next(error);
     }
 };
-
-
-
-

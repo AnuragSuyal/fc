@@ -160,6 +160,57 @@ class Participant {
   }
 }
 
+class RoomYoutubeQueueItem {
+  final String videoId;
+  final String url;
+  final String title;
+  final String thumbnailUrl;
+  final int durationMs;
+  final String addedBy;
+  final DateTime? addedAt;
+
+  const RoomYoutubeQueueItem({
+    required this.videoId,
+    required this.url,
+    required this.title,
+    required this.thumbnailUrl,
+    this.durationMs = 0,
+    this.addedBy = '',
+    this.addedAt,
+  });
+
+  factory RoomYoutubeQueueItem.fromJson(Map<String, dynamic> json) {
+    return RoomYoutubeQueueItem(
+      videoId: json['videoId']?.toString() ?? '',
+      url: json['url']?.toString() ?? json['youtubeUrl']?.toString() ?? '',
+      title:
+          json['title']?.toString() ?? json['youtubeTitle']?.toString() ?? '',
+      thumbnailUrl: json['thumbnailUrl']?.toString() ??
+          json['youtubeThumbnail']?.toString() ??
+          '',
+      durationMs: json['durationMs'] is int
+          ? json['durationMs'] as int
+          : int.tryParse('${json['durationMs']}') ?? 0,
+      addedBy: json['addedBy']?.toString() ?? '',
+      addedAt: json['addedAt'] != null
+          ? DateTime.tryParse(json['addedAt'].toString())
+          : null,
+    );
+  }
+
+  Map<String, dynamic> toThemeJson() {
+    return {
+      'videoId': videoId,
+      'url': url,
+      'title': title,
+      'thumbnailUrl': thumbnailUrl,
+      'durationMs': durationMs,
+      'addedBy': addedBy,
+      if (addedAt != null) 'addedAt': addedAt!.toIso8601String(),
+    };
+  }
+}
+
 class RoomModel {
   final String id;
   final String roomId;
@@ -197,6 +248,10 @@ class RoomModel {
   final String? youtubeUrl;
   final String? youtubeTitle;
   final String? youtubeThumbnail;
+  final List<RoomYoutubeQueueItem> youtubeQueue;
+  final int youtubePositionMs;
+  final String youtubePlaybackState;
+  final DateTime? youtubeSyncedAt;
   final String? musicUrl;
   final String? musicTitle;
   final bool musicLoop;
@@ -240,6 +295,10 @@ class RoomModel {
     this.youtubeUrl,
     this.youtubeTitle,
     this.youtubeThumbnail,
+    this.youtubeQueue = const [],
+    this.youtubePositionMs = 0,
+    this.youtubePlaybackState = 'paused',
+    this.youtubeSyncedAt,
     this.musicUrl,
     this.musicTitle,
     this.musicLoop = false,
@@ -270,6 +329,9 @@ class RoomModel {
 
     final settingsMap = json['settings'] is Map<String, dynamic>
         ? json['settings'] as Map<String, dynamic>
+        : <String, dynamic>{};
+    final themeMap = json['theme'] is Map<String, dynamic>
+        ? json['theme'] as Map<String, dynamic>
         : <String, dynamic>{};
 
     final announcementValue = json['announcement'];
@@ -310,14 +372,33 @@ class RoomModel {
       region: json['region']?.toString() ?? 'Global',
       followers: json['metrics']?['followers'] ?? 0,
       totalEarned: json['economy']?['totalEarned'] ?? 0,
-      background: json['theme']?['background']?.toString() ?? 'default',
-      coverImage: json['theme']?['coverImage']?.toString(),
-      youtubeUrl: json['theme']?['youtubeUrl']?.toString(),
-      youtubeTitle: json['theme']?['youtubeTitle']?.toString(),
-      youtubeThumbnail: json['theme']?['youtubeThumbnail']?.toString(),
-      musicUrl: json['theme']?['music']?.toString(),
-      musicTitle: json['theme']?['musicTitle']?.toString(),
-      musicLoop: json['theme']?['musicLoop'] == true,
+      background: themeMap['background']?.toString() ?? 'default',
+      coverImage: themeMap['coverImage']?.toString(),
+      youtubeUrl: themeMap['youtubeUrl']?.toString(),
+      youtubeTitle: themeMap['youtubeTitle']?.toString(),
+      youtubeThumbnail: themeMap['youtubeThumbnail']?.toString(),
+      youtubeQueue: themeMap['youtubeQueue'] is List
+          ? (themeMap['youtubeQueue'] as List)
+              .whereType<Map>()
+              .map(
+                (entry) => RoomYoutubeQueueItem.fromJson(
+                  Map<String, dynamic>.from(entry),
+                ),
+              )
+              .where((entry) => entry.url.isNotEmpty)
+              .toList()
+          : const [],
+      youtubePositionMs: themeMap['youtubePositionMs'] is int
+          ? themeMap['youtubePositionMs'] as int
+          : int.tryParse('${themeMap['youtubePositionMs']}') ?? 0,
+      youtubePlaybackState:
+          themeMap['youtubePlaybackState']?.toString() ?? 'paused',
+      youtubeSyncedAt: themeMap['youtubeSyncedAt'] != null
+          ? DateTime.tryParse(themeMap['youtubeSyncedAt'].toString())
+          : null,
+      musicUrl: themeMap['music']?.toString(),
+      musicTitle: themeMap['musicTitle']?.toString(),
+      musicLoop: themeMap['musicLoop'] == true,
       announcement: announcementValue is Map
           ? (announcementValue['text']?.toString() ?? '')
           : (announcementValue?.toString() ?? ''),
@@ -351,6 +432,10 @@ class RoomModel {
     String? youtubeUrl,
     String? youtubeTitle,
     String? youtubeThumbnail,
+    List<RoomYoutubeQueueItem>? youtubeQueue,
+    int? youtubePositionMs,
+    String? youtubePlaybackState,
+    DateTime? youtubeSyncedAt,
     String? musicUrl,
     String? musicTitle,
     bool? musicLoop,
@@ -388,6 +473,10 @@ class RoomModel {
       youtubeUrl: youtubeUrl ?? this.youtubeUrl,
       youtubeTitle: youtubeTitle ?? this.youtubeTitle,
       youtubeThumbnail: youtubeThumbnail ?? this.youtubeThumbnail,
+      youtubeQueue: youtubeQueue ?? this.youtubeQueue,
+      youtubePositionMs: youtubePositionMs ?? this.youtubePositionMs,
+      youtubePlaybackState: youtubePlaybackState ?? this.youtubePlaybackState,
+      youtubeSyncedAt: youtubeSyncedAt ?? this.youtubeSyncedAt,
       musicUrl: musicUrl ?? this.musicUrl,
       musicTitle: musicTitle ?? this.musicTitle,
       musicLoop: musicLoop ?? this.musicLoop,
@@ -432,6 +521,11 @@ class RoomModel {
   bool get stageJoinsLocked => settings.stageJoinsLocked;
   int get maxActiveSpeakers => settings.maxActiveSpeakers;
   bool get requireApproval => settings.requireApproval;
+  bool get isYoutubePlaying => youtubePlaybackState == 'playing';
+  RoomYoutubeQueueItem? get currentYoutubeQueueItem =>
+      youtubeQueue.isEmpty ? null : youtubeQueue.first;
+  int get maxAdminSlots => level >= 4 ? 5 : 4;
+  int? get nextAdminUnlockLevel => level >= 4 ? null : 4;
 
   static List<String> _parseIdList(dynamic value) {
     if (value is! List) return const [];

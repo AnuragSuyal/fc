@@ -1,10 +1,13 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+
 import '../../models/gift_model.dart';
+import '../../providers/auth_provider.dart';
 import '../../services/gift_service.dart';
 import '../../utils/constants.dart';
-import 'package:provider/provider.dart';
-import '../../providers/auth_provider.dart';
 import '../../utils/haptics_util.dart';
+import '../../utils/media_url.dart';
+import '../currency_icon.dart';
 
 class GiftBottomSheet extends StatefulWidget {
   final String toUserId;
@@ -76,16 +79,22 @@ class _GiftBottomSheetState extends State<GiftBottomSheet>
         message: _messageController.text,
       );
 
-      if (result.containsKey('transaction')) {
+      final sentSuccessfully =
+          result['success'] == true || result['transactionId'] != null;
+
+      if (sentSuccessfully) {
         if (!mounted) return;
 
         // Update auth provider balance
         if (result['newBalance'] != null) {
           final authProvider =
               Provider.of<AuthProvider>(context, listen: false);
-          authProvider.updateBalance(
+          authProvider.updateProfile(
             coins: result['newBalance']['coins'],
             gems: result['newBalance']['gems'],
+            xp: result['newBalance']['xp'],
+            level: result['newBalance']['level'],
+            vipLevel: result['newBalance']['vipLevel'],
           );
         }
 
@@ -96,7 +105,17 @@ class _GiftBottomSheetState extends State<GiftBottomSheet>
             backgroundColor: AppColors.successGreen,
           ),
         );
+        return;
       }
+
+      if (!mounted) return;
+      setState(() => _isSending = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Unable to send gift right now.'),
+          backgroundColor: AppColors.errorRed,
+        ),
+      );
     } catch (e) {
       if (!mounted) return;
       HapticsUtil.error();
@@ -162,8 +181,7 @@ class _GiftBottomSheetState extends State<GiftBottomSheet>
                   ),
                   child: Row(
                     children: [
-                      Icon(Icons.monetization_on,
-                          size: 16, color: Colors.amber.shade700),
+                      const CurrencyIcon.coins(size: 16),
                       const SizedBox(width: 4),
                       Text(
                         '${user?.coins ?? 0}',
@@ -187,8 +205,7 @@ class _GiftBottomSheetState extends State<GiftBottomSheet>
                   ),
                   child: Row(
                     children: [
-                      Icon(Icons.diamond,
-                          size: 16, color: Colors.blue.shade700),
+                      const CurrencyIcon.gems(size: 16),
                       const SizedBox(width: 4),
                       Text(
                         '${user?.gems ?? 0}',
@@ -263,15 +280,13 @@ class _GiftBottomSheetState extends State<GiftBottomSheet>
                       Row(
                         children: [
                           if (_selectedGift!.coinsPrice > 0) ...[
-                            Icon(Icons.monetization_on,
-                                size: 14, color: Colors.amber.shade700),
+                            const CurrencyIcon.coins(size: 14),
                             const SizedBox(width: 4),
                             Text('${_selectedGift!.coinsPrice}'),
                             const SizedBox(width: 8),
                           ],
                           if (_selectedGift!.gemsPrice > 0) ...[
-                            Icon(Icons.diamond,
-                                size: 14, color: Colors.blue.shade700),
+                            const CurrencyIcon.gems(size: 14),
                             const SizedBox(width: 4),
                             Text('${_selectedGift!.gemsPrice}'),
                           ],
@@ -292,6 +307,17 @@ class _GiftBottomSheetState extends State<GiftBottomSheet>
                     ),
                   ),
                   const SizedBox(height: 16),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      'Receiver gains about ${_giftXpReward(_selectedGift!)} XP',
+                      style: const TextStyle(
+                        color: AppColors.textSecondary,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
                   SizedBox(
                     width: double.infinity,
                     height: 50,
@@ -360,9 +386,9 @@ class _GiftBottomSheetState extends State<GiftBottomSheet>
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Text(
-                  gift.icon,
-                  style: const TextStyle(fontSize: 40),
+                _GiftIconPreview(
+                  icon: gift.icon,
+                  size: 48,
                 ),
                 const SizedBox(height: 8),
                 Text(
@@ -380,16 +406,14 @@ class _GiftBottomSheetState extends State<GiftBottomSheet>
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
                     if (gift.coinsPrice > 0) ...[
-                      Icon(Icons.monetization_on,
-                          size: 12, color: Colors.amber.shade700),
+                      const CurrencyIcon.coins(size: 12),
                       const SizedBox(width: 2),
                       Text(
                         '${gift.coinsPrice}',
                         style: const TextStyle(fontSize: 10),
                       ),
                     ] else if (gift.gemsPrice > 0) ...[
-                      Icon(Icons.diamond,
-                          size: 12, color: Colors.blue.shade700),
+                      const CurrencyIcon.gems(size: 12),
                       const SizedBox(width: 2),
                       Text(
                         '${gift.gemsPrice}',
@@ -405,10 +429,56 @@ class _GiftBottomSheetState extends State<GiftBottomSheet>
       },
     );
   }
+
+  int _giftXpReward(GiftModel gift) {
+    final recipientEffects = gift.effects['recipient'];
+    final senderEffects = gift.effects['sender'];
+    final rawXp = recipientEffects is Map
+        ? recipientEffects['xp']
+        : senderEffects is Map
+            ? senderEffects['xp']
+            : null;
+
+    if (rawXp is int) return rawXp;
+    if (rawXp is num) return rawXp.toInt();
+
+    final derived = (gift.coinsPrice / 20).floor() + (gift.gemsPrice * 2);
+    return derived > 0 ? derived : 1;
+  }
 }
 
+class _GiftIconPreview extends StatelessWidget {
+  final String icon;
+  final double size;
 
+  const _GiftIconPreview({
+    required this.icon,
+    required this.size,
+  });
 
+  @override
+  Widget build(BuildContext context) {
+    final resolvedUrl = resolveMediaUrl(icon);
+    if (resolvedUrl == null) {
+      return Text(
+        icon,
+        style: TextStyle(fontSize: size * 0.8),
+      );
+    }
 
-
-
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(14),
+      child: Image.network(
+        resolvedUrl,
+        width: size,
+        height: size,
+        fit: BoxFit.cover,
+        errorBuilder: (_, __, ___) => Icon(
+          Icons.card_giftcard_rounded,
+          size: size * 0.68,
+          color: AppColors.textSecondary,
+        ),
+      ),
+    );
+  }
+}

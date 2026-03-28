@@ -9,6 +9,7 @@ router.use(auth);
 // Friend management
 router.get('/', friendController.getFriends);
 router.get('/requests', friendController.getFriendRequests);
+router.get('/requests/overview', friendController.getFriendRequestOverview);
 router.get('/suggestions', friendController.getFriendSuggestions);
 router.get('/blocked', friendController.getBlockedUsers);
 
@@ -23,7 +24,6 @@ router.post('/block/:userId', friendController.blockUser);
 router.delete('/block/:userId', friendController.unblockUser);
 
 module.exports = router;
-
 
 
 

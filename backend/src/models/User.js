@@ -13,16 +13,29 @@ const missingUidQuery = {
 };
 
 const allocateNextUserUid = async () => {
-    const counter = await Counter.findByIdAndUpdate(
+    let counter = await Counter.findById(USER_UID_SEQUENCE).select('seq');
+
+    if (!counter) {
+        try {
+            counter = await Counter.create({
+                _id: USER_UID_SEQUENCE,
+                seq: USER_UID_START
+            });
+            return counter.seq.toString();
+        } catch (error) {
+            if (error?.code !== 11000) {
+                throw error;
+            }
+        }
+    }
+
+    counter = await Counter.findByIdAndUpdate(
         USER_UID_SEQUENCE,
         {
-            $setOnInsert: { seq: USER_UID_START - 1 },
             $inc: { seq: 1 }
         },
         {
-            new: true,
-            upsert: true,
-            setDefaultsOnInsert: true
+            new: true
         }
     );
 
@@ -84,6 +97,11 @@ const userSchema = new mongoose.Schema({
     bio: {
         type: String,
         maxlength: 500
+    },
+    region: {
+        type: String,
+        trim: true,
+        default: 'Global'
     },
 
     // Profile views/visitors
@@ -470,7 +488,5 @@ userSchema.methods.toJSON = function () {
 };
 
 module.exports = mongoose.model('User', userSchema);
-
-
 
 

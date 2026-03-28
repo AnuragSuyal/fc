@@ -33,7 +33,7 @@ class SupportScreen extends StatelessWidget {
           _buildFaqTile(
             question: 'How do I send gifts?',
             answer:
-                'Visit the Gift Shop, select a gift, choose a recipient, and tap Send.',
+                'Use the gift button inside a voice or game room, or inside a one-to-one friend chat, then pick the gift and send it.',
           ),
           _buildFaqTile(
             question: 'How do I earn coins?',
@@ -191,8 +191,6 @@ class SupportScreen extends StatelessWidget {
     );
   }
 }
-
-
 
 
 

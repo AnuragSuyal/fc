@@ -3,7 +3,11 @@ const router  = express.Router();
 const mc      = require('../controllers/messageController');
 const auth    = require('../middleware/auth');
 const validate = require('../middleware/validate');
-const { sendDirectMessageSchema, sendRoomMessageSchema } = require('../utils/validation');
+const {
+  sendDirectMessageSchema,
+  sendRoomMessageSchema,
+  sendGroupMessageSchema,
+} = require('../utils/validation');
 
 // Direct messages
 router.get('/conversations',       auth, mc.getConversations);
@@ -18,12 +22,11 @@ router.post('/room',               auth, validate(sendRoomMessageSchema), mc.sen
 
 // Group messages
 router.get('/group/:groupId',      auth, mc.getGroupMessages);
-router.post('/group',              auth, mc.sendGroupMessage);
+router.post('/group',              auth, validate(sendGroupMessageSchema), mc.sendGroupMessage);
 
 // Reactions & deletion
 router.post('/:messageId/react',   auth, mc.addReaction);
 router.delete('/:messageId',       auth, mc.deleteMessage);
 
 module.exports = router;
-
 

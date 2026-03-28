@@ -43,7 +43,7 @@ exports.getTransactions = async (req, res, next) => {
         const total = await Transaction.countDocuments(query);
         const grouped = {};
         transactions.forEach(t => {
-            const date = t.createdAt.toDateString();
+            const date = t.createdAt.toISOString().slice(0, 10);
             if (!grouped[date]) grouped[date] = [];
             grouped[date].push(t);
         });
@@ -273,7 +273,6 @@ exports.convertCoinsToGems = async (req, res, next) => {
 };
 
 exports.getSpecialOffers = (req, res) => res.json([]);
-
 
 
 

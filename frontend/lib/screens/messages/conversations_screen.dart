@@ -251,7 +251,7 @@ class _ConversationsScreenState extends State<ConversationsScreen> {
                             ),
                           Expanded(
                             child: Text(
-                              conv.lastMessage.content,
+                              conv.lastMessage.previewText,
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                               style: TextStyle(

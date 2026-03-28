@@ -1,8 +1,9 @@
 import 'package:flutter/material.dart';
 import '../models/gift_model.dart';
+import '../screens/gifts/send_gift_screen.dart';
 import '../theme/app_theme.dart';
 import '../utils/constants.dart';
-import '../screens/gifts/send_gift_screen.dart';
+import 'currency_icon.dart';
 
 class GiftCard extends StatelessWidget {
   final GiftModel gift;
@@ -95,11 +96,7 @@ class GiftCard extends StatelessWidget {
                 Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    const Icon(
-                      Icons.monetization_on_rounded,
-                      size: 14,
-                      color: AppColors.warningOrange,
-                    ),
+                    const CurrencyIcon.coins(size: 14),
                     const SizedBox(width: 2),
                     Text(
                       '${gift.coinsPrice}',
@@ -114,11 +111,7 @@ class GiftCard extends StatelessWidget {
                 Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    const Icon(
-                      Icons.diamond_rounded,
-                      size: 14,
-                      color: AppColors.accentBerry,
-                    ),
+                    const CurrencyIcon.gems(size: 14),
                     const SizedBox(width: 2),
                     Text(
                       '${gift.gemsPrice}',

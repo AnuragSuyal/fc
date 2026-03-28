@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../../models/post_model.dart';
@@ -13,9 +14,11 @@ import '../../services/economy_service.dart';
 import '../../services/friend_service.dart';
 import '../../services/profile_service.dart';
 import '../../services/room_service.dart';
+import '../../services/settings_service.dart';
 import '../../services/socket_service.dart';
 import '../../services/wedding_service.dart';
 import '../../utils/constants.dart';
+import '../../widgets/currency_icon.dart';
 import '../../widgets/user_avatar.dart';
 import '../rooms/room_detail_screen.dart';
 
@@ -31,7 +34,6 @@ class _MeScreenState extends State<MeScreen>
   UserModel? _profileUser;
   StatsModel? _economyStats;
   List<PostModel> _posts = [];
-  List<dynamic> _badges = [];
   Map<String, dynamic> _gameStats = {};
   List<dynamic> _visitors = [];
   List<RoomModel> _myRooms = [];
@@ -47,6 +49,7 @@ class _MeScreenState extends State<MeScreen>
   bool _isLoading = true;
   String? _error;
   bool _isDisposed = false;
+  String? _currentUserId;
 
   final List<StreamSubscription> _subs = [];
   Timer? _socialRefreshDebounce;
@@ -63,6 +66,7 @@ class _MeScreenState extends State<MeScreen>
     final auth = context.read<AuthProvider>();
     _profileUser = auth.user;
     _pendingRequests = auth.pendingFriendRequests;
+    _currentUserId = auth.user?.id;
 
     _bindRealtime();
     _loadDashboard();
@@ -148,6 +152,17 @@ class _MeScreenState extends State<MeScreen>
             type == 'room_updated') {
           _markRealtime('Room activity updated');
           _scheduleRoomsRefresh();
+        }
+      }),
+    );
+
+    _subs.add(
+      SocketService.postStream.listen((event) {
+        final ownUserId = _currentUserId;
+        if (ownUserId == null) return;
+        if (event['userId']?.toString() == ownUserId) {
+          _markRealtime('Posts updated live');
+          _loadDashboard(silent: true);
         }
       }),
     );
@@ -259,7 +274,6 @@ class _MeScreenState extends State<MeScreen>
         _economyStats =
             economyData.isNotEmpty ? StatsModel.fromJson(economyData) : null;
         _posts = posts;
-        _badges = loadedUser?.badges ?? [];
         _gameStats = loadedUser?.gameStats ?? {};
         _visitors = visitorsData['visitors'] is List
             ? List<dynamic>.from(visitorsData['visitors'])
@@ -332,6 +346,62 @@ class _MeScreenState extends State<MeScreen>
         _weddingStatus = wedding;
       });
     } catch (_) {}
+  }
+
+  Future<void> _selectRegion() async {
+    final currentRegion = _profileUser?.region ?? 'Global';
+    final selected = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (context) => SafeArea(
+        child: Container(
+          decoration: const BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+          ),
+          child: ListView(
+            shrinkWrap: true,
+            children: [
+              const Padding(
+                padding: EdgeInsets.fromLTRB(20, 20, 20, 8),
+                child: Text(
+                  'Select Region',
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+              ...AppRegions.values.map(
+                (region) => ListTile(
+                  leading: Icon(
+                    region == currentRegion
+                        ? Icons.radio_button_checked_rounded
+                        : Icons.radio_button_off_rounded,
+                    color: AppColors.primaryBlue,
+                  ),
+                  title: Text(region),
+                  onTap: () => Navigator.pop(context, region),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    if (selected == null || selected == currentRegion) return;
+
+    final response = await SettingsService.saveProfile({'region': selected});
+    if (!mounted || response == null) return;
+
+    _safeSetState(() {
+      _profileUser = _profileUser?.copyWith(region: selected);
+    });
+    context.read<AuthProvider>().updateUserDetails(region: selected);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Region updated to $selected')),
+    );
   }
 
   Future<void> _openLatestInvite() async {
@@ -414,6 +484,9 @@ class _MeScreenState extends State<MeScreen>
     final bio = profileUser.bio ?? authUser?.bio;
     final uid =
         authUser?.uid.isNotEmpty == true ? authUser!.uid : profileUser.uid;
+    final region = authUser?.region.isNotEmpty == true
+        ? authUser!.region
+        : profileUser.region;
     final level = authUser?.level ?? _economyStats?.level ?? profileUser.level;
     final xp = authUser?.xp ?? _economyStats?.xp ?? profileUser.xp;
     final coins = authUser?.coins ?? _economyStats?.coins ?? profileUser.coins;
@@ -440,6 +513,7 @@ class _MeScreenState extends State<MeScreen>
             coverUrl: coverUrl,
             bio: bio,
             uid: uid,
+            region: region,
             level: level,
             xp: xp,
             vipLevel: vipLevel,
@@ -510,6 +584,7 @@ class _MeScreenState extends State<MeScreen>
     required String? coverUrl,
     required String? bio,
     required String uid,
+    required String region,
     required int level,
     required int xp,
     required int vipLevel,
@@ -677,6 +752,17 @@ class _MeScreenState extends State<MeScreen>
                             _HeroChip(
                               icon: Icons.badge_outlined,
                               label: 'UID $uid',
+                              onTap: () async {
+                                await Clipboard.setData(
+                                  ClipboardData(text: uid),
+                                );
+                                if (!mounted) return;
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content: Text('UID copied to clipboard'),
+                                  ),
+                                );
+                              },
                             ),
                             const SizedBox(height: 8),
                           ],
@@ -691,6 +777,11 @@ class _MeScreenState extends State<MeScreen>
                               _HeroChip(
                                 icon: Icons.auto_awesome_rounded,
                                 label: 'XP $xp',
+                              ),
+                              _HeroChip(
+                                icon: Icons.public_rounded,
+                                label: region,
+                                onTap: _selectRegion,
                               ),
                               if (vipLevel > 0)
                                 _HeroChip(
@@ -774,7 +865,7 @@ class _MeScreenState extends State<MeScreen>
           child: _StatTile(
             label: 'Coins',
             value: '$coins',
-            icon: Icons.monetization_on_outlined,
+            icon: const CurrencyIcon.coins(size: 20),
             color: const Color(0xFFFFB703),
           ),
         ),
@@ -783,7 +874,7 @@ class _MeScreenState extends State<MeScreen>
           child: _StatTile(
             label: 'Gems',
             value: '$gems',
-            icon: Icons.diamond_outlined,
+            icon: const CurrencyIcon.gems(size: 20),
             color: const Color(0xFF8B5CF6),
           ),
         ),
@@ -792,7 +883,13 @@ class _MeScreenState extends State<MeScreen>
           child: _StatTile(
             label: 'Next Level',
             value: '$nextLevelXp',
-            icon: Icons.trending_up_rounded,
+            icon: Image.asset(
+              'assets/images/me_next_level.png',
+              width: 30,
+              height: 30,
+              fit: BoxFit.contain,
+              filterQuality: FilterQuality.high,
+            ),
             color: const Color(0xFF0EA5E9),
           ),
         ),
@@ -801,7 +898,13 @@ class _MeScreenState extends State<MeScreen>
           child: _StatTile(
             label: 'Friends Online',
             value: '$onlineFriends',
-            icon: Icons.wifi_tethering_rounded,
+            icon: Image.asset(
+              'assets/images/me_friends_online.png',
+              width: 30,
+              height: 30,
+              fit: BoxFit.contain,
+              filterQuality: FilterQuality.high,
+            ),
             color: const Color(0xFF10B981),
           ),
         ),
@@ -969,39 +1072,55 @@ class _MeScreenState extends State<MeScreen>
   Widget _buildQuickActions(int pendingRequests) {
     final actions = [
       _QuickAction(
-        icon: Icons.account_balance_wallet_outlined,
+        icon: Image.asset(
+          'assets/images/me_wallet_quick_action.png',
+          width: 32,
+          height: 26,
+          fit: BoxFit.contain,
+          filterQuality: FilterQuality.high,
+        ),
         title: 'Wallet',
         subtitle: 'Coins and gems',
         color: const Color(0xFFFFB703),
         onTap: () => Navigator.pushNamed(context, '/wallet'),
       ),
       _QuickAction(
-        icon: Icons.workspace_premium_outlined,
+        icon: const Icon(Icons.workspace_premium_outlined),
         title: 'VIP',
         subtitle: 'Perks and status',
         color: const Color(0xFF8B5CF6),
         onTap: () => Navigator.pushNamed(context, '/vip'),
       ),
       _QuickAction(
-        icon: Icons.favorite_border_rounded,
+        icon: const Icon(Icons.favorite_border_rounded),
         title: 'Mingle',
         subtitle: _weddingLabel(),
         color: const Color(0xFFEF476F),
         onTap: () => Navigator.pushNamed(context, '/mingle'),
       ),
       _QuickAction(
-        icon: Icons.task_alt_rounded,
+        icon: const Icon(Icons.task_alt_rounded),
         title: 'Quests',
         subtitle: 'Daily progress',
         color: const Color(0xFF0EA5E9),
         onTap: () => Navigator.pushNamed(context, '/quests'),
       ),
       _QuickAction(
-        icon: Icons.card_giftcard_rounded,
+        icon: const Icon(Icons.card_giftcard_rounded),
         title: 'Rewards',
         subtitle: 'Claim daily gifts',
         color: const Color(0xFF10B981),
         onTap: () => Navigator.pushNamed(context, '/daily-rewards'),
+      ),
+      _QuickAction(
+        icon: const Icon(Icons.visibility_outlined),
+        title: 'Visitors',
+        subtitle: _visitors.isEmpty
+            ? 'People who saw your profile'
+            : '${_visitors.length} profile viewer${_visitors.length == 1 ? '' : 's'}',
+        color: const Color(0xFF6366F1),
+        onTap: () =>
+            Navigator.pushNamed(context, '/visitors', arguments: _visitors),
       ),
     ];
 
@@ -1044,7 +1163,12 @@ class _MeScreenState extends State<MeScreen>
                     color: action.color.withValues(alpha: 0.14),
                     borderRadius: BorderRadius.circular(14),
                   ),
-                  child: Icon(action.icon, color: action.color),
+                  child: Center(
+                    child: IconTheme(
+                      data: IconThemeData(color: action.color, size: 24),
+                      child: action.icon,
+                    ),
+                  ),
                 ),
                 const Spacer(),
                 Text(
@@ -1302,16 +1426,6 @@ class _MeScreenState extends State<MeScreen>
   Widget _buildToolsGrid() {
     final items = [
       _ToolCardData(
-        icon: Icons.badge_outlined,
-        title: 'Badges',
-        value: '${_badges.length}',
-        subtitle: 'Achievements',
-        color: const Color(0xFF8B5CF6),
-        onTap: () {
-          Navigator.pushNamed(context, '/badges', arguments: _badges);
-        },
-      ),
-      _ToolCardData(
         icon: Icons.bar_chart_rounded,
         title: 'Game Stats',
         value: '${_gameStats.length}',
@@ -1328,7 +1442,7 @@ class _MeScreenState extends State<MeScreen>
         subtitle: 'Friends posts',
         color: const Color(0xFF2563EB),
         onTap: () {
-          Navigator.pushNamed(context, '/visitors', arguments: _visitors);
+          Navigator.pushNamed(context, '/feed');
         },
       ),
     ];
@@ -1641,7 +1755,7 @@ class _MeScreenState extends State<MeScreen>
 }
 
 class _QuickAction {
-  final IconData icon;
+  final Widget icon;
   final String title;
   final String subtitle;
   final Color color;
@@ -1677,34 +1791,43 @@ class _ToolCardData {
 class _HeroChip extends StatelessWidget {
   final IconData icon;
   final String label;
+  final VoidCallback? onTap;
 
   const _HeroChip({
     required this.icon,
     required this.label,
+    this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.14),
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
         borderRadius: BorderRadius.circular(999),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 14, color: Colors.white),
-          const SizedBox(width: 6),
-          Text(
-            label,
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 12,
-              fontWeight: FontWeight.w700,
-            ),
+        child: Ink(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: 0.14),
+            borderRadius: BorderRadius.circular(999),
           ),
-        ],
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 14, color: Colors.white),
+              const SizedBox(width: 6),
+              Text(
+                label,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -1740,7 +1863,7 @@ class _TopActionButton extends StatelessWidget {
 class _StatTile extends StatelessWidget {
   final String label;
   final String value;
-  final IconData icon;
+  final Widget icon;
   final Color color;
 
   const _StatTile({
@@ -1769,7 +1892,7 @@ class _StatTile extends StatelessWidget {
               color: color.withValues(alpha: 0.12),
               borderRadius: BorderRadius.circular(12),
             ),
-            child: Icon(icon, color: color, size: 19),
+            child: Center(child: icon),
           ),
           const SizedBox(height: 14),
           Text(

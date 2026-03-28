@@ -1,19 +1,14 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
 
 import '../../models/room_model.dart';
-import '../../providers/auth_provider.dart';
 import '../../services/room_service.dart';
 import '../../services/socket_service.dart';
 import '../../theme/app_theme.dart';
 import '../../utils/constants.dart';
 import '../../widgets/room_card.dart';
-import '../../widgets/user_avatar.dart';
-import '../gifts/gift_shop_screen.dart';
 import '../rooms/create_room_screen.dart';
-import '../rooms/room_detail_screen.dart';
 import '../rooms/rooms_screen.dart';
 import '../vip/vip_screen.dart';
 import '../wallet/wallet_screen.dart';
@@ -27,7 +22,6 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   List<RoomModel> _trendingRooms = [];
-  List<RoomModel> _myRooms = [];
   bool _isLoading = true;
   bool _isDisposed = false;
   Timer? _realtimeDebounce;
@@ -92,18 +86,14 @@ class _HomeScreenState extends State<HomeScreen> {
     }
 
     try {
-      final results = await Future.wait<List<RoomModel>>([
-        RoomService.getTrendingRooms(),
-        RoomService.getMyRooms(),
-      ]);
+      final trendingRooms = await RoomService.getTrendingRooms();
 
       if (!mounted) return;
       setState(() {
-        _trendingRooms = results[0];
-        _myRooms = results[1];
+        _trendingRooms = trendingRooms;
         _isLoading = false;
       });
-      _scheduleRallyRefresh([...results[0], ...results[1]]);
+      _scheduleRallyRefresh(trendingRooms);
     } catch (_) {
       if (!mounted) return;
       setState(() => _isLoading = false);
@@ -157,25 +147,12 @@ class _HomeScreenState extends State<HomeScreen> {
             parent: BouncingScrollPhysics(),
           ),
           children: [
-            _buildWalletSummary(),
-            const SizedBox(height: 22),
             _buildSectionHeader(
               'Quick hops',
               'Open the things you use most in one tap.',
             ),
             const SizedBox(height: 12),
             _buildActions(),
-            const SizedBox(height: 22),
-            _buildSectionHeader(
-              'Your rooms',
-              _myRooms.isEmpty
-                  ? 'Create a room or jump back into one.'
-                  : 'The spaces your circle already knows.',
-              actionLabel: 'See all',
-              onAction: () => _open(const RoomsScreen()),
-            ),
-            const SizedBox(height: 12),
-            _buildMyRooms(),
             const SizedBox(height: 22),
             _buildSectionHeader(
               'Live picks',
@@ -202,153 +179,6 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
           ],
         ),
-      ),
-    );
-  }
-
-  Widget _buildWalletSummary() {
-    final theme = Theme.of(context);
-
-    return Consumer<AuthProvider>(
-      builder: (context, authProvider, _) {
-        final coins = authProvider.user?.coins ?? 0;
-        final gems = authProvider.user?.gems ?? 0;
-
-        return InkWell(
-          onTap: () => _open(const WalletScreen()),
-          borderRadius: BorderRadius.circular(30),
-          child: Ink(
-            padding: const EdgeInsets.all(20),
-            decoration: BoxDecoration(
-              gradient: const LinearGradient(
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-                colors: [
-                  Color(0xFF16181C),
-                  Color(0xFF2A2F36),
-                ],
-              ),
-              borderRadius: BorderRadius.circular(30),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.12),
-                  blurRadius: 22,
-                  offset: const Offset(0, 12),
-                ),
-              ],
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            'Wallet',
-                            style: theme.textTheme.headlineSmall?.copyWith(
-                              color: Colors.white,
-                            ),
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            'Live coins and diamonds. Tap to open wallet.',
-                            style: theme.textTheme.bodyMedium?.copyWith(
-                              color: Colors.white.withValues(alpha: 0.72),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    Container(
-                      width: 48,
-                      height: 48,
-                      decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: 0.10),
-                        borderRadius: BorderRadius.circular(18),
-                      ),
-                      child: const Icon(
-                        Icons.account_balance_wallet_rounded,
-                        color: Colors.white,
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 18),
-                Row(
-                  children: [
-                    Expanded(
-                      child: _balancePill(
-                        icon: Icons.monetization_on_rounded,
-                        iconColor: const Color(0xFFFFC857),
-                        label: 'Coins',
-                        value: '$coins',
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: _balancePill(
-                        icon: Icons.diamond_rounded,
-                        iconColor: const Color(0xFF8EDBFF),
-                        label: 'Diamonds',
-                        value: '$gems',
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
-
-  Widget _balancePill({
-    required IconData icon,
-    required Color iconColor,
-    required String label,
-    required String value,
-  }) {
-    final theme = Theme.of(context);
-
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
-      decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.10),
-        borderRadius: BorderRadius.circular(22),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.10)),
-      ),
-      child: Row(
-        children: [
-          Icon(icon, color: iconColor, size: 22),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  label,
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: Colors.white.withValues(alpha: 0.70),
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  value,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: theme.textTheme.titleLarge?.copyWith(
-                    color: Colors.white,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
       ),
     );
   }
@@ -392,37 +222,30 @@ class _HomeScreenState extends State<HomeScreen> {
       _ActionItem(
         'Rooms',
         'Drop into live spaces',
-        Icons.mic_none_rounded,
+        'assets/images/home_rooms.png',
         AppColors.primaryBlue,
         const RoomsScreen(),
       ),
       _ActionItem(
         'Create',
         'Start a vibe fast',
-        Icons.add_circle_outline_rounded,
+        'assets/images/home_create.png',
         AppColors.secondaryBlue,
         const CreateRoomScreen(),
       ),
       _ActionItem(
         'Wallet',
         'Coins and gems',
-        Icons.wallet_rounded,
+        'assets/images/home_wallet.png',
         const Color(0xFF39424D),
         const WalletScreen(),
       ),
       _ActionItem(
         'VIP',
         'Extra sparkle perks',
-        Icons.workspace_premium_rounded,
+        'assets/images/home_vip.png',
         AppColors.accentBerry,
         const VipScreen(),
-      ),
-      _ActionItem(
-        'Gifts',
-        'Send playful reactions',
-        Icons.card_giftcard_rounded,
-        AppColors.accentSky,
-        const GiftShopScreen(),
       ),
     ];
 
@@ -468,18 +291,20 @@ class _HomeScreenState extends State<HomeScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Container(
-              width: 48,
-              height: 48,
-              alignment: Alignment.center,
-              decoration: BoxDecoration(
-                color: item.color.withValues(alpha: 0.14),
-                borderRadius: BorderRadius.circular(18),
-                border: Border.all(color: item.color.withValues(alpha: 0.14)),
+            SizedBox(
+              height: 92,
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Image.asset(
+                  item.assetPath,
+                  width: 92,
+                  height: 92,
+                  fit: BoxFit.contain,
+                  filterQuality: FilterQuality.high,
+                ),
               ),
-              child: Icon(item.icon, color: item.color, size: 22),
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 10),
             Text(
               item.title,
               style: theme.textTheme.titleMedium?.copyWith(
@@ -495,197 +320,6 @@ class _HomeScreenState extends State<HomeScreen> {
         ),
       ),
     );
-  }
-
-  Widget _buildMyRooms() {
-    if (_isLoading && _myRooms.isEmpty) {
-      return const Padding(
-        padding: EdgeInsets.symmetric(vertical: 28),
-        child: Center(child: CircularProgressIndicator()),
-      );
-    }
-
-    if (_myRooms.isEmpty) {
-      return _buildEmptyPanel(
-        icon: Icons.weekend_rounded,
-        title: 'No rooms yet',
-        message: 'Open your first playful space and let your people join in.',
-        cta: 'Create your first room',
-        onTap: _openCreateRoom,
-      );
-    }
-
-    return SizedBox(
-      height: 252,
-      child: ListView.separated(
-        scrollDirection: Axis.horizontal,
-        itemCount: _myRooms.length,
-        separatorBuilder: (_, __) => const SizedBox(width: 14),
-        itemBuilder: (context, index) {
-          final room = _myRooms[index];
-          final accent = _roomColor(room.type);
-          return InkWell(
-            onTap: () => _openRoom(room),
-            borderRadius: BorderRadius.circular(30),
-            child: Ink(
-              width: 248,
-              padding: const EdgeInsets.all(18),
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                  colors: [
-                    accent.withValues(alpha: 0.18),
-                    Colors.white,
-                  ],
-                ),
-                borderRadius: BorderRadius.circular(30),
-                border: Border.all(color: context.mood.outlineSoft),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      _pill(
-                        room.category.toUpperCase(),
-                        background: accent.withValues(alpha: 0.16),
-                        foreground: AppColors.textPrimary,
-                      ),
-                      const Spacer(),
-                      _pill(
-                        '${room.onlineCount} online',
-                        background: Colors.white,
-                        foreground: AppColors.textSecondary,
-                      ),
-                      if (room.isRallyActive) ...[
-                        const SizedBox(width: 8),
-                        _pill(
-                          'RALLY ON',
-                          background:
-                              AppColors.warningOrange.withValues(alpha: 0.18),
-                          foreground: AppColors.warningOrange,
-                        ),
-                      ],
-                    ],
-                  ),
-                  const SizedBox(height: 14),
-                  _buildRoomPreview(room, accent),
-                  const Spacer(),
-                  Text(
-                    room.name,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.headlineSmall,
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    room.description.isNotEmpty
-                        ? room.description
-                        : 'Hosted by ${room.hostName}',
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.bodySmall,
-                  ),
-                  const SizedBox(height: 12),
-                  Row(
-                    children: [
-                      UserAvatar(
-                        username: room.hostName,
-                        imageUrl: room.hostAvatar,
-                        radius: 14,
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          room.hostName,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: Theme.of(context).textTheme.labelLarge,
-                        ),
-                      ),
-                      Icon(
-                        Icons.arrow_forward_rounded,
-                        color: accent,
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-          );
-        },
-      ),
-    );
-  }
-
-  Widget _buildRoomPreview(RoomModel room, Color accent) {
-    final imageUrl = _normalizeRoomImage(room.coverImage) ??
-        _normalizeRoomImage(room.hostAvatar);
-
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(20),
-      child: Container(
-        height: 72,
-        width: double.infinity,
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [
-              accent.withValues(alpha: 0.16),
-              Colors.white,
-            ],
-          ),
-        ),
-        child: imageUrl == null
-            ? Center(
-                child: Icon(
-                  _roomIcon(room.type),
-                  color: accent,
-                  size: 28,
-                ),
-              )
-            : Image.network(
-                imageUrl,
-                fit: BoxFit.cover,
-                errorBuilder: (_, __, ___) => Center(
-                  child: Icon(
-                    _roomIcon(room.type),
-                    color: accent,
-                    size: 28,
-                  ),
-                ),
-              ),
-      ),
-    );
-  }
-
-  String? _normalizeRoomImage(String? value) {
-    final raw = value?.trim();
-    if (raw == null || raw.isEmpty || raw.toLowerCase() == 'null') {
-      return null;
-    }
-    if (raw.startsWith('http://') || raw.startsWith('https://')) {
-      return AppConfig.normalizeBackendUrl(raw);
-    }
-    final normalizedPath = raw.startsWith('/') ? raw : '/$raw';
-    return '${AppConfig.socketUrl}$normalizedPath';
-  }
-
-  IconData _roomIcon(String type) {
-    switch (type) {
-      case 'music':
-        return Icons.music_note_rounded;
-      case 'video':
-        return Icons.videocam_rounded;
-      case 'chat':
-        return Icons.chat_bubble_rounded;
-      case 'auction':
-        return Icons.gavel_rounded;
-      default:
-        return Icons.mic_rounded;
-    }
   }
 
   Widget _buildEmptyPanel({
@@ -735,53 +369,10 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _pill(
-    String label, {
-    required Color background,
-    required Color foreground,
-  }) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-      decoration: BoxDecoration(
-        color: background,
-        borderRadius: BorderRadius.circular(999),
-      ),
-      child: Text(
-        label,
-        style: Theme.of(context).textTheme.labelMedium?.copyWith(
-              color: foreground,
-              fontWeight: FontWeight.w800,
-            ),
-      ),
-    );
-  }
-
-  Color _roomColor(String type) {
-    switch (type) {
-      case 'music':
-        return AppColors.accentBerry;
-      case 'chat':
-        return AppColors.secondaryBlue;
-      case 'video':
-        return AppColors.accentSky;
-      case 'auction':
-        return AppColors.accentYellow;
-      default:
-        return AppColors.primaryBlue;
-    }
-  }
-
   void _open(Widget page) {
     Navigator.push(
       context,
       MaterialPageRoute(builder: (_) => page),
-    );
-  }
-
-  void _openRoom(RoomModel room) {
-    Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => RoomDetailScreen(room: room)),
     );
   }
 
@@ -797,14 +388,14 @@ class _ActionItem {
   const _ActionItem(
     this.title,
     this.subtitle,
-    this.icon,
+    this.assetPath,
     this.color,
     this.target,
   );
 
   final String title;
   final String subtitle;
-  final IconData icon;
+  final String assetPath;
   final Color color;
   final Widget target;
 }

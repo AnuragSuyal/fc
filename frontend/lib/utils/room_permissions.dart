@@ -35,6 +35,7 @@ class RoomPermissions {
   bool get canManageRoom => isAdmin;
   bool get canManageStage => isAdmin;
   bool get canManageSafety => isAdmin;
+  bool get canManageRoomMedia => isAdmin;
   bool get canManageRoomIdentity => isOwner;
   bool get canManageRoomAccess => isOwner;
   bool get canManageAdmins => isOwner;

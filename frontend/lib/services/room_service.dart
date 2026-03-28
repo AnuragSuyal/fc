@@ -63,6 +63,28 @@ class RoomService {
     }
   }
 
+  static Future<List<Map<String, dynamic>>> searchYoutubeVideos(
+    String roomId,
+    String query,
+  ) async {
+    try {
+      final encodedQuery = Uri.encodeQueryComponent(query);
+      final response = await ApiService.get(
+          '/rooms/$roomId/youtube-search?query=$encodedQuery');
+      final results =
+          response is Map<String, dynamic> ? response['results'] : null;
+      if (results is! List) return const [];
+
+      return results
+          .whereType<Map>()
+          .map((item) => Map<String, dynamic>.from(item))
+          .toList();
+    } catch (e) {
+      debugPrint('Error searching YouTube videos: $e');
+      rethrow;
+    }
+  }
+
   static Future<RoomModel?> createRoom({
     required String name,
     String? description,
@@ -135,6 +157,16 @@ class RoomService {
     }
   }
 
+  static Future<List<RoomModel>> getFollowedRooms() async {
+    try {
+      final response = await ApiService.get('/rooms/followed');
+      return _parseRoomList(response, key: 'rooms');
+    } catch (e) {
+      debugPrint('Error getting followed rooms: $e');
+      return [];
+    }
+  }
+
   static Future<List<Map<String, dynamic>>> getCategories() async {
     try {
       final response = await ApiService.get('/rooms/categories');
@@ -186,6 +218,18 @@ class RoomService {
     }
   }
 
+  static Future<bool> inviteFriend(String roomId, String targetUserId) async {
+    try {
+      await ApiService.post('/rooms/$roomId/invite', {
+        'targetUserId': targetUserId,
+      });
+      return true;
+    } catch (e) {
+      debugPrint('Error inviting friend to room: $e');
+      rethrow;
+    }
+  }
+
   static Future<RoomModel?> takeSeat(String roomId, int seatIndex) async {
     try {
       final response = await ApiService.post('/rooms/$roomId/seat', {
@@ -208,12 +252,24 @@ class RoomService {
     }
   }
 
-  static Future<void> lockSeat(String roomId, int seatIndex) async {
-    await ApiService.post('/rooms/$roomId/seat/$seatIndex/lock', {});
+  static Future<RoomModel?> lockSeat(String roomId, int seatIndex) async {
+    final response =
+        await ApiService.post('/rooms/$roomId/seat/$seatIndex/lock', {});
+    final roomJson = response is Map<String, dynamic> ? response['room'] : null;
+    if (roomJson is Map<String, dynamic>) {
+      return RoomModel.fromJson(roomJson);
+    }
+    return null;
   }
 
-  static Future<void> unlockSeat(String roomId, int seatIndex) async {
-    await ApiService.post('/rooms/$roomId/seat/$seatIndex/unlock', {});
+  static Future<RoomModel?> unlockSeat(String roomId, int seatIndex) async {
+    final response =
+        await ApiService.post('/rooms/$roomId/seat/$seatIndex/unlock', {});
+    final roomJson = response is Map<String, dynamic> ? response['room'] : null;
+    if (roomJson is Map<String, dynamic>) {
+      return RoomModel.fromJson(roomJson);
+    }
+    return null;
   }
 
   static Future<void> muteParticipant(

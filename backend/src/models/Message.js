@@ -28,9 +28,14 @@ const messageSchema = new mongoose.Schema({
     },
     type: {
         type: String,
-        enum: ['text', 'image', 'gift', 'system', 'announcement'],
+        enum: ['text', 'image', 'voice', 'gift', 'system', 'announcement', 'emoji', 'private_image'],
         default: 'text'
     },
+    metadata: {
+        type: mongoose.Schema.Types.Mixed,
+        default: {}
+    },
+    expiresAt: Date,
 
     // Gift reference
     giftId: {
@@ -111,7 +116,6 @@ messageSchema.index({ groupId: 1, createdAt: -1 });
 messageSchema.index({ mentions: 1 });
 
 module.exports = mongoose.model('Message', messageSchema);
-
 
 
 

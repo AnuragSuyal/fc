@@ -1,0 +1,23 @@
+Launching lib\main.dart on Chrome in debug mode...
+Waiting for connection from debug service on Chrome...             27.8s
+
+Flutter run key commands.
+r Hot reload. 
+R Hot restart.
+h List all available interactive commands.
+d Detach (terminate "flutter run" but leave application running).
+c Clear the screen
+q Quit (terminate the application on the device).
+
+Debug service listening on ws://127.0.0.1:51686/lkFyrE_bD2s=/ws
+A Dart VM Service on Chrome is available at: http://127.0.0.1:51686/lkFyrE_bD2s=
+The Flutter DevTools debugger and profiler on Chrome is available at: http://127.0.0.1:51686/lkFyrE_bD2s=/devtools/?uri=ws://127.0.0.1:51686/lkFyrE_bD2s=/ws
+Starting application from main method in: org-dartlang-app:/web_entrypoint.dart.
+Socket connected (sAf0KqJcbpRjAGyPAAAF)
+POST /messages/dm Error: Exception: Cannot read properties of undefined (reading '_zod')
+Error sending DM: Exception: Cannot read properties of undefined (reading '_zod')
+POST /messages/dm Error: Exception: Cannot read properties of undefined (reading '_zod')
+Error sending DM: Exception: Cannot read properties of undefined (reading '_zod')
+VoiceService disconnected
+VoiceService disconnected
+Voice connection failed: ClientException: Failed to fetch, uri=http://localhost:7880/rtc/validate?access_token=eyJhbGciOiJIUzI1NiJ9.eyJtZXRhZGF0YSI6IntcInVzZXJuYW1lXCI6XCJHdWVzdF9CcmF2ZVBhbmRhODQxXCIsXCJhdmF0YXJcIjpcImRlZmF1bHQtYXZhdGFyLnBuZ1wifSIsIm5hbWUiOiJHdWVzdF9CcmF2ZVBhbmRhODQxIiwidmlkZW8iOnsicm9vbUpvaW4iOnRydWUsInJvb20iOiI4NDgzMDExIiwiY2FuUHVibGlzaCI6dHJ1ZSwiY2FuU3Vic2NyaWJlIjp0cnVlfSwiaXNzIjoiZGV2a2V5IiwiZXhwIjoxNzc0NjkzNDg5LCJuYmYiOjAsInN1YiI6IjY5Yzc4ZWQ0YTZhNzFiZjRlYzlhOTAxMCJ9.OAO21MMeR-nY0K1YZNyb_NPtng0bBFLPl5ASWn0CIS4&auto_subscribe=1&adaptive_stream=1&protocol=16&sdk=flutter&version=2.6.5&network=wifi&os=windows

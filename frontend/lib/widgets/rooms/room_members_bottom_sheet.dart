@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../../models/room_model.dart';
+import '../app_search_icon.dart';
 import '../user_avatar.dart';
 
 class RoomMemberListBottomSheet extends StatefulWidget {
@@ -159,8 +160,7 @@ class _RoomMemberListBottomSheetState extends State<RoomMemberListBottomSheet>
                       const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
                   hintText: 'Search by name or UID',
                   hintStyle: const TextStyle(color: Colors.black45),
-                  prefixIcon: const Icon(Icons.search_rounded,
-                      color: Colors.black45, size: 20),
+                  prefixIcon: const AppSearchIcon(size: 18),
                   suffixIcon: _query.isEmpty
                       ? null
                       : IconButton(
@@ -730,7 +730,7 @@ String _roleLabel(String role) {
     case 'cohost':
       return 'Co-host';
     case 'moderator':
-      return 'Moderator';
+      return 'Admin';
     case 'speaker':
       return 'Speaker';
     default:

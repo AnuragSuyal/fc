@@ -39,6 +39,15 @@ const groupSchema = new mongoose.Schema({
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User'
     }],
+    vibe: {
+        type: String,
+        default: 'Orbit'
+    },
+    announcement: {
+        type: String,
+        maxlength: 200,
+        default: ''
+    },
 
     // Members
     members: [{
@@ -52,6 +61,41 @@ const groupSchema = new mongoose.Schema({
             default: 'member'
         },
         joinedAt: {
+            type: Date,
+            default: Date.now
+        }
+    }],
+    invitations: [{
+        userId: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'User'
+        },
+        invitedBy: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'User'
+        },
+        status: {
+            type: String,
+            enum: ['pending', 'accepted', 'rejected', 'cancelled'],
+            default: 'pending'
+        },
+        invitedAt: {
+            type: Date,
+            default: Date.now
+        },
+        respondedAt: Date
+    }],
+    joinRequests: [{
+        userId: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'User'
+        },
+        message: {
+            type: String,
+            maxlength: 120,
+            default: ''
+        },
+        requestedAt: {
             type: Date,
             default: Date.now
         }
@@ -83,6 +127,14 @@ const groupSchema = new mongoose.Schema({
             default: 0
         },
         totalWins: {
+            type: Number,
+            default: 0
+        },
+        totalMessages: {
+            type: Number,
+            default: 0
+        },
+        totalGifts: {
             type: Number,
             default: 0
         },
@@ -129,6 +181,11 @@ const groupSchema = new mongoose.Schema({
         type: String,
         default: ''
     },
+    linkedRoomId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Room',
+        index: true
+    },
 
     // Privacy
     isPublic: {
@@ -148,6 +205,10 @@ const groupSchema = new mongoose.Schema({
     updatedAt: {
         type: Date,
         default: Date.now
+    },
+    lastActivityAt: {
+        type: Date,
+        default: Date.now
     }
 });
 
@@ -155,6 +216,9 @@ const groupSchema = new mongoose.Schema({
 groupSchema.pre('save', async function () {
     this.updatedAt = Date.now();
     this.memberCount = this.members.length;
+    if (!this.lastActivityAt) {
+        this.lastActivityAt = Date.now();
+    }
 });
 
 // Generate unique tag from name
@@ -175,10 +239,11 @@ groupSchema.pre('validate', async function () {
 groupSchema.index({ 'stats.rank': 1 });
 groupSchema.index({ memberCount: -1 });
 groupSchema.index({ isPublic: 1, createdAt: -1 });
+groupSchema.index({ lastActivityAt: -1 });
+groupSchema.index({ 'invitations.userId': 1, 'invitations.status': 1 });
+groupSchema.index({ 'joinRequests.userId': 1 });
 
 module.exports = mongoose.model('Group', groupSchema);
-
-
 
 
 

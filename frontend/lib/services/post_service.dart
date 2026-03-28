@@ -1,5 +1,5 @@
-import 'dart:io';
 import 'package:flutter/foundation.dart';
+import 'package:image_picker/image_picker.dart';
 import '../models/post_model.dart';
 import 'api_service.dart';
 import 'upload_service.dart';
@@ -48,9 +48,13 @@ class PostService {
   }
 
   // Get single post
-  static Future<PostModel?> getPostById(String postId) async {
+  static Future<PostModel?> getPostById(
+    String postId, {
+    bool trackView = true,
+  }) async {
     try {
-      final response = await ApiService.get('/posts/$postId');
+      final response =
+          await ApiService.get('/posts/$postId?trackView=$trackView');
       return PostModel.fromJson(response);
     } catch (e) {
       debugPrint('Error getting post: $e');
@@ -58,11 +62,11 @@ class PostService {
     }
   }
 
-  static Future<List<String>> uploadImages(List<File> images) async {
+  static Future<List<String>> uploadImages(List<XFile> images) async {
     final urls = <String>[];
 
     for (final image in images) {
-      final upload = await UploadService.uploadImage(image.path);
+      final upload = await UploadService.uploadImage(image);
       final url = upload['url']?.toString();
       if (url == null || url.isEmpty) {
         throw Exception('Image upload failed');
@@ -75,13 +79,16 @@ class PostService {
 
   static Future<PostModel?> createPost({
     required String content,
-    List<File>? imageFiles,
+    List<XFile>? imageFiles,
     String type = 'normal',
     Map<String, dynamic>? metadata,
   }) async {
     try {
-      if (content.trim().isEmpty) {
-        throw Exception('Post content cannot be empty');
+      final trimmedContent = content.trim();
+      final hasImages = imageFiles != null && imageFiles.isNotEmpty;
+
+      if (trimmedContent.isEmpty && !hasImages) {
+        throw Exception('Post content or image is required');
       }
 
       List<Map<String, dynamic>> imageUrls = [];
@@ -93,7 +100,7 @@ class PostService {
       }
 
       final response = await ApiService.post('/posts', {
-        'content': content,
+        'content': trimmedContent,
         'images': imageUrls,
         'type': type,
         'metadata': metadata ?? {},

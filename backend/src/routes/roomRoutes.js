@@ -6,7 +6,11 @@ const admin = require('../controllers/roomAdminController');
 const mc = require('../controllers/messageController');
 const auth = require('../middleware/auth');
 const validate = require('../middleware/validate');
-const { createRoomSchema, updateRoomSchema } = require('../utils/validation');
+const {
+  createRoomSchema,
+  inviteRoomFriendSchema,
+  updateRoomSchema,
+} = require('../utils/validation');
 const optionalAuth = require('../middleware/optionalAuth');
 
 // Discovery
@@ -16,12 +20,14 @@ router.get('/', optionalAuth, rc.getRooms);
 
 // My rooms
 router.get('/my-rooms', auth, rc.getMyRooms);
+router.get('/followed', auth, rc.getFollowedRooms);
 
 // Room details and chat history
 router.get('/:id/messages', optionalAuth, (req, res, next) => {
   req.params.roomId = req.params.id;
   mc.getRoomMessages(req, res, next);
 });
+router.get('/:id/youtube-search', auth, rc.searchYoutubeVideos);
 router.get('/:id', optionalAuth, rc.getRoomById);
 
 // CRUD
@@ -33,6 +39,7 @@ router.delete('/:id', auth, rc.deleteRoom);
 router.post('/:id/join', auth, rc.joinRoom);
 router.post('/:id/leave', auth, rc.leaveRoom);
 router.post('/:id/token', auth, rc.getRoomToken);
+router.post('/:id/invite', auth, validate(inviteRoomFriendSchema), rc.inviteFriendToRoom);
 
 // Seat management
 router.post('/:id/seat', auth, rc.takeSeat);

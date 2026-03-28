@@ -30,7 +30,6 @@ import 'screens/profile/game_stats_screen.dart';
 import 'screens/rankings/rankings_screen.dart';
 import 'screens/rooms/create_room_screen.dart';
 import 'screens/gifts/gift_history_screen.dart';
-import 'screens/gifts/gift_shop_screen.dart';
 import 'screens/gifts/gift_leaderboard_screen.dart';
 import 'screens/gifts/gift_achievements_screen.dart';
 import 'screens/vip/vip_screen.dart';
@@ -42,6 +41,7 @@ import 'screens/auth/otp_screen.dart';
 import 'screens/auth/auth_callback_screen.dart';
 import 'screens/wedding/wedding_screen.dart';
 
+import 'services/app_route_observer.dart';
 import 'widgets/error_boundary.dart';
 
 void main() async {
@@ -65,6 +65,7 @@ class MyApp extends StatelessWidget {
         child: MaterialApp(
           title: 'Friend Circle',
           debugShowCheckedModeBanner: false,
+          navigatorObservers: [appRouteObserver],
           theme: AppTheme.light(),
           darkTheme: AppTheme.dark(),
           themeMode: ThemeMode.system,
@@ -115,7 +116,6 @@ class MyApp extends StatelessWidget {
               return GroupDetailScreen(groupId: args);
             },
             '/rooms/create': (context) => const CreateRoomScreen(),
-            '/gifts/shop': (context) => const GiftShopScreen(),
             '/gifts/history': (context) => const GiftHistoryScreen(),
             '/gifts/leaderboard': (context) => const GiftLeaderboardScreen(),
             '/gifts/achievements': (context) => const GiftAchievementsScreen(),

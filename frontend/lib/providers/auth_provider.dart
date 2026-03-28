@@ -2,6 +2,9 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import '../services/auth_service.dart';
 import '../models/user_model.dart';
+import '../models/message_model.dart';
+import '../services/chat_activity_service.dart';
+import '../services/notification_sound_service.dart';
 import '../services/socket_service.dart';
 import '../services/wallet_service.dart';
 
@@ -116,6 +119,7 @@ class AuthProvider extends ChangeNotifier {
     _subs.add(SocketService.balanceStream.listen(_onBalance));
     _subs.add(SocketService.levelUpStream.listen(_onLevelUp));
     _subs.add(SocketService.friendStream.listen(_onFriend));
+    _subs.add(SocketService.dmStream.listen(_onDirectMessage));
   }
 
   void _onBalance(Map<String, dynamic> d) => updateProfile(
@@ -123,6 +127,7 @@ class AuthProvider extends ChangeNotifier {
         gems: _toInt(d['gems']),
         xp: _toInt(d['xp']),
         level: _toInt(d['level']),
+        vipLevel: _toInt(d['vipLevel']),
       );
 
   void _onLevelUp(Map<String, dynamic> d) => updateProfile(
@@ -139,6 +144,25 @@ class AuthProvider extends ChangeNotifier {
         type == 'friend_request_rejected') {
       notifyListeners();
     }
+  }
+
+  void _onDirectMessage(Map<String, dynamic> d) {
+    final rawMessage = d['message'];
+    final currentUserId = _user?.id;
+    if (rawMessage is! Map || currentUserId == null || currentUserId.isEmpty) {
+      return;
+    }
+
+    final message = MessageModel.fromJson(Map<String, dynamic>.from(rawMessage));
+    if (message.senderId == currentUserId) {
+      return;
+    }
+
+    if (ChatActivityService.isDirectChatOpenFor(message.senderId)) {
+      return;
+    }
+
+    unawaited(NotificationSoundService.playMessage());
   }
 
   // ── Profile helpers ─────────────────────────────────────────────────────────
@@ -172,6 +196,7 @@ class AuthProvider extends ChangeNotifier {
     String? avatar,
     String? coverPhoto,
     String? bio,
+    String? region,
   }) {
     if (_user == null) return;
 
@@ -181,6 +206,7 @@ class AuthProvider extends ChangeNotifier {
       avatar: avatar,
       coverPhoto: coverPhoto,
       bio: bio,
+      region: region,
     );
 
     if (_sameUserSnapshot(_user!, nextUser)) return;
@@ -199,6 +225,13 @@ class AuthProvider extends ChangeNotifier {
   void clearPendingFriendRequests() {
     if (_pendingFriendRequests == 0) return;
     _pendingFriendRequests = 0;
+    notifyListeners();
+  }
+
+  void syncPendingFriendRequests(int count) {
+    final nextCount = count < 0 ? 0 : count;
+    if (_pendingFriendRequests == nextCount) return;
+    _pendingFriendRequests = nextCount;
     notifyListeners();
   }
 
@@ -295,6 +328,7 @@ class AuthProvider extends ChangeNotifier {
         a.avatar == b.avatar &&
         a.coverPhoto == b.coverPhoto &&
         a.bio == b.bio &&
+        a.region == b.region &&
         a.level == b.level &&
         a.xp == b.xp &&
         a.coins == b.coins &&

@@ -1,9 +1,12 @@
 const mongoose = require('mongoose');
 const Gift = require('../models/Gift');
+const Message = require('../models/Message');
 const Transaction = require('../models/Transaction');
 const User = require('../models/User');
 const Room = require('../models/Room');
 const rankingService = require('../services/rankingService');
+const { awardRoomGiftXp } = require('../services/roomProgressionService');
+const { awardSpendXp, buildProgressPayload } = require('../services/spendXpService');
 const economyController = require('./economyController');
 const { canUseRoomGifts, getParticipant } = require('../utils/roomPermissions');
 
@@ -16,6 +19,13 @@ const resolveIdempotencyKey = (req) => {
         || req.headers['idempotency-key']
         || req.headers['x-idempotency-key'];
 };
+
+const populateRealtimeRoom = async (roomId) => Room.findById(roomId)
+    .populate('hostId', 'username avatar level vipLevel')
+    .populate('coHosts', 'username avatar level vipLevel')
+    .populate('moderators', 'username avatar level vipLevel')
+    .populate('participants.userId', 'username avatar level vipLevel status.isOnline')
+    .populate('bans.userId', 'username avatar');
 
 // @desc    Get all gifts (catalog)
 exports.getGiftCatalog = async (req, res, next) => {
@@ -91,7 +101,7 @@ exports.getGiftById = async (req, res, next) => {
 // @desc    Send gift to user
 exports.sendGift = async (req, res, next) => {
     try {
-        const { toUserId, giftId, roomId, message } = req.body;
+        const { toUserId, giftId, roomId, message: giftNote } = req.body;
         const fromUserId = req.userId;
         const idempotencyKey = resolveIdempotencyKey(req);
         if (idempotencyKey && !req.idempotencyKey) {
@@ -152,6 +162,16 @@ exports.sendGift = async (req, res, next) => {
 
         if (!originalSender) throw new Error('Sender not found');
         if (!originalRecipient) throw new Error('Recipient not found');
+
+        if (!roomId) {
+            const isFriend = (originalSender.friends || [])
+                .some(friendId => friendId.toString() === toUserId);
+            if (!isFriend) {
+                const error = new Error('You can only send direct gifts to friends from chat');
+                error.status = 403;
+                throw error;
+            }
+        }
 
         if (originalSender.coins < gift.price.coins || originalSender.gems < gift.price.gems) {
             const error = new Error('Insufficient funds');
@@ -223,25 +243,105 @@ exports.sendGift = async (req, res, next) => {
 
         await Promise.all([senderTxn.save(), recipientTxn.save()]);
 
+        let roomProgress = null;
+        let populatedRoom = null;
         if (roomId) {
-            const roomUpdate = await Room.findOneAndUpdate(
-                { _id: roomId, "economy.topContributors.userId": fromUserId },
-                { $inc: { "metrics.totalGifts": 1, "economy.topContributors.$.gifts": 1, "economy.topContributors.$.amount": gift.price.coins } },
-                { new: true }
-            );
+            const roomForProgress = await Room.findById(roomId);
+            if (roomForProgress) {
+                if (!roomForProgress.metrics) {
+                    roomForProgress.metrics = {};
+                }
+                if (!roomForProgress.economy) {
+                    roomForProgress.economy = {};
+                }
+                roomForProgress.metrics.totalGifts =
+                    Number(roomForProgress.metrics?.totalGifts || 0) + 1;
+                roomForProgress.economy.totalEarned =
+                    Number(roomForProgress.economy?.totalEarned || 0) + Number(gift.price.coins || 0);
+                roomForProgress.economy.todayEarned =
+                    Number(roomForProgress.economy?.todayEarned || 0) + Number(gift.price.coins || 0);
 
-            if (!roomUpdate) {
-                await Room.findByIdAndUpdate(roomId, {
-                    $inc: { "metrics.totalGifts": 1 },
-                    $push: { "economy.topContributors": { userId: fromUserId, amount: gift.price.coins, gifts: 1 } }
+                if (!Array.isArray(roomForProgress.economy.topContributors)) {
+                    roomForProgress.economy.topContributors = [];
+                }
+
+                const contributor = roomForProgress.economy.topContributors.find(
+                    entry => entry?.userId?.toString() === fromUserId
+                );
+                if (contributor) {
+                    contributor.gifts = Number(contributor.gifts || 0) + 1;
+                    contributor.amount = Number(contributor.amount || 0) + Number(gift.price.coins || 0);
+                } else {
+                    roomForProgress.economy.topContributors.push({
+                        userId: fromUserId,
+                        amount: Number(gift.price.coins || 0),
+                        gifts: 1
+                    });
+                }
+
+                roomProgress = awardRoomGiftXp({
+                    room: roomForProgress,
+                    coins: gift.price.coins,
+                    gems: gift.price.gems
                 });
+                await roomForProgress.save();
+                populatedRoom = await populateRealtimeRoom(roomId);
             }
         }
 
         gift.stats.totalSent = (gift.stats.totalSent || 0) + 1;
         await gift.save();
 
-        const result = { sender, recipient, gift, senderTxn, message, roomId };
+        const recipientProgress = await awardSpendXp({
+            user: recipient,
+            coins: gift.price.coins,
+            gems: gift.price.gems,
+            baseXp: gift.effects?.recipient?.xp || gift.effects?.sender?.xp
+        });
+        const progressedRecipient = recipientProgress?.user || recipient;
+
+        let directGiftMessage = null;
+        if (!roomId) {
+            const trimmedNote = typeof giftNote === 'string' ? giftNote.trim() : '';
+            const content = trimmedNote
+                ? `Sent ${gift.name}: ${trimmedNote}`
+                : `Sent ${gift.name}`;
+
+            directGiftMessage = new Message({
+                senderId: fromUserId,
+                recipientId: toUserId,
+                content,
+                type: 'gift',
+                giftId: gift._id,
+                giftAnimation: typeof gift.animation === 'string'
+                    ? gift.animation
+                    : gift.animation?.type || '',
+                metadata: {
+                    giftName: gift.name,
+                    giftIcon: gift.icon,
+                    giftTier: gift.tier,
+                    giftNote: trimmedNote || '',
+                    recipientXpGained: recipientProgress?.xpGained || 0,
+                    recipientLevel: progressedRecipient.level,
+                    recipientLeveledUp: recipientProgress?.leveledUp === true
+                }
+            });
+            await directGiftMessage.save();
+            await directGiftMessage.populate([
+                { path: 'senderId', select: 'username avatar level' }
+            ]);
+        }
+
+        const result = {
+            sender,
+            recipient: progressedRecipient,
+            gift,
+            senderTxn,
+            message: giftNote,
+            roomId,
+            directGiftMessage,
+            recipientProgress
+        };
 
         // Background updates
         rankingService.updateGiftRanking(fromUserId, result.gift.price.coins, result.roomId).catch(console.error);
@@ -254,21 +354,93 @@ exports.sendGift = async (req, res, next) => {
                 giftName: result.gift.name,
                 giftIcon: result.gift.icon,
                 animation: result.gift.animation,
-                sender: { userId: result.sender._id, username: result.sender.username, avatar: result.sender.avatar, newBalance: { coins: result.sender.coins, gems: result.sender.gems } },
-                recipient: { userId: result.recipient._id, username: result.recipient.username, avatar: result.recipient.avatar, newBalance: { coins: result.recipient.coins, gems: result.recipient.gems } },
+                sender: {
+                    userId: result.sender._id,
+                    username: result.sender.username,
+                    avatar: result.sender.avatar,
+                    newBalance: buildProgressPayload(result.sender, {
+                        xpGained: 0,
+                        source: 'gift_sent'
+                    })
+                },
+                recipient: {
+                    userId: result.recipient._id,
+                    username: result.recipient.username,
+                    avatar: result.recipient.avatar,
+                    newBalance: buildProgressPayload(result.recipient, {
+                        xpGained: recipientProgress?.xpGained || 0,
+                        source: 'gift_received'
+                    })
+                },
                 message: result.message,
-                roomId: result.roomId
+                roomId: result.roomId,
+                room: roomProgress
+                    ? {
+                        id: result.roomId,
+                        level: roomProgress.newLevel,
+                        exp: roomProgress.room.exp,
+                        expToday: roomProgress.room.expToday,
+                        xpGained: roomProgress.xpGained,
+                        leveledUp: roomProgress.leveledUp
+                    }
+                    : null
             };
             io.to(`user:${fromUserId}`).emit('balance_update', giftData.sender.newBalance);
             io.to(`user:${toUserId}`).emit('balance_update', giftData.recipient.newBalance);
-            if (result.roomId) io.to(`room:${result.roomId}`).emit('receive_gift', giftData);
+            if (recipientProgress?.leveledUp) {
+                io.to(`user:${toUserId}`).emit('level_up', {
+                    newLevel: result.recipient.level,
+                    xp: result.recipient.xp,
+                    xpGained: recipientProgress.xpGained,
+                    source: 'gift_received'
+                });
+            }
+            if (result.roomId) {
+                io.to(`room:${result.roomId}`).emit('receive_gift', giftData);
+                if (populatedRoom) {
+                    io.to(`room:${result.roomId}`).emit('room:updated', populatedRoom);
+                    io.emit('room:lobby:update', {
+                        roomId: populatedRoom._id?.toString() || result.roomId,
+                        action: 'gift_progress',
+                        name: populatedRoom.name,
+                        category: populatedRoom.category,
+                        type: populatedRoom.type,
+                        hostAvatar: populatedRoom.hostId?.avatar || '',
+                        coverImage: populatedRoom.theme?.coverImage || '',
+                        participantCount:
+                            populatedRoom.participantCount ?? populatedRoom.participants?.length ?? 0,
+                        onlineCount: populatedRoom.onlineCount ?? 0,
+                        rallyActive: populatedRoom.rallyActive === true &&
+                            (!populatedRoom.rallyExpiresAt ||
+                                new Date(populatedRoom.rallyExpiresAt) > new Date()),
+                        rallyExpiresAt: populatedRoom.rallyExpiresAt || null,
+                        endedAt: populatedRoom.endedAt || null,
+                        updatedAt: new Date().toISOString()
+                    });
+                }
+            } else if (result.directGiftMessage) {
+                const dmPayload = {
+                    message: result.directGiftMessage,
+                    from: { id: req.userId, username: sender.username }
+                };
+                io.to(`user:${toUserId}`).emit('dm:received', dmPayload);
+                io.to(`user:${fromUserId}`).emit('dm:received', dmPayload);
+            }
         }
 
         const redis = req.app.get('redis');
         economyController._progressQuest(redis, req.userId, 'send_gift', 1).catch(() => {});
         economyController._progressQuest(redis, req.userId, 'weekly_gift', 1).catch(() => {});
 
-        res.json({ success: true, gift: result.gift, transactionId: result.senderTxn.transactionId, newBalance: { coins: result.sender.coins, gems: result.sender.gems } });
+        res.json({
+            success: true,
+            gift: result.gift,
+            transactionId: result.senderTxn.transactionId,
+            newBalance: buildProgressPayload(result.sender, {
+                xpGained: 0,
+                source: 'gift_sent'
+            })
+        });
     } catch (error) {
         next(error);
     }
@@ -351,7 +523,3 @@ exports.seedGifts = async (req, res, next) => {
         next(error);
     }
 };
-
-
-
-

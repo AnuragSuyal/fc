@@ -12,7 +12,9 @@ const postSchema = new mongoose.Schema({
     // Content
     content: {
         type: String,
-        required: true,
+        required: function () {
+            return !Array.isArray(this.images) || this.images.length === 0;
+        },
         trim: true,
         maxlength: 2000
     },
@@ -86,6 +88,16 @@ const postSchema = new mongoose.Schema({
         type: Number,
         default: 0
     },
+    viewers: [{
+        userId: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'User'
+        },
+        viewedAt: {
+            type: Date,
+            default: Date.now
+        }
+    }],
 
     // Status
     isEdited: {
@@ -149,10 +161,9 @@ postSchema.pre('save', async function () {
 // Indexes
 postSchema.index({ userId: 1, createdAt: -1 });
 postSchema.index({ 'mentions.userId': 1 });
+postSchema.index({ 'viewers.userId': 1 });
 
 module.exports = mongoose.model('Post', postSchema);
-
-
 
 
 
