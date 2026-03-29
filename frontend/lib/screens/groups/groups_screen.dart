@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 
 import '../../models/group_model.dart';
@@ -10,6 +11,7 @@ import '../../services/group_service.dart';
 import '../../services/notification_sound_service.dart';
 import '../../services/room_service.dart';
 import '../../services/socket_service.dart';
+import '../../services/upload_service.dart';
 import '../../utils/constants.dart';
 import '../../utils/media_url.dart';
 import '../../widgets/user_avatar.dart';
@@ -252,6 +254,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
         name: result['name']?.toString() ?? '',
         description: result['description']?.toString(),
         motto: result['motto']?.toString(),
+        avatar: result['avatar']?.toString(),
         isPublic: result['isPublic'] == true,
         approvalRequired: result['approvalRequired'] == true,
         maxMembers: (result['maxMembers'] as num?)?.toInt() ?? 20,
@@ -936,6 +939,8 @@ class _CreateGroupSheetState extends State<_CreateGroupSheet> {
   final _mottoController = TextEditingController();
   final Set<String> _selectedFriends = <String>{};
 
+  String? _avatarUrl;
+  bool _isUploadingPhoto = false;
   bool _isPublic = false;
   bool _approvalRequired = false;
   int _maxMembers = 20;
@@ -948,6 +953,42 @@ class _CreateGroupSheetState extends State<_CreateGroupSheet> {
     _descriptionController.dispose();
     _mottoController.dispose();
     super.dispose();
+  }
+
+  Future<void> _pickGroupPhoto() async {
+    if (_isUploadingPhoto) return;
+
+    final picked = await ImagePicker().pickImage(
+      source: ImageSource.gallery,
+      maxWidth: 1440,
+      maxHeight: 1440,
+      imageQuality: 86,
+    );
+    if (picked == null || !mounted) return;
+
+    setState(() => _isUploadingPhoto = true);
+    try {
+      final upload = await UploadService.uploadImage(picked);
+      final url = upload['url']?.toString();
+      if (url == null || url.isEmpty) {
+        throw Exception('Group photo upload failed');
+      }
+
+      if (!mounted) return;
+      setState(() => _avatarUrl = url);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Group photo added.')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _isUploadingPhoto = false);
+      }
+    }
   }
 
   @override
@@ -986,8 +1027,66 @@ class _CreateGroupSheetState extends State<_CreateGroupSheet> {
                 style: TextStyle(color: AppColors.textSecondary, height: 1.45),
               ),
               const SizedBox(height: 18),
+              Center(
+                child: Column(
+                  children: [
+                    GestureDetector(
+                      onTap: _pickGroupPhoto,
+                      child: Stack(
+                        alignment: Alignment.bottomRight,
+                        children: [
+                          UserAvatar(
+                            imageUrl: _avatarUrl,
+                            username: _nameController.text.trim().isEmpty
+                                ? 'Circle'
+                                : _nameController.text.trim(),
+                            radius: 34,
+                          ),
+                          Container(
+                            width: 28,
+                            height: 28,
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF2563EB),
+                              borderRadius: BorderRadius.circular(999),
+                              border: Border.all(color: Colors.white, width: 2),
+                            ),
+                            child: _isUploadingPhoto
+                                ? const Padding(
+                                    padding: EdgeInsets.all(6),
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                      valueColor:
+                                          AlwaysStoppedAnimation<Color>(
+                                        Colors.white,
+                                      ),
+                                    ),
+                                  )
+                                : const Icon(
+                                    Icons.add_a_photo_rounded,
+                                    color: Colors.white,
+                                    size: 15,
+                                  ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    TextButton.icon(
+                      onPressed: _isUploadingPhoto ? null : _pickGroupPhoto,
+                      icon: const Icon(Icons.photo_library_outlined),
+                      label: Text(
+                        _avatarUrl?.isNotEmpty == true
+                            ? 'Change group photo'
+                            : 'Add group photo',
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 6),
               TextField(
                 controller: _nameController,
+                onChanged: (_) => setState(() {}),
                 decoration: const InputDecoration(labelText: 'Circle name'),
               ),
               const SizedBox(height: 12),
@@ -1087,13 +1186,16 @@ class _CreateGroupSheetState extends State<_CreateGroupSheet> {
               SizedBox(
                 width: double.infinity,
                 child: FilledButton(
-                  onPressed: () {
+                  onPressed: _isUploadingPhoto
+                      ? null
+                      : () {
                     final name = _nameController.text.trim();
                     if (name.isEmpty) return;
                     Navigator.pop(context, {
                       'name': name,
                       'description': _descriptionController.text.trim(),
                       'motto': _mottoController.text.trim(),
+                      'avatar': _avatarUrl,
                       'isPublic': _isPublic,
                       'approvalRequired': _approvalRequired,
                       'maxMembers': _maxMembers,

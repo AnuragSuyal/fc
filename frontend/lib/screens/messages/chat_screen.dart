@@ -22,6 +22,7 @@ import '../../services/upload_service.dart';
 import '../../utils/constants.dart';
 import '../../utils/media_url.dart';
 import '../../widgets/gifting/gift_bottom_sheet.dart';
+import '../../widgets/gift_image.dart';
 import '../../widgets/rounded_scaffold.dart';
 import '../../widgets/user_avatar.dart';
 import '../profile/enhanced_profile_screen.dart';
@@ -1261,14 +1262,10 @@ class _ChatScreenState extends State<ChatScreen>
       return;
     }
 
-    final sent = await showModalBottomSheet<bool>(
+    final sent = await showGiftBottomSheet(
       context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (context) => GiftBottomSheet(
-        toUserId: peerUserId,
-        toUsername: _peerDisplayName,
-      ),
+      toUserId: peerUserId,
+      toUsername: _peerDisplayName,
     );
 
     if (sent == true && mounted) {
@@ -2879,7 +2876,6 @@ class _GiftIconBadge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final resolvedUrl = resolveMediaUrl(icon);
     final background = isFromMe
         ? Colors.white.withValues(alpha: 0.14)
         : const Color(0xFFEFF2F7);
@@ -2892,24 +2888,16 @@ class _GiftIconBadge extends StatelessWidget {
         borderRadius: BorderRadius.circular(16),
       ),
       alignment: Alignment.center,
-      child: resolvedUrl != null
-          ? ClipRRect(
-              borderRadius: BorderRadius.circular(14),
-              child: CachedNetworkImage(
-                imageUrl: resolvedUrl,
-                width: 40,
-                height: 40,
-                fit: BoxFit.cover,
-                errorWidget: (_, __, ___) => const Icon(
-                  Icons.card_giftcard_rounded,
-                  color: AppColors.textPrimary,
-                ),
-              ),
-            )
-          : Text(
-              (icon == null || icon!.trim().isEmpty) ? '🎁' : icon!,
-              style: const TextStyle(fontSize: 24),
-            ),
+      child: GiftImage(
+        source: icon,
+        width: 40,
+        height: 40,
+        borderRadius: BorderRadius.circular(14),
+        fallback: const Icon(
+          Icons.card_giftcard_rounded,
+          color: AppColors.textPrimary,
+        ),
+      ),
     );
   }
 }
@@ -3037,3 +3025,4 @@ class _EphemeralPhotoViewerState extends State<_EphemeralPhotoViewer> {
     );
   }
 }
+

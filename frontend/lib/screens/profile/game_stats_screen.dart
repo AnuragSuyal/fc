@@ -53,11 +53,11 @@ class GameStatsScreen extends StatelessWidget {
                     gameStats['karaoke'],
                     Icons.mic,
                   ),
-                if (gameStats['uno'] != null)
+                if (gameStats['colorClash'] != null)
                   _buildGameStatCard(
-                    'UNO',
-                    gameStats['uno'],
-                    Icons.style,
+                    'Color Clash',
+                    gameStats['colorClash'],
+                    Icons.auto_awesome_rounded,
                   ),
               ],
             ),
@@ -128,6 +128,24 @@ class GameStatsScreen extends StatelessWidget {
               _buildStatRow(Icons.music_note, 'Pitch', stats['pitch']),
             if (stats['strategy'] != null)
               _buildStatRow(Icons.lightbulb, 'Strategy', stats['strategy']),
+            if (stats['currentRating'] != null)
+              _buildStatRow(
+                Icons.trending_up,
+                'Rating',
+                '${stats['currentRating']}',
+              ),
+            if ((stats['seasonBestTier'] ?? '').toString().isNotEmpty)
+              _buildStatRow(
+                Icons.workspace_premium_rounded,
+                'Best Tier',
+                stats['seasonBestTier'].toString(),
+              ),
+            if (stats['stakeNetCoins'] != null)
+              _buildStatRow(
+                Icons.savings_outlined,
+                'Stake Net',
+                '${stats['stakeNetCoins']}',
+              ),
           ],
         ),
       ),
@@ -187,7 +205,6 @@ class GameStatsScreen extends StatelessWidget {
     );
   }
 }
-
 
 
 

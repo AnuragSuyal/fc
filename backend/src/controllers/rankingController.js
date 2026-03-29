@@ -1,4 +1,5 @@
 const rankingService = require('../services/rankingService');
+const colorClashSeasonService = require('../services/colorClashSeasonService');
 const User = require('../models/User');
 
 const VALID_PERIODS = ['daily', 'weekly', 'monthly', 'alltime'];
@@ -40,6 +41,23 @@ exports.getGameRankings = async (req, res, next) => {
     try {
         const { gameType } = req.params;
         const { period = 'alltime', limit = 100 } = req.query;
+        if (gameType === 'color_clash') {
+            const redis = req.app.get('redis');
+            colorClashSeasonService.configure({ redis });
+            const leaderboard = await colorClashSeasonService.getLeaderboard({
+                limit: parseInt(limit, 10) || 100,
+                offset: 0,
+                userId: req.userId || null
+            });
+            return res.json({
+                rankings: leaderboard.rankings,
+                userRank: leaderboard.userRank,
+                period,
+                gameType,
+                season: leaderboard.season,
+                total: leaderboard.rankings.length
+            });
+        }
         const raw      = await rankingService.getRankings(`games:${gameType}`, period, parseInt(limit));
         const rankings = await enrichWithUserData(raw);
         const userRank = req.userId ? await rankingService.getUserRank(req.userId, `games:${gameType}`, period) : null;
@@ -93,5 +111,4 @@ exports.getActiveRoomRankings = async (req, res, next) => {
         res.json({ rankings: rooms.map((r, i) => ({ rank: i + 1, ...r })) });
     } catch (error) { next(error); }
 };
-
 

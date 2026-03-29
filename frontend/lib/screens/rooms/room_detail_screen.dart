@@ -4,6 +4,7 @@ import 'dart:async';
 import 'package:provider/provider.dart';
 import 'package:image_picker/image_picker.dart';
 import '../../providers/auth_provider.dart';
+import '../../providers/active_room_session_controller.dart';
 import '../../services/room_service.dart';
 import '../../models/room_model.dart';
 import '../../models/user_model.dart';
@@ -24,6 +25,7 @@ import '../../widgets/rooms/room_control_bottom_sheet.dart';
 import '../../widgets/rooms/room_feature_bottom_sheet.dart';
 import '../../widgets/rooms/room_feature_overlay.dart';
 import '../../widgets/rooms/invite_friends_bottom_sheet.dart';
+import '../../widgets/rooms/room_seat_tile.dart';
 import '../../widgets/rooms/user_profile_bottom_sheet.dart';
 import 'package:flutter/services.dart';
 import '../../widgets/rooms/reaction_quick_panel.dart';
@@ -50,11 +52,16 @@ class RoomDetailScreen extends StatefulWidget {
   State<RoomDetailScreen> createState() => _RoomDetailScreenState();
 }
 
-class _RoomDetailScreenState extends State<RoomDetailScreen> {
+enum _RoomExitDecision { leave, background, closeOnly }
+
+class _RoomDetailScreenState extends State<RoomDetailScreen>
+    with WidgetsBindingObserver {
+  late final ActiveRoomSessionController _activeRoomSessionController;
   late RoomModel _room;
   final bool _isLoading = false;
   bool _isJoining = false;
   bool _isExiting = false;
+  bool _keepRoomSessionAliveOnDispose = false;
   bool _hasJoinedSocketRoom = false;
   bool _isVoiceConnected = false;
   bool _isConnectingVoice = false;
@@ -85,6 +92,7 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
   ypi.YoutubePlayerValue _youtubePlayerValue = ypi.YoutubePlayerValue();
   ypi.YoutubeVideoState _youtubeVideoState = const ypi.YoutubeVideoState();
   String? _activeYoutubeId;
+  int _activeYoutubeSessionVersion = 0;
   String? _activeAudioUrl;
   Timer? _youtubeSyncDebounceTimer;
   Timer? _youtubePlaybackRecoveryTimer;
@@ -95,6 +103,7 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
   bool _isSendingYoutubeSync = false;
   Map<String, dynamic>? _pendingYoutubeSyncPayload;
   DateTime? _pauseYoutubeLocalSyncUntil;
+  bool _isYoutubePickerOpen = false;
   bool _showQuickReactions = false;
   bool _isRefreshingRoom = false;
   bool _hasPendingRoomRefresh = false;
@@ -105,8 +114,9 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
   String? _youtubeErrorRecoveryVideoId;
   Timer? _youtubeErrorRecoveryTimer;
   bool _isAdvancingYoutubeQueue = false;
-  double _youtubeLocalVolume = 1.0;
-  bool _youtubeMutedLocally = false;
+  bool _isUpdatingYoutubeQueue = false;
+  final double _youtubeLocalVolume = 1.0;
+  final bool _youtubeMutedLocally = false;
   Timer? _quickReactionTrayTimer;
   final List<String> _gamePrompts = const [
     'Two truths and a lie',
@@ -123,11 +133,8 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
       Provider.of<AuthProvider>(context, listen: false).user?.id;
   RoomPermissions get _permissions =>
       RoomPermissions(room: _room, userId: _currentUserId);
-  bool get _canBypassChatRestrictions => _permissions.canManageSafety;
-  bool get _canSendTextMessages =>
-      !_room.banTextChat || _canBypassChatRestrictions;
-  bool get _canShareRoomImages =>
-      !_room.banPhotoChat || _canBypassChatRestrictions;
+  bool get _canSendTextMessages => _permissions.canSendRoomMessages;
+  bool get _canShareRoomImages => _permissions.canSendRoomImages;
   bool get _canOpenChatComposer => _canSendTextMessages || _canShareRoomImages;
   bool get _canUseRoomGifts => _permissions.canUseRoomGifts;
   bool get _canControlRoomStream => _permissions.canManageRoomMedia;
@@ -140,7 +147,14 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
   @override
   void initState() {
     super.initState();
-    _room = widget.room;
+    WidgetsBinding.instance.addObserver(this);
+    _activeRoomSessionController = Provider.of<ActiveRoomSessionController>(
+      context,
+      listen: false,
+    );
+    _room = _activeRoomSessionController.activeRoom?.id == widget.room.id
+        ? _activeRoomSessionController.activeRoom!
+        : widget.room;
     _syncMediaController(_room);
 
     _messageSubscription =
@@ -156,16 +170,51 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
     });
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _initializeRoom();
-      _startHeartbeat();
-      _loadInitialMessages();
+      unawaited(_bootstrapRoomSession());
     });
   }
 
-  Future<void> _loadInitialMessages() async {
+  Future<void> _bootstrapRoomSession() async {
+    await _activeRoomSessionController.prepareForForegroundRoom(_room);
+    if (!mounted) return;
+
+    final attachedRoom = _activeRoomSessionController.attachRoomScreen(_room);
+    if (!mounted) return;
+
+    setState(() {
+      _room = attachedRoom;
+    });
+    _syncMediaController(_room);
+    _initializeRoom();
+    _startHeartbeat();
+    await _loadInitialMessages(reset: true);
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (!mounted) return;
+    if (state == AppLifecycleState.resumed) {
+      _scheduleRoomRefresh(delay: const Duration(milliseconds: 160));
+      if (_room.type == 'video' && (_room.youtubeUrl?.isNotEmpty == true)) {
+        _applySharedYoutubeSync(_room, force: true);
+      }
+    }
+  }
+
+  Future<void> _loadInitialMessages({bool reset = false}) async {
     final result = await MessageService.getRoomMessages(_room.id, limit: 40);
     final messages = result['messages'] as List<dynamic>? ?? const [];
-    if (!mounted || messages.isEmpty) return;
+    if (!mounted) return;
+
+    if (reset) {
+      _chatMessages.clear();
+    }
+    if (messages.isEmpty) {
+      if (reset) {
+        _notifyChatChanged();
+      }
+      return;
+    }
 
     for (final message in messages) {
       _appendChatMessage({
@@ -183,8 +232,8 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
   }
 
   void _syncMediaController(RoomModel room) {
-    final videoUrl = room.type == 'video' ? room.youtubeUrl : null;
-    final videoId = _extractYoutubeVideoId(videoUrl);
+    final videoId = _sharedYoutubeVideoId(room);
+    final sessionVersion = _sharedYoutubeSessionVersion(room);
     final normalizedAudioUrl =
         _normalizeRoomMediaUrl(room.type == 'music' ? room.musicUrl : null);
 
@@ -196,10 +245,16 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
       _youtubePlayerValue = ypi.YoutubePlayerValue();
       _youtubeVideoState = const ypi.YoutubeVideoState();
       _activeYoutubeId = null;
+      _activeYoutubeSessionVersion = 0;
       _resetYoutubeErrorRecoveryState();
       _setYoutubePlaybackRecoveryVisible(false);
-    } else if (_youtubeController == null || _activeYoutubeId != videoId) {
-      _replaceYoutubeController(videoId);
+    } else if (_youtubeController == null ||
+        _activeYoutubeId != videoId ||
+        _activeYoutubeSessionVersion != sessionVersion) {
+      _replaceYoutubeController(
+        videoId,
+        sessionVersion: sessionVersion,
+      );
       return;
     } else if (room.type == 'video') {
       _applySharedYoutubeSync(room, force: true);
@@ -229,16 +284,20 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
     }
   }
 
-  void _replaceYoutubeController(String videoId) {
+  void _replaceYoutubeController(
+    String videoId, {
+    int? sessionVersion,
+  }) {
     final previous = _youtubeController;
     _youtubeValueSubscription?.cancel();
     _youtubeVideoStateSubscription?.cancel();
+    final nextSessionVersion = sessionVersion ?? _sharedYoutubeSessionVersion();
 
     final controller = ypi.YoutubePlayerController(
       params: ypi.YoutubePlayerParams(
         mute: false,
-        showControls: _canControlRoomStream,
-        showFullscreenButton: _canControlRoomStream,
+        showControls: true,
+        showFullscreenButton: true,
         enableCaption: false,
         strictRelatedVideos: true,
         pointerEvents: ypi.PointerEvents.auto,
@@ -278,13 +337,19 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
 
     _youtubeController = controller;
     _activeYoutubeId = videoId;
+    _activeYoutubeSessionVersion = nextSessionVersion;
     _showYoutubePlaybackRecovery = false;
     _pauseYoutubeLocalSyncFor(const Duration(milliseconds: 1400));
+    _syncYoutubePlayerOverlayInteractivity();
     _lastObservedYoutubePlaybackState = null;
     _lastObservedYoutubePositionMs = null;
     _lastObservedYoutubeAt = null;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || _activeYoutubeId != videoId) return;
+      if (!mounted ||
+          _activeYoutubeId != videoId ||
+          _activeYoutubeSessionVersion != nextSessionVersion) {
+        return;
+      }
       _applyYoutubeLocalAudioPreference();
       _applySharedYoutubeSync(_room, force: true);
       _scheduleYoutubePlaybackRecoveryCheck();
@@ -304,6 +369,7 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
 
   void _handleYoutubePlayerReady() {
     _resetYoutubeErrorRecoveryState();
+    _syncYoutubePlayerOverlayInteractivity();
     _applyYoutubeLocalAudioPreference();
     _applySharedYoutubeSync(_room, force: true);
     _scheduleYoutubePlaybackRecoveryCheck();
@@ -311,6 +377,26 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
 
   void _pauseYoutubeLocalSyncFor(Duration duration) {
     _pauseYoutubeLocalSyncUntil = DateTime.now().add(duration);
+  }
+
+  Future<void> _setYoutubePointerEventsEnabled(bool enabled) async {
+    final controller = _youtubeController;
+    if (controller == null) return;
+
+    final pointerEventsValue = enabled ? 'auto' : 'none';
+    try {
+      // ignore: invalid_use_of_internal_member
+      await controller.webViewController.runJavaScript('''
+        document.documentElement.style.pointerEvents = '$pointerEventsValue';
+        document.body.style.pointerEvents = '$pointerEventsValue';
+      ''');
+    } catch (error) {
+      debugPrint('YouTube pointer events update skipped: $error');
+    }
+  }
+
+  void _syncYoutubePlayerOverlayInteractivity() {
+    unawaited(_setYoutubePointerEventsEnabled(!_isYoutubePickerOpen));
   }
 
   String? _mapYoutubePlaybackState(ypi.PlayerState state) {
@@ -331,6 +417,25 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
   String? _extractYoutubeVideoId(String? url) {
     if (url == null || url.isEmpty) return null;
     return ypi.YoutubePlayerController.convertUrlToId(url);
+  }
+
+  String? _sharedYoutubeVideoId([RoomModel? room]) {
+    final source = room ?? _room;
+    final activeVideoId = source.youtubeActiveVideoId?.trim();
+    if (activeVideoId != null && activeVideoId.isNotEmpty) {
+      return activeVideoId;
+    }
+    return _extractYoutubeVideoId(source.youtubeUrl);
+  }
+
+  int _sharedYoutubeSessionVersion([RoomModel? room]) {
+    final source = room ?? _room;
+    return source.youtubeSessionVersion < 0 ? 0 : source.youtubeSessionVersion;
+  }
+
+  String _sharedYoutubeSessionKey([RoomModel? room]) {
+    final source = room ?? _room;
+    return '${_sharedYoutubeVideoId(source) ?? ''}:${_sharedYoutubeSessionVersion(source)}';
   }
 
   String get _youtubeDisplayTitle {
@@ -404,14 +509,32 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
       return;
     }
 
-    if (room.type != 'video' || room.youtubeUrl?.isNotEmpty != true) {
+    final targetVideoId = _sharedYoutubeVideoId(room);
+    final targetSessionVersion = _sharedYoutubeSessionVersion(room);
+    if (room.type != 'video' ||
+        targetVideoId == null ||
+        targetVideoId.isEmpty ||
+        room.youtubeUrl?.isNotEmpty != true) {
       return;
     }
 
     final controller = _youtubeController;
     if (controller == null) return;
 
+    final currentMetaVideoId = _youtubePlayerValue.metaData.videoId.trim();
+    final needsControllerRebind = _activeYoutubeId != targetVideoId ||
+        _activeYoutubeSessionVersion != targetSessionVersion ||
+        (currentMetaVideoId.isNotEmpty && currentMetaVideoId != targetVideoId);
+    if (needsControllerRebind) {
+      _replaceYoutubeController(
+        targetVideoId,
+        sessionVersion: targetSessionVersion,
+      );
+      return;
+    }
+
     if (_youtubePlayerValue.hasError) {
+      unawaited(_recoverYoutubePlayback(forceRebind: true));
       return;
     }
 
@@ -602,12 +725,23 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
     }
   }
 
-  Future<void> _recoverYoutubePlayback() async {
-    final videoId = _activeYoutubeId;
+  Future<void> _recoverYoutubePlayback({bool forceRebind = false}) async {
+    final videoId = _sharedYoutubeVideoId();
     if (videoId == null) return;
+    final sessionVersion = _sharedYoutubeSessionVersion();
+    final currentMetaVideoId = _youtubePlayerValue.metaData.videoId.trim();
+    final shouldRebind = forceRebind ||
+        _youtubeController == null ||
+        _youtubePlayerValue.hasError ||
+        _activeYoutubeId != videoId ||
+        _activeYoutubeSessionVersion != sessionVersion ||
+        (currentMetaVideoId.isNotEmpty && currentMetaVideoId != videoId);
 
-    if (_youtubePlayerValue.hasError) {
-      _replaceYoutubeController(videoId);
+    if (shouldRebind) {
+      _replaceYoutubeController(
+        videoId,
+        sessionVersion: sessionVersion,
+      );
       _isRecoveringYoutubeError = false;
       return;
     }
@@ -621,7 +755,11 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
         seconds: _effectiveYoutubePositionMs(_room) / 1000,
         allowSeekAhead: true,
       );
-      await controller.playVideo();
+      if (_room.youtubePlaybackState == 'playing') {
+        await controller.playVideo();
+      } else {
+        await controller.pauseVideo();
+      }
       await _setYoutubeLocalAudioPreference(controller);
       _resetYoutubeErrorRecoveryState();
       _scheduleYoutubePlaybackRecoveryCheck();
@@ -629,43 +767,6 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
       debugPrint('YouTube playback recovery skipped: $error');
     } finally {
       _isRecoveringYoutubeError = false;
-    }
-  }
-
-  Future<void> _setYoutubeLocalVolume(double nextVolume) async {
-    final clampedVolume = nextVolume.clamp(0.0, 1.0).toDouble();
-    if (mounted) {
-      setState(() {
-        _youtubeLocalVolume = clampedVolume;
-        if (clampedVolume > 0) {
-          _youtubeMutedLocally = false;
-        }
-      });
-    } else {
-      _youtubeLocalVolume = clampedVolume;
-      if (clampedVolume > 0) {
-        _youtubeMutedLocally = false;
-      }
-    }
-
-    final controller = _youtubeController;
-    if (controller != null) {
-      await _setYoutubeLocalAudioPreference(controller);
-    }
-  }
-
-  Future<void> _toggleYoutubeLocalMute() async {
-    if (mounted) {
-      setState(() {
-        _youtubeMutedLocally = !_youtubeMutedLocally;
-      });
-    } else {
-      _youtubeMutedLocally = !_youtubeMutedLocally;
-    }
-
-    final controller = _youtubeController;
-    if (controller != null) {
-      await _setYoutubeLocalAudioPreference(controller);
     }
   }
 
@@ -691,6 +792,10 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
 
   void _handleYoutubeControllerChanged() {
     if (!_canControlRoomStream || _room.type != 'video') {
+      return;
+    }
+
+    if (_isYoutubePickerOpen) {
       return;
     }
 
@@ -848,6 +953,18 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
     int? positionMs,
     String? successMessage,
   }) async {
+    if (_isUpdatingYoutubeQueue) {
+      return;
+    }
+
+    if (mounted) {
+      setState(() {
+        _isUpdatingYoutubeQueue = true;
+      });
+    } else {
+      _isUpdatingYoutubeQueue = true;
+    }
+
     try {
       final themePatch = <String, dynamic>{
         'youtubeQueue': _youtubeQueuePayload(items),
@@ -882,6 +999,14 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
         SnackBar(
             content: Text(error.toString().replaceFirst('Exception: ', ''))),
       );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isUpdatingYoutubeQueue = false;
+        });
+      } else {
+        _isUpdatingYoutubeQueue = false;
+      }
     }
   }
 
@@ -1334,9 +1459,11 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
         canOpenRoomSettings: userPermissions.canOpenRoomSettings,
         canChangeRoomMode: userPermissions.canManageRoomIdentity,
         canEditAnnouncement: userPermissions.canEditAnnouncement,
+        canInviteUsers: userPermissions.canInviteUsers,
+        canRallyFans: userPermissions.canRallyFans,
         onExit: () {
           Navigator.pop(sheetContext);
-          _leaveRoomAndExit();
+          unawaited(_confirmRoomExit());
         },
         onSettings: () {
           Navigator.pop(sheetContext);
@@ -1394,6 +1521,15 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
   }
 
   void _rallyFans() {
+    if (!_permissions.canRallyFans) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Only hosts and admins can rally the room.'),
+          backgroundColor: Colors.redAccent,
+        ),
+      );
+      return;
+    }
     SocketService.rallyFans(roomId: _room.id, roomName: _room.name);
 
     ScaffoldMessenger.of(context).showSnackBar(
@@ -1418,6 +1554,15 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
   }
 
   void _showInviteFriends() {
+    if (!_permissions.canInviteUsers) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Only hosts and admins can invite users right now.'),
+          backgroundColor: Colors.redAccent,
+        ),
+      );
+      return;
+    }
     _hideQuickReactionTray();
     showModalBottomSheet(
       context: context,
@@ -1821,7 +1966,11 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
 
   void _joinSocketRoom() {
     if (_hasJoinedSocketRoom) return;
-    SocketService.joinRoom(_room.id);
+    if (!_activeRoomSessionController.claimForegroundSocketMembership(
+      _room.id,
+    )) {
+      SocketService.joinRoom(_room.id);
+    }
     _hasJoinedSocketRoom = true;
   }
 
@@ -1833,6 +1982,11 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
 
   @override
   void dispose() {
+    _activeRoomSessionController.detachRoomScreen(
+      _room.id,
+      backgrounded: _keepRoomSessionAliveOnDispose,
+    );
+    WidgetsBinding.instance.removeObserver(this);
     _heartbeatTimer?.cancel();
     _roomRefreshTimer?.cancel();
     _quickReactionTrayTimer?.cancel();
@@ -1852,8 +2006,10 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
     _youtubeController = null;
     _youtubeExplode.close();
     unawaited(_roomAudioPlayer.dispose());
-    unawaited(_voiceService.disconnect());
-    _leaveSocketRoom();
+    if (!_keepRoomSessionAliveOnDispose) {
+      unawaited(_voiceService.disconnect());
+      _leaveSocketRoom();
+    }
     super.dispose();
   }
 
@@ -1879,8 +2035,10 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
           _isJoining = false;
         });
 
+        _activeRoomSessionController.updateRoom(updatedRoom);
         _joinSocketRoom();
         unawaited(_connectToVoice());
+        unawaited(_loadInitialMessages(reset: true));
 
         if (showFeedback) {
           ScaffoldMessenger.of(context).showSnackBar(
@@ -2382,28 +2540,42 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
     );
   }
 
+  List<_YoutubeVideoOption> _dedupeYoutubeOptions(
+    Iterable<_YoutubeVideoOption> items,
+  ) {
+    final seenIds = <String>{};
+    final results = <_YoutubeVideoOption>[];
+    for (final item in items) {
+      final normalizedId = item.id.trim();
+      if (normalizedId.isEmpty || seenIds.contains(normalizedId)) {
+        continue;
+      }
+      seenIds.add(normalizedId);
+      results.add(item);
+    }
+    return results;
+  }
+
   Future<List<_YoutubeVideoOption>> _searchYoutubeVideos(String query) async {
     try {
       final remoteResults =
           await RoomService.searchYoutubeVideos(_room.id, query);
       if (remoteResults.isNotEmpty || kIsWeb) {
-        return remoteResults
-            .map(
-              (video) => _YoutubeVideoOption(
-                id: video['id']?.toString() ?? '',
-                title: video['title']?.toString() ?? 'Untitled video',
-                author: video['author']?.toString() ?? '',
-                duration: video['durationMs'] == null
-                    ? null
-                    : Duration(
-                        milliseconds:
-                            int.tryParse('${video['durationMs']}') ?? 0,
-                      ),
-                thumbnailUrl: video['thumbnailUrl']?.toString() ?? '',
-              ),
-            )
-            .where((video) => video.id.isNotEmpty)
-            .toList();
+        return _dedupeYoutubeOptions(
+          remoteResults.map(
+            (video) => _YoutubeVideoOption(
+              id: video['id']?.toString() ?? '',
+              title: video['title']?.toString() ?? 'Untitled video',
+              author: video['author']?.toString() ?? '',
+              duration: video['durationMs'] == null
+                  ? null
+                  : Duration(
+                      milliseconds: int.tryParse('${video['durationMs']}') ?? 0,
+                    ),
+              thumbnailUrl: video['thumbnailUrl']?.toString() ?? '',
+            ),
+          ),
+        );
       }
     } catch (error) {
       if (kIsWeb) {
@@ -2413,18 +2585,17 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
     }
 
     final results = await _youtubeExplode.search.search(query);
-    return results
-        .take(12)
-        .map(
-          (video) => _YoutubeVideoOption(
-            id: video.id.value,
-            title: video.title,
-            author: video.author,
-            duration: video.duration,
-            thumbnailUrl: video.thumbnails.highResUrl,
+    return _dedupeYoutubeOptions(
+      results.take(12).map(
+            (video) => _YoutubeVideoOption(
+              id: video.id.value,
+              title: video.title,
+              author: video.author,
+              duration: video.duration,
+              thumbnailUrl: video.thumbnails.highResUrl,
+            ),
           ),
-        )
-        .toList();
+    );
   }
 
   Future<void> _showYouTubePicker() async {
@@ -2441,16 +2612,18 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
 
     final searchController = TextEditingController(
       text: _room.youtubeTitle?.trim().isNotEmpty == true
-          ? _room.youtubeTitle!
-          : _room.name,
+          ? _room.youtubeTitle!.trim()
+          : '',
     );
     final initialQuery = searchController.text.trim();
-    final existingQueueCount = _currentYoutubeQueueItems().length;
     var results = <_YoutubeVideoOption>[];
     _YoutubeVideoOption? selectedVideo;
     var isSearching = false;
+    var isSubmitting = false;
     var didInitialSearch = false;
     String? searchError;
+    Timer? searchDebounce;
+    var latestSearchRequest = 0;
     BuildContext? activeSheetContext;
     late void Function(VoidCallback fn) updateSheetState;
 
@@ -2460,397 +2633,571 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
       updateSheetState(fn);
     }
 
-    Future<void> runSearch([String? queryOverride]) async {
+    bool isAlreadyInPlaylist(_YoutubeVideoOption video) {
+      final itemIdentity = _youtubeQueueIdentity(
+        url: 'https://www.youtube.com/watch?v=${video.id}',
+        videoId: video.id,
+      );
+      return _currentYoutubeQueueItems().any(
+        (entry) =>
+            _youtubeQueueIdentity(url: entry.url, videoId: entry.videoId) ==
+            itemIdentity,
+      );
+    }
+
+    Future<void> runSearch([
+      String? queryOverride,
+      bool immediate = false,
+    ]) async {
       final query = (queryOverride ?? searchController.text).trim();
-      if (query.isEmpty) return;
+      searchDebounce?.cancel();
+      if (query.isEmpty) {
+        safeUpdateSheet(() {
+          results = const <_YoutubeVideoOption>[];
+          selectedVideo = null;
+          isSearching = false;
+          searchError = null;
+        });
+        return;
+      }
+
+      Future<void> performSearch() async {
+        final requestId = ++latestSearchRequest;
+        safeUpdateSheet(() {
+          isSearching = true;
+          searchError = null;
+        });
+
+        try {
+          final items = await _searchYoutubeVideos(query);
+          if (requestId != latestSearchRequest) return;
+          safeUpdateSheet(() {
+            results = items;
+            isSearching = false;
+            if (items.isEmpty) {
+              selectedVideo = null;
+              return;
+            }
+            final existingSelectionId = selectedVideo?.id;
+            selectedVideo = items.firstWhere(
+              (item) => item.id == existingSelectionId,
+              orElse: () => items.first,
+            );
+          });
+        } catch (e) {
+          if (requestId != latestSearchRequest) return;
+          safeUpdateSheet(() {
+            isSearching = false;
+            searchError = e.toString().replaceFirst('Exception: ', '');
+          });
+        }
+      }
+
+      if (immediate) {
+        await performSearch();
+        return;
+      }
 
       safeUpdateSheet(() {
         isSearching = true;
-        searchError = null;
       });
-
-      try {
-        final items = await _searchYoutubeVideos(query);
-        safeUpdateSheet(() {
-          results = items;
-          selectedVideo = items.isNotEmpty ? items.first : null;
-          isSearching = false;
-        });
-      } catch (e) {
-        safeUpdateSheet(() {
-          isSearching = false;
-          searchError = e.toString().replaceFirst('Exception: ', '');
-        });
-      }
+      searchDebounce = Timer(
+        const Duration(milliseconds: 340),
+        () => unawaited(performSearch()),
+      );
     }
 
-    await showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (sheetContext) => StatefulBuilder(
-        builder: (context, setSheetState) {
-          activeSheetContext = sheetContext;
-          updateSheetState = setSheetState;
+    Future<void> submitSelection(
+      BuildContext sheetContext, {
+      required bool playNow,
+    }) async {
+      final video = selectedVideo;
+      if (video == null || isSubmitting) {
+        return;
+      }
 
-          if (!didInitialSearch) {
-            didInitialSearch = true;
-            WidgetsBinding.instance.addPostFrameCallback((_) {
-              if (sheetContext.mounted) {
-                runSearch(initialQuery);
-              }
-            });
-          }
+      safeUpdateSheet(() {
+        isSubmitting = true;
+      });
+      Navigator.pop(sheetContext);
+      await _queueYoutubeOption(video, playNow: playNow);
+    }
 
-          return FractionallySizedBox(
-            heightFactor: 0.9,
-            child: Container(
-              padding: const EdgeInsets.fromLTRB(0, 10, 0, 20),
-              decoration: const BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.vertical(top: Radius.circular(32)),
-              ),
-              child: SafeArea(
-                top: false,
-                child: Column(
-                  children: [
-                    Container(
-                      width: 42,
-                      height: 4,
-                      decoration: BoxDecoration(
-                        color: Colors.black12,
-                        borderRadius: BorderRadius.circular(999),
-                      ),
-                    ),
-                    const SizedBox(height: 14),
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 18),
-                      child: Row(
-                        children: [
-                          IconButton(
-                            onPressed: () => Navigator.pop(sheetContext),
-                            icon: const Icon(Icons.close_rounded),
-                          ),
-                          const Expanded(
-                            child: Text(
-                              'Playlist',
-                              textAlign: TextAlign.center,
-                              style: TextStyle(
-                                color: Color(0xFF161827),
-                                fontSize: 18,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                          ),
-                          TextButton(
-                            onPressed: isSearching ? null : () => runSearch(),
-                            child: const Text(
-                              'Search',
-                              style: TextStyle(
-                                color: Color(0xFF31C8F5),
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(18, 8, 18, 0),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 16),
+    _isYoutubePickerOpen = true;
+    _pauseYoutubeLocalSyncFor(const Duration(milliseconds: 1400));
+    _syncYoutubePlayerOverlayInteractivity();
+
+    try {
+      await showModalBottomSheet(
+        context: context,
+        isScrollControlled: true,
+        backgroundColor: Colors.transparent,
+        builder: (sheetContext) => StatefulBuilder(
+          builder: (context, setSheetState) {
+            activeSheetContext = sheetContext;
+            updateSheetState = setSheetState;
+
+            if (!didInitialSearch) {
+              didInitialSearch = true;
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (sheetContext.mounted && initialQuery.isNotEmpty) {
+                  unawaited(runSearch(initialQuery, true));
+                }
+              });
+            }
+
+            final queueCount = _currentYoutubeQueueItems().length;
+
+            return FractionallySizedBox(
+              heightFactor: 0.9,
+              child: Container(
+                padding: const EdgeInsets.fromLTRB(0, 10, 0, 20),
+                decoration: const BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.vertical(top: Radius.circular(32)),
+                ),
+                child: SafeArea(
+                  top: false,
+                  child: Column(
+                    children: [
+                      Container(
+                        width: 42,
+                        height: 4,
                         decoration: BoxDecoration(
-                          color: const Color(0xFFF2F4F8),
-                          borderRadius: BorderRadius.circular(18),
+                          color: Colors.black12,
+                          borderRadius: BorderRadius.circular(999),
                         ),
+                      ),
+                      const SizedBox(height: 14),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 18),
                         child: Row(
                           children: [
-                            const AppSearchIcon(size: 18),
-                            const SizedBox(width: 10),
-                            Expanded(
-                              child: TextField(
-                                controller: searchController,
-                                textInputAction: TextInputAction.search,
-                                onSubmitted: (_) => runSearch(),
-                                decoration: const InputDecoration(
-                                  border: InputBorder.none,
-                                  hintText: 'Search YouTube',
+                            IconButton(
+                              onPressed: () => Navigator.pop(sheetContext),
+                              icon: const Icon(Icons.close_rounded),
+                            ),
+                            const Expanded(
+                              child: Text(
+                                'Playlist',
+                                textAlign: TextAlign.center,
+                                style: TextStyle(
+                                  color: Color(0xFF161827),
+                                  fontSize: 18,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ),
+                            TextButton(
+                              onPressed: isSearching
+                                  ? null
+                                  : () => unawaited(
+                                        runSearch(
+                                          searchController.text,
+                                          true,
+                                        ),
+                                      ),
+                              child: const Text(
+                                'Search',
+                                style: TextStyle(
+                                  color: Color(0xFF31C8F5),
+                                  fontWeight: FontWeight.w600,
                                 ),
                               ),
                             ),
                           ],
                         ),
                       ),
-                    ),
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(22, 12, 22, 0),
-                      child: Row(
-                        children: [
-                          Icon(
-                            Icons.queue_music_rounded,
-                            size: 16,
-                            color: Colors.black.withValues(alpha: 0.45),
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(18, 8, 18, 0),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 16),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFF2F4F8),
+                            borderRadius: BorderRadius.circular(18),
                           ),
-                          const SizedBox(width: 8),
-                          Text(
-                            existingQueueCount == 0
-                                ? 'Pick a video to start the shared playlist'
-                                : '$existingQueueCount video${existingQueueCount == 1 ? '' : 's'} currently in the room playlist',
-                            style: const TextStyle(
-                              color: Colors.black54,
-                              fontSize: 12,
-                              fontWeight: FontWeight.w600,
-                            ),
+                          child: Row(
+                            children: [
+                              const Icon(
+                                Icons.search_rounded,
+                                size: 20,
+                                color: Color(0xFF161827),
+                              ),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: TextField(
+                                  controller: searchController,
+                                  textInputAction: TextInputAction.search,
+                                  cursorColor: const Color(0xFF161827),
+                                  style: const TextStyle(
+                                    color: Color(0xFF161827),
+                                  ),
+                                  onChanged: (value) =>
+                                      unawaited(runSearch(value)),
+                                  onSubmitted: (_) => unawaited(
+                                    runSearch(
+                                      searchController.text,
+                                      true,
+                                    ),
+                                  ),
+                                  decoration: const InputDecoration(
+                                    filled: false,
+                                    fillColor: Colors.transparent,
+                                    border: InputBorder.none,
+                                    enabledBorder: InputBorder.none,
+                                    focusedBorder: InputBorder.none,
+                                    hintText: 'Search YouTube videos',
+                                    hintStyle: TextStyle(
+                                      color: Colors.black45,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ],
                           ),
-                        ],
+                        ),
                       ),
-                    ),
-                    const SizedBox(height: 18),
-                    if (isSearching)
-                      const Expanded(
-                        child: Center(child: CircularProgressIndicator()),
-                      )
-                    else if (searchError != null)
-                      Expanded(
-                        child: Center(
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 24),
-                            child: Text(
-                              searchError!,
-                              textAlign: TextAlign.center,
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(22, 12, 22, 0),
+                        child: Row(
+                          children: [
+                            Icon(
+                              Icons.queue_music_rounded,
+                              size: 16,
+                              color: Colors.black.withValues(alpha: 0.45),
+                            ),
+                            const SizedBox(width: 8),
+                            Text(
+                              queueCount == 0
+                                  ? 'Pick a video to start the shared playlist'
+                                  : '$queueCount video${queueCount == 1 ? '' : 's'} currently in the room playlist',
                               style: const TextStyle(
-                                color: Colors.redAccent,
+                                color: Colors.black54,
+                                fontSize: 12,
                                 fontWeight: FontWeight.w600,
                               ),
                             ),
-                          ),
+                          ],
                         ),
-                      )
-                    else
-                      Expanded(
-                        child: Column(
-                          children: [
-                            Padding(
+                      ),
+                      const SizedBox(height: 18),
+                      if (isSearching)
+                        const Expanded(
+                          child: Center(child: CircularProgressIndicator()),
+                        )
+                      else if (searchError != null)
+                        Expanded(
+                          child: Center(
+                            child: Padding(
                               padding:
                                   const EdgeInsets.symmetric(horizontal: 24),
-                              child: Row(
-                                children: [
-                                  Text(
-                                    '${results.isEmpty ? 0 : 1}/${results.length}',
-                                    style: const TextStyle(
-                                      color: Colors.black38,
-                                      fontSize: 14,
-                                    ),
-                                  ),
-                                ],
+                              child: Text(
+                                searchError!,
+                                textAlign: TextAlign.center,
+                                style: const TextStyle(
+                                  color: Colors.redAccent,
+                                  fontWeight: FontWeight.w600,
+                                ),
                               ),
                             ),
-                            const SizedBox(height: 10),
-                            Expanded(
-                              child: results.isEmpty
-                                  ? _buildEmptyYouTubePickerState(
-                                      onTap: () => runSearch(initialQuery),
-                                    )
-                                  : ListView.separated(
-                                      padding: const EdgeInsets.fromLTRB(
-                                          20, 0, 20, 12),
-                                      itemCount: results.length,
-                                      separatorBuilder: (_, __) =>
-                                          const SizedBox(height: 12),
-                                      itemBuilder: (context, index) {
-                                        final video = results[index];
-                                        final isSelected =
-                                            selectedVideo?.id == video.id;
+                          ),
+                        )
+                      else
+                        Expanded(
+                          child: Column(
+                            children: [
+                              Padding(
+                                padding:
+                                    const EdgeInsets.symmetric(horizontal: 24),
+                                child: Row(
+                                  children: [
+                                    Text(
+                                      '${results.length} result${results.length == 1 ? '' : 's'}',
+                                      style: const TextStyle(
+                                        color: Colors.black38,
+                                        fontSize: 14,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(height: 10),
+                              Expanded(
+                                child: results.isEmpty
+                                    ? _buildEmptyYouTubePickerState(
+                                        onTap: () => unawaited(
+                                          runSearch(
+                                            searchController.text.isNotEmpty
+                                                ? searchController.text
+                                                : initialQuery,
+                                            true,
+                                          ),
+                                        ),
+                                      )
+                                    : ListView.separated(
+                                        padding: const EdgeInsets.fromLTRB(
+                                            20, 0, 20, 12),
+                                        itemCount: results.length,
+                                        separatorBuilder: (_, __) =>
+                                            const SizedBox(height: 12),
+                                        itemBuilder: (context, index) {
+                                          final video = results[index];
+                                          final isSelected =
+                                              selectedVideo?.id == video.id;
+                                          final alreadyQueued =
+                                              isAlreadyInPlaylist(video);
 
-                                        return InkWell(
-                                          borderRadius:
-                                              BorderRadius.circular(22),
-                                          onTap: () {
-                                            updateSheetState(() {
-                                              selectedVideo = video;
-                                            });
-                                          },
-                                          child: Container(
-                                            padding: const EdgeInsets.all(10),
-                                            decoration: BoxDecoration(
-                                              color: isSelected
-                                                  ? const Color(0xFFE8FBFF)
-                                                  : Colors.white,
-                                              borderRadius:
-                                                  BorderRadius.circular(22),
-                                              border: Border.all(
+                                          return InkWell(
+                                            borderRadius:
+                                                BorderRadius.circular(22),
+                                            onTap: () {
+                                              updateSheetState(() {
+                                                selectedVideo = video;
+                                              });
+                                            },
+                                            child: Container(
+                                              padding: const EdgeInsets.all(10),
+                                              decoration: BoxDecoration(
                                                 color: isSelected
-                                                    ? const Color(0xFF31C8F5)
-                                                    : const Color(0xFFE8EAF1),
+                                                    ? const Color(0xFFE8FBFF)
+                                                    : Colors.white,
+                                                borderRadius:
+                                                    BorderRadius.circular(22),
+                                                border: Border.all(
+                                                  color: isSelected
+                                                      ? const Color(0xFF31C8F5)
+                                                      : const Color(0xFFE8EAF1),
+                                                ),
                                               ),
-                                            ),
-                                            child: Row(
-                                              crossAxisAlignment:
-                                                  CrossAxisAlignment.start,
-                                              children: [
-                                                ClipRRect(
-                                                  borderRadius:
-                                                      BorderRadius.circular(14),
-                                                  child: Image.network(
-                                                    video.thumbnailUrl,
-                                                    width: 122,
-                                                    height: 72,
-                                                    fit: BoxFit.cover,
-                                                    errorBuilder:
-                                                        (_, __, ___) =>
-                                                            Container(
+                                              child: Row(
+                                                crossAxisAlignment:
+                                                    CrossAxisAlignment.start,
+                                                children: [
+                                                  ClipRRect(
+                                                    borderRadius:
+                                                        BorderRadius.circular(
+                                                            14),
+                                                    child: Image.network(
+                                                      video.thumbnailUrl,
                                                       width: 122,
                                                       height: 72,
-                                                      color: const Color(
-                                                          0xFFF1F3F8),
-                                                      alignment:
-                                                          Alignment.center,
-                                                      child: const Icon(
-                                                        Icons
-                                                            .smart_display_rounded,
-                                                        color: Colors.black38,
+                                                      fit: BoxFit.cover,
+                                                      errorBuilder:
+                                                          (_, __, ___) =>
+                                                              Container(
+                                                        width: 122,
+                                                        height: 72,
+                                                        color: const Color(
+                                                            0xFFF1F3F8),
+                                                        alignment:
+                                                            Alignment.center,
+                                                        child: const Icon(
+                                                          Icons
+                                                              .smart_display_rounded,
+                                                          color: Colors.black38,
+                                                        ),
                                                       ),
                                                     ),
                                                   ),
-                                                ),
-                                                const SizedBox(width: 14),
-                                                Expanded(
-                                                  child: Column(
-                                                    crossAxisAlignment:
-                                                        CrossAxisAlignment
-                                                            .start,
-                                                    children: [
-                                                      Text(
-                                                        video.title,
-                                                        maxLines: 2,
-                                                        overflow: TextOverflow
-                                                            .ellipsis,
-                                                        style: const TextStyle(
-                                                          color:
-                                                              Color(0xFF161827),
-                                                          fontSize: 15,
-                                                          fontWeight:
-                                                              FontWeight.w600,
+                                                  const SizedBox(width: 14),
+                                                  Expanded(
+                                                    child: Column(
+                                                      crossAxisAlignment:
+                                                          CrossAxisAlignment
+                                                              .start,
+                                                      children: [
+                                                        Row(
+                                                          children: [
+                                                            Expanded(
+                                                              child: Text(
+                                                                video.title,
+                                                                maxLines: 2,
+                                                                overflow:
+                                                                    TextOverflow
+                                                                        .ellipsis,
+                                                                style:
+                                                                    const TextStyle(
+                                                                  color: Color(
+                                                                      0xFF161827),
+                                                                  fontSize: 15,
+                                                                  fontWeight:
+                                                                      FontWeight
+                                                                          .w600,
+                                                                ),
+                                                              ),
+                                                            ),
+                                                            if (alreadyQueued)
+                                                              Container(
+                                                                margin:
+                                                                    const EdgeInsets
+                                                                        .only(
+                                                                  left: 8,
+                                                                ),
+                                                                padding:
+                                                                    const EdgeInsets
+                                                                        .symmetric(
+                                                                  horizontal: 8,
+                                                                  vertical: 4,
+                                                                ),
+                                                                decoration:
+                                                                    BoxDecoration(
+                                                                  color: const Color(
+                                                                          0xFF161827)
+                                                                      .withValues(
+                                                                    alpha: 0.06,
+                                                                  ),
+                                                                  borderRadius:
+                                                                      BorderRadius
+                                                                          .circular(
+                                                                    999,
+                                                                  ),
+                                                                ),
+                                                                child:
+                                                                    const Text(
+                                                                  'In playlist',
+                                                                  style:
+                                                                      TextStyle(
+                                                                    color: Color(
+                                                                        0xFF161827),
+                                                                    fontSize:
+                                                                        10,
+                                                                    fontWeight:
+                                                                        FontWeight
+                                                                            .w700,
+                                                                  ),
+                                                                ),
+                                                              ),
+                                                          ],
                                                         ),
-                                                      ),
-                                                      const SizedBox(height: 8),
-                                                      Text(
-                                                        video.author,
-                                                        maxLines: 1,
-                                                        overflow: TextOverflow
-                                                            .ellipsis,
-                                                        style: const TextStyle(
-                                                          color: Colors.black45,
-                                                          fontSize: 13,
-                                                        ),
-                                                      ),
-                                                      if (video.durationLabel !=
-                                                          null) ...[
                                                         const SizedBox(
-                                                            height: 4),
+                                                            height: 8),
                                                         Text(
-                                                          video.durationLabel!,
+                                                          video.author,
+                                                          maxLines: 1,
+                                                          overflow: TextOverflow
+                                                              .ellipsis,
                                                           style:
                                                               const TextStyle(
                                                             color:
-                                                                Colors.black38,
-                                                            fontSize: 12,
+                                                                Colors.black45,
+                                                            fontSize: 13,
                                                           ),
                                                         ),
+                                                        if (video
+                                                                .durationLabel !=
+                                                            null) ...[
+                                                          const SizedBox(
+                                                              height: 4),
+                                                          Text(
+                                                            video
+                                                                .durationLabel!,
+                                                            style:
+                                                                const TextStyle(
+                                                              color: Colors
+                                                                  .black38,
+                                                              fontSize: 12,
+                                                            ),
+                                                          ),
+                                                        ],
                                                       ],
-                                                    ],
+                                                    ),
                                                   ),
-                                                ),
-                                              ],
+                                                ],
+                                              ),
                                             ),
+                                          );
+                                        },
+                                      ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(20, 6, 20, 0),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: OutlinedButton.icon(
+                                onPressed: selectedVideo == null || isSubmitting
+                                    ? null
+                                    : () => unawaited(
+                                          submitSelection(
+                                            sheetContext,
+                                            playNow: false,
                                           ),
-                                        );
-                                      },
-                                    ),
+                                        ),
+                                icon: const Icon(Icons.queue_rounded),
+                                label: const Text('Add to queue'),
+                                style: OutlinedButton.styleFrom(
+                                  foregroundColor: const Color(0xFF161827),
+                                  side: const BorderSide(
+                                    color: Color(0xFFCED7E3),
+                                  ),
+                                  padding:
+                                      const EdgeInsets.symmetric(vertical: 18),
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(20),
+                                  ),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: ElevatedButton.icon(
+                                onPressed: selectedVideo == null || isSubmitting
+                                    ? null
+                                    : () => unawaited(
+                                          submitSelection(
+                                            sheetContext,
+                                            playNow: true,
+                                          ),
+                                        ),
+                                icon: const Icon(Icons.play_arrow_rounded),
+                                label: Text(
+                                  queueCount == 0 ? 'Start now' : 'Play now',
+                                ),
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: const Color(0xFF31C8F5),
+                                  foregroundColor: Colors.white,
+                                  disabledBackgroundColor:
+                                      const Color(0xFFBDECF8),
+                                  padding:
+                                      const EdgeInsets.symmetric(vertical: 18),
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(20),
+                                  ),
+                                ),
+                              ),
                             ),
                           ],
                         ),
                       ),
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(20, 6, 20, 0),
-                      child: Row(
-                        children: [
-                          Expanded(
-                            child: OutlinedButton.icon(
-                              onPressed: selectedVideo == null
-                                  ? null
-                                  : () {
-                                      final video = selectedVideo!;
-                                      Navigator.pop(sheetContext);
-                                      unawaited(
-                                        _queueYoutubeOption(
-                                          video,
-                                          playNow: false,
-                                        ),
-                                      );
-                                    },
-                              icon: const Icon(Icons.queue_rounded),
-                              label: const Text('Add to queue'),
-                              style: OutlinedButton.styleFrom(
-                                foregroundColor: const Color(0xFF161827),
-                                side: const BorderSide(
-                                  color: Color(0xFFCED7E3),
-                                ),
-                                padding:
-                                    const EdgeInsets.symmetric(vertical: 18),
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(20),
-                                ),
-                              ),
-                            ),
-                          ),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: ElevatedButton.icon(
-                              onPressed: selectedVideo == null
-                                  ? null
-                                  : () {
-                                      final video = selectedVideo!;
-                                      Navigator.pop(sheetContext);
-                                      unawaited(
-                                        _queueYoutubeOption(
-                                          video,
-                                          playNow: true,
-                                        ),
-                                      );
-                                    },
-                              icon: const Icon(Icons.play_arrow_rounded),
-                              label: Text(
-                                existingQueueCount == 0
-                                    ? 'Start now'
-                                    : 'Play now',
-                              ),
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: const Color(0xFF31C8F5),
-                                foregroundColor: Colors.white,
-                                disabledBackgroundColor:
-                                    const Color(0xFFBDECF8),
-                                padding:
-                                    const EdgeInsets.symmetric(vertical: 18),
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(20),
-                                ),
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
-            ),
-          );
-        },
-      ),
-    );
+            );
+          },
+        ),
+      );
+    } finally {
+      searchDebounce?.cancel();
+      _isYoutubePickerOpen = false;
+      _pauseYoutubeLocalSyncFor(const Duration(milliseconds: 900));
+      _syncYoutubePlayerOverlayInteractivity();
+      searchController.dispose();
 
-    searchController.dispose();
+      if (mounted &&
+          _room.type == 'video' &&
+          _room.youtubePlaybackState == 'playing' &&
+          _youtubeController != null &&
+          !_youtubePlayerValue.hasError) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted || _isYoutubePickerOpen) return;
+          _applySharedYoutubeSync(_room, force: true);
+        });
+      }
+    }
   }
 
   Widget _buildEmptyYouTubePickerState({
@@ -2917,6 +3264,7 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
   Future<void> _leaveRoomAndExit({String? reason}) async {
     if (_isExiting) return;
     _isExiting = true;
+    _keepRoomSessionAliveOnDispose = false;
     final user = Provider.of<AuthProvider>(context, listen: false).user;
     final isInRoom = user != null && _isUserInRoom(user.id);
 
@@ -2929,6 +3277,7 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
       await _voiceService.disconnect();
       await _roomAudioPlayer.stop();
       _isVoiceConnected = false;
+      _activeRoomSessionController.clearTrackedRoom(_room.id);
     }
 
     if (!mounted) return;
@@ -2940,8 +3289,224 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
     Navigator.pop(context);
   }
 
+  Future<void> _backgroundRoomAndExit() async {
+    if (_keepRoomSessionAliveOnDispose || _isExiting) return;
+
+    _keepRoomSessionAliveOnDispose = true;
+    _activeRoomSessionController.backgroundRoom(_room);
+    if (!mounted) return;
+    Navigator.pop(context);
+  }
+
+  Future<_RoomExitDecision?> _showRoomExitSheet() {
+    final user = Provider.of<AuthProvider>(context, listen: false).user;
+    final isInRoom = user != null && _isUserInRoom(user.id);
+    final roleLabel = _permissions.isOwner
+        ? 'host'
+        : _permissions.isAdmin
+            ? 'admin'
+            : 'listener';
+
+    return showModalBottomSheet<_RoomExitDecision>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (sheetContext) => Container(
+        padding: const EdgeInsets.fromLTRB(20, 14, 20, 24),
+        decoration: BoxDecoration(
+          color: const Color(0xF010121B),
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(30)),
+          border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.4),
+              blurRadius: 28,
+              offset: const Offset(0, -12),
+            ),
+          ],
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Center(
+              child: Container(
+                width: 46,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: Colors.white24,
+                  borderRadius: BorderRadius.circular(999),
+                ),
+              ),
+            ),
+            const SizedBox(height: 18),
+            const Text(
+              'Leave the room?',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 20,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              isInRoom
+                  ? _permissions.isOwner
+                      ? 'You are in the room as $roleLabel. Keep it running in the background and come back anytime, or leave fully to hand off or close the live session based on room policy.'
+                      : 'Keep the room active in the background with a floating return button, or leave the live session completely.'
+                  : 'You have not joined this room yet. Leaving now will just close this screen.',
+              style: TextStyle(
+                color: Colors.white.withValues(alpha: 0.7),
+                fontSize: 14,
+                height: 1.5,
+              ),
+            ),
+            const SizedBox(height: 22),
+            if (isInRoom)
+              Container(
+                width: double.infinity,
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.04),
+                  borderRadius: BorderRadius.circular(22),
+                  border: Border.all(
+                    color: Colors.white.withValues(alpha: 0.07),
+                  ),
+                ),
+                child: Column(
+                  children: [
+                    ListTile(
+                      onTap: () => Navigator.pop(
+                        sheetContext,
+                        _RoomExitDecision.background,
+                      ),
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 18,
+                        vertical: 4,
+                      ),
+                      leading: Container(
+                        width: 42,
+                        height: 42,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF1B7CFF).withValues(alpha: 0.18),
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                        child: const Icon(
+                          Icons.picture_in_picture_alt_rounded,
+                          color: Colors.white,
+                        ),
+                      ),
+                      title: const Text(
+                        'Keep room in background',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      subtitle: Text(
+                        'Voice stays connected and a floating room shortcut will appear.',
+                        style: TextStyle(
+                          color: Colors.white.withValues(alpha: 0.62),
+                          height: 1.35,
+                        ),
+                      ),
+                    ),
+                    Divider(
+                      height: 1,
+                      color: Colors.white.withValues(alpha: 0.06),
+                    ),
+                    ListTile(
+                      onTap: () =>
+                          Navigator.pop(sheetContext, _RoomExitDecision.leave),
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 18,
+                        vertical: 4,
+                      ),
+                      leading: Container(
+                        width: 42,
+                        height: 42,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFFF5D6C).withValues(alpha: 0.16),
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                        child: const Icon(
+                          Icons.logout_rounded,
+                          color: Colors.white,
+                        ),
+                      ),
+                      title: const Text(
+                        'Leave room completely',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      subtitle: Text(
+                        'Disconnect voice, remove the floating shortcut, and clean up this room session.',
+                        style: TextStyle(
+                          color: Colors.white.withValues(alpha: 0.62),
+                          height: 1.35,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              )
+            else
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: () =>
+                      Navigator.pop(sheetContext, _RoomExitDecision.closeOnly),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF1B7CFF),
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 15),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(18),
+                    ),
+                  ),
+                  child: const Text('Close room screen'),
+                ),
+              ),
+            const SizedBox(height: 14),
+            SizedBox(
+              width: double.infinity,
+              child: TextButton(
+                onPressed: () => Navigator.pop(sheetContext),
+                style: TextButton.styleFrom(
+                  foregroundColor: Colors.white70,
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                ),
+                child: const Text('Stay here'),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _confirmRoomExit() async {
+    final decision = await _showRoomExitSheet();
+    if (!mounted || decision == null) return;
+
+    switch (decision) {
+      case _RoomExitDecision.background:
+        await _backgroundRoomAndExit();
+        return;
+      case _RoomExitDecision.leave:
+        await _leaveRoomAndExit();
+        return;
+      case _RoomExitDecision.closeOnly:
+        _activeRoomSessionController.clearTrackedRoom(_room.id);
+        if (mounted) {
+          Navigator.pop(context);
+        }
+        return;
+    }
+  }
+
   Future<bool> _handleBackNavigation() async {
-    await _leaveRoomAndExit();
+    await _confirmRoomExit();
     return false;
   }
 
@@ -2967,8 +3532,12 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
         .join('|');
     final mediaChanged = previous.type != room.type ||
         previous.youtubeUrl != room.youtubeUrl ||
+        previous.youtubeActiveVideoId != room.youtubeActiveVideoId ||
+        previous.youtubeSessionVersion != room.youtubeSessionVersion ||
         previous.youtubeTitle != room.youtubeTitle ||
+        previous.youtubeThumbnail != room.youtubeThumbnail ||
         previous.youtubePlaybackState != room.youtubePlaybackState ||
+        previous.youtubeSyncedAt != room.youtubeSyncedAt ||
         previousQueueSignature != nextQueueSignature ||
         previous.musicUrl != room.musicUrl ||
         previous.musicTitle != room.musicTitle;
@@ -2984,6 +3553,7 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
     _syncMediaController(room);
     _applySharedYoutubeSync(room);
     _announceRoomSettingChanges(previous, room);
+    _activeRoomSessionController.updateRoom(_room);
     _notifyHeaderChanged();
     _notifyStageChanged();
   }
@@ -3094,20 +3664,72 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
 
     if (!changed) return false;
     _room = _room.copyWith(participants: updatedParticipants);
+    _activeRoomSessionController.updateRoom(_room);
     _notifyStageChanged();
     return true;
   }
 
-  bool _updateSeatLockState(int seatIndex, bool locked) {
-    final nextLockedSeats = [..._room.lockedSeats];
-    final changed = locked
-        ? (!nextLockedSeats.contains(seatIndex) &&
-            (nextLockedSeats..add(seatIndex)).isNotEmpty)
-        : nextLockedSeats.remove(seatIndex);
+  bool _applySeatStatesSnapshot(dynamic rawSeatStates) {
+    if (rawSeatStates is! List) return false;
 
-    if (!changed) return false;
-    nextLockedSeats.sort();
-    _room = _room.copyWith(lockedSeats: nextLockedSeats);
+    final nextSeatStates = <RoomSeatState>[];
+    for (final entry in rawSeatStates) {
+      if (entry is Map<String, dynamic>) {
+        nextSeatStates.add(RoomSeatState.fromJson(entry));
+      } else if (entry is Map) {
+        nextSeatStates
+            .add(RoomSeatState.fromJson(Map<String, dynamic>.from(entry)));
+      }
+    }
+
+    if (nextSeatStates.isEmpty) return false;
+    nextSeatStates
+        .sort((left, right) => left.seatIndex.compareTo(right.seatIndex));
+    _room = _room.copyWith(seatStates: nextSeatStates);
+    _activeRoomSessionController.updateRoom(_room);
+    _notifyStageChanged();
+    return true;
+  }
+
+  bool _updateSeatLockState(
+    int seatIndex,
+    bool locked, {
+    RoomSeatState? seatState,
+  }) {
+    final nextSeatStates = [..._room.seatStates];
+    final existingIndex = nextSeatStates.indexWhere(
+      (entry) => entry.seatIndex == seatIndex,
+    );
+    final nextSeatState = seatState ??
+        (existingIndex >= 0
+            ? nextSeatStates[existingIndex].copyWith(
+                isLocked: locked,
+                lockedByUserId: locked
+                    ? nextSeatStates[existingIndex].lockedByUserId
+                    : null,
+                lockedAt:
+                    locked ? nextSeatStates[existingIndex].lockedAt : null,
+                lockReason:
+                    locked ? nextSeatStates[existingIndex].lockReason : '',
+                updatedAt: DateTime.now(),
+              )
+            : RoomSeatState(
+                seatIndex: seatIndex,
+                occupiedByUserId: _getParticipantAtSeat(seatIndex)?.userId,
+                isLocked: locked,
+                updatedAt: DateTime.now(),
+              ));
+
+    if (existingIndex >= 0) {
+      nextSeatStates[existingIndex] = nextSeatState;
+    } else {
+      nextSeatStates.add(nextSeatState);
+    }
+
+    nextSeatStates
+        .sort((left, right) => left.seatIndex.compareTo(right.seatIndex));
+    _room = _room.copyWith(seatStates: nextSeatStates);
+    _activeRoomSessionController.updateRoom(_room);
     _notifyStageChanged();
     return true;
   }
@@ -3117,6 +3739,7 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
     if (nextOnlineCount == _room.onlineCount) return false;
 
     _room = _room.copyWith(onlineCount: nextOnlineCount);
+    _activeRoomSessionController.updateRoom(_room);
     _notifyHeaderChanged();
     return true;
   }
@@ -3149,11 +3772,7 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
       participantCount: _room.participantCount + 1,
       onlineCount: _room.onlineCount + 1,
     );
-    final currentUserId =
-        Provider.of<AuthProvider>(context, listen: false).user?.id;
-    if (userId != currentUserId) {
-      _appendPresenceMessage(participant.username);
-    }
+    _activeRoomSessionController.updateRoom(_room);
     _notifyHeaderChanged();
     _notifyStageChanged();
     return true;
@@ -3177,6 +3796,7 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
       participantCount: updatedParticipants.length,
       onlineCount: (_room.onlineCount - 1).clamp(0, 99999).toInt(),
     );
+    _activeRoomSessionController.updateRoom(_room);
     _notifyHeaderChanged();
     _notifyStageChanged();
     return true;
@@ -3226,6 +3846,23 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
     }
 
     switch (eventType) {
+      case 'room_update_identity':
+      case 'room_update_settings':
+      case 'room_update_permissions':
+      case 'room_update_seats':
+      case 'room_seats_updated':
+      case 'room_update_roles':
+      case 'room_update_mode':
+      case 'room_update_theme':
+        final roomPayload = data['room'];
+        if (roomPayload is Map<String, dynamic>) {
+          _applyRoomSnapshot(RoomModel.fromJson(roomPayload));
+          return;
+        }
+        if (_applySeatStatesSnapshot(data['updatedSeats'])) {
+          return;
+        }
+        break;
       case 'participant_muted':
         if (_updateParticipantState(
           data['userId']?.toString() ?? '',
@@ -3235,14 +3872,34 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
         }
         break;
       case 'seat_locked':
+        if (_applySeatStatesSnapshot(data['updatedSeats'])) {
+          return;
+        }
         final seatIndex = int.tryParse('${data['seatIndex']}');
-        if (seatIndex != null && _updateSeatLockState(seatIndex, true)) {
+        final updatedSeat = data['updatedSeat'];
+        final seatState = updatedSeat is Map<String, dynamic>
+            ? RoomSeatState.fromJson(updatedSeat)
+            : updatedSeat is Map
+                ? RoomSeatState.fromJson(Map<String, dynamic>.from(updatedSeat))
+                : null;
+        if (seatIndex != null &&
+            _updateSeatLockState(seatIndex, true, seatState: seatState)) {
           return;
         }
         break;
       case 'seat_unlocked':
+        if (_applySeatStatesSnapshot(data['updatedSeats'])) {
+          return;
+        }
         final seatIndex = int.tryParse('${data['seatIndex']}');
-        if (seatIndex != null && _updateSeatLockState(seatIndex, false)) {
+        final updatedSeat = data['updatedSeat'];
+        final seatState = updatedSeat is Map<String, dynamic>
+            ? RoomSeatState.fromJson(updatedSeat)
+            : updatedSeat is Map
+                ? RoomSeatState.fromJson(Map<String, dynamic>.from(updatedSeat))
+                : null;
+        if (seatIndex != null &&
+            _updateSeatLockState(seatIndex, false, seatState: seatState)) {
           return;
         }
         break;
@@ -3335,19 +3992,12 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
     }, notify: notify && mounted);
   }
 
-  void _appendPresenceMessage(String username, {bool notify = true}) {
-    if (username.trim().isEmpty) return;
-    _appendChatMessage({
-      '_id': 'presence-${DateTime.now().microsecondsSinceEpoch}',
-      'type': 'presence',
-      'username': username.trim(),
-      'content': 'entered the room',
-      'timestamp': DateTime.now().toIso8601String(),
-    }, notify: notify && mounted);
-  }
-
   bool _canManageRoom(String? userId) {
     return RoomPermissions(room: _room, userId: userId).canManageRoom;
+  }
+
+  bool _canManageSeatLocks(String? userId) {
+    return RoomPermissions(room: _room, userId: userId).canManageSeatLocks;
   }
 
   bool _isUserInRoom(String userId) {
@@ -3805,7 +4455,7 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
           child: Row(
             children: [
               _buildToolbarIcon(Icons.arrow_back_ios_new, Colors.white,
-                  () => unawaited(_leaveRoomAndExit()),
+                  () => unawaited(_confirmRoomExit()),
                   size: 18),
               const SizedBox(width: 8),
               Expanded(
@@ -3999,7 +4649,7 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
       child: Row(
         children: [
           IconButton(
-            onPressed: () => unawaited(_leaveRoomAndExit()),
+            onPressed: () => unawaited(_confirmRoomExit()),
             icon: const Icon(Icons.arrow_back_ios_new_rounded,
                 color: Colors.white, size: 20),
             style: IconButton.styleFrom(
@@ -4235,7 +4885,7 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
           _buildToolbarIcon(
             Icons.arrow_back_ios_new,
             Colors.white,
-            () => unawaited(_leaveRoomAndExit()),
+            () => unawaited(_confirmRoomExit()),
             size: 18,
           ),
           const SizedBox(width: 12),
@@ -4598,419 +5248,547 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
     final hasVideo = _room.youtubeUrl?.isNotEmpty == true &&
         _extractYoutubeVideoId(_room.youtubeUrl!) != null &&
         _youtubeController != null;
-    final videoId =
-        _activeYoutubeId ?? _extractYoutubeVideoId(_room.youtubeUrl ?? '');
+    final videoId = _sharedYoutubeVideoId();
     final canControlStream = _canControlRoomStream;
     final youtubeQueue = _currentYoutubeQueueItems();
+    final playbackLabel =
+        _room.youtubePlaybackState == 'playing' ? 'Live sync' : 'Paused';
+    final isVideoLoading = hasVideo &&
+        _youtubePlayerValue.playerState == ypi.PlayerState.unknown &&
+        !_youtubePlayerValue.hasError;
 
-    return SingleChildScrollView(
-      padding: const EdgeInsets.only(bottom: 228),
-      child: Column(
-        children: [
-          Container(
-            margin: const EdgeInsets.fromLTRB(16, 10, 16, 12),
-            padding: const EdgeInsets.fromLTRB(14, 14, 14, 16),
-            decoration: BoxDecoration(
-              color: const Color(0xFF2B2B33),
-              borderRadius: BorderRadius.circular(26),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  _room.name,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 15,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  'Video ID: ${videoId ?? 'Not selected'}',
-                  style: const TextStyle(
-                    color: Colors.white38,
-                    fontSize: 12,
-                  ),
-                ),
-                const SizedBox(height: 12),
-                if (!hasVideo)
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 20,
-                      vertical: 28,
-                    ),
-                    decoration: BoxDecoration(
-                      color: Colors.black,
-                      borderRadius: BorderRadius.circular(22),
-                    ),
+    return LayoutBuilder(
+      builder: (context, constraints) => SizedBox(
+        height: constraints.maxHeight,
+        width: constraints.maxWidth,
+        child: Align(
+          alignment: Alignment.topCenter,
+          child: FittedBox(
+            fit: BoxFit.scaleDown,
+            alignment: Alignment.topCenter,
+            child: SizedBox(
+              width: constraints.maxWidth,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
                     child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
+                          crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 10,
-                                vertical: 6,
-                              ),
-                              decoration: BoxDecoration(
-                                color: Colors.red.withValues(alpha: 0.14),
-                                borderRadius: BorderRadius.circular(999),
-                              ),
-                              child: const Row(
-                                mainAxisSize: MainAxisSize.min,
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  Icon(
-                                    Icons.smart_display_rounded,
-                                    color: Color(0xFFFF3D3D),
-                                    size: 18,
-                                  ),
-                                  SizedBox(width: 6),
                                   Text(
-                                    'YouTube',
-                                    style: TextStyle(
+                                    _room.name,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
                                       color: Colors.white,
+                                      fontSize: 16,
                                       fontWeight: FontWeight.w700,
                                     ),
                                   ),
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    _youtubeDisplayTitle,
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                      color: Colors.white60,
+                                      fontSize: 13,
+                                      height: 1.35,
+                                    ),
+                                  ),
                                 ],
                               ),
                             ),
-                          ],
-                        ),
-                        const SizedBox(height: 28),
-                        const Text(
-                          'Choose a YouTube video to watch\nand chat with friends in the whole room',
-                          textAlign: TextAlign.center,
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 18,
-                            height: 1.35,
-                            fontWeight: FontWeight.w500,
-                          ),
-                        ),
-                        const SizedBox(height: 26),
-                        if (canControlStream)
-                          ElevatedButton(
-                            onPressed: _showYouTubePicker,
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: const Color(0xFF0C2C36),
-                              foregroundColor: const Color(0xFF3CD5FF),
-                              elevation: 0,
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 28,
-                                vertical: 16,
-                              ),
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(999),
-                              ),
-                            ),
-                            child: const Text(
-                              'Add video',
-                              style: TextStyle(
-                                fontSize: 16,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                          )
-                        else
-                          const Text(
-                            'The owner or admins will start the shared stream here.',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(
-                              color: Colors.white54,
-                              fontSize: 14,
-                            ),
-                          ),
-                      ],
-                    ),
-                  )
-                else
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(22),
-                    child: Container(
-                      color: Colors.black,
-                      child: Stack(
-                        children: [
-                          AspectRatio(
-                            aspectRatio: 16 / 9,
-                            child: ypi.YoutubePlayer(
-                              controller: _youtubeController!,
-                              aspectRatio: 16 / 9,
-                            ),
-                          ),
-                          Positioned(
-                            left: 12,
-                            right: 12,
-                            top: 12,
-                            child: Row(
-                              children: [
-                                Expanded(
-                                  child: Container(
+                            if (canControlStream)
+                              Padding(
+                                padding: const EdgeInsets.only(left: 12),
+                                child: TextButton.icon(
+                                  onPressed: _isUpdatingYoutubeQueue
+                                      ? null
+                                      : _showYouTubePicker,
+                                  style: TextButton.styleFrom(
+                                    foregroundColor: const Color(0xFF31C8F5),
                                     padding: const EdgeInsets.symmetric(
                                       horizontal: 12,
-                                      vertical: 9,
+                                      vertical: 10,
                                     ),
-                                    decoration: BoxDecoration(
-                                      color: Colors.black.withValues(
-                                        alpha: 0.42,
-                                      ),
-                                      borderRadius: BorderRadius.circular(16),
+                                    backgroundColor: const Color(0xFF31C8F5)
+                                        .withValues(alpha: 0.1),
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(999),
                                     ),
-                                    child: Text(
-                                      _youtubeDisplayTitle,
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: const TextStyle(
-                                        color: Colors.white,
-                                        fontSize: 13,
-                                        fontWeight: FontWeight.w600,
-                                      ),
+                                  ),
+                                  icon: _isUpdatingYoutubeQueue
+                                      ? const SizedBox(
+                                          width: 14,
+                                          height: 14,
+                                          child: CircularProgressIndicator(
+                                            strokeWidth: 2,
+                                          ),
+                                        )
+                                      : const Icon(
+                                          Icons.add_rounded,
+                                          size: 16,
+                                        ),
+                                  label: Text(
+                                    _isUpdatingYoutubeQueue
+                                        ? 'Updating'
+                                        : 'Add video',
+                                    style: const TextStyle(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w700,
                                     ),
                                   ),
                                 ),
-                                if (canControlStream) ...[
-                                  const SizedBox(width: 10),
-                                  Material(
-                                    color: Colors.black.withValues(alpha: 0.42),
-                                    borderRadius: BorderRadius.circular(16),
-                                    child: InkWell(
-                                      onTap: _showYouTubePicker,
-                                      borderRadius: BorderRadius.circular(16),
-                                      child: const Padding(
-                                        padding: EdgeInsets.all(10),
-                                        child: Icon(
-                                          Icons.playlist_play_rounded,
-                                          color: Colors.white,
+                              ),
+                          ],
+                        ),
+                        const SizedBox(height: 10),
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          children: [
+                            _buildHeaderInfoPill(
+                              Icons.play_circle_outline_rounded,
+                              playbackLabel,
+                              iconColor: const Color(0xFF7AE6FF),
+                              textColor: Colors.white,
+                            ),
+                            _buildHeaderInfoPill(
+                              Icons.queue_music_rounded,
+                              '${youtubeQueue.length} in playlist',
+                            ),
+                            _buildHeaderInfoPill(
+                              Icons.smart_display_rounded,
+                              videoId == null
+                                  ? 'No active video'
+                                  : 'ID $videoId',
+                              iconColor: const Color(0xFFFF6B6B),
+                              textColor: Colors.white70,
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 14),
+                        if (!hasVideo)
+                          Container(
+                            width: double.infinity,
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 20,
+                              vertical: 28,
+                            ),
+                            color: Colors.black.withValues(alpha: 0.78),
+                            child: Column(
+                              children: [
+                                Row(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 10,
+                                        vertical: 6,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        color:
+                                            Colors.red.withValues(alpha: 0.14),
+                                        borderRadius:
+                                            BorderRadius.circular(999),
+                                      ),
+                                      child: const Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          Icon(
+                                            Icons.smart_display_rounded,
+                                            color: Color(0xFFFF3D3D),
+                                            size: 18,
+                                          ),
+                                          SizedBox(width: 6),
+                                          Text(
+                                            'YouTube',
+                                            style: TextStyle(
+                                              color: Colors.white,
+                                              fontWeight: FontWeight.w700,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 20),
+                                const Text(
+                                  'Choose a YouTube video to watch\nand chat with friends in the whole room',
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 18,
+                                    height: 1.35,
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+                                const SizedBox(height: 18),
+                                if (canControlStream)
+                                  ElevatedButton(
+                                    onPressed: _isUpdatingYoutubeQueue
+                                        ? null
+                                        : _showYouTubePicker,
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: const Color(0xFF0C2C36),
+                                      foregroundColor: const Color(0xFF3CD5FF),
+                                      elevation: 0,
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 28,
+                                        vertical: 16,
+                                      ),
+                                      shape: RoundedRectangleBorder(
+                                        borderRadius:
+                                            BorderRadius.circular(999),
+                                      ),
+                                    ),
+                                    child: const Text(
+                                      'Add video',
+                                      style: TextStyle(
+                                        fontSize: 16,
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                    ),
+                                  )
+                                else
+                                  const Text(
+                                    'The owner or admins will start the shared stream here.',
+                                    textAlign: TextAlign.center,
+                                    style: TextStyle(
+                                      color: Colors.white54,
+                                      fontSize: 14,
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          )
+                        else
+                          Container(
+                            decoration: BoxDecoration(
+                              color: Colors.black,
+                              borderRadius: BorderRadius.circular(24),
+                              border: Border.all(color: Colors.white10),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: Colors.black.withValues(alpha: 0.22),
+                                  blurRadius: 20,
+                                  offset: const Offset(0, 10),
+                                ),
+                              ],
+                            ),
+                            clipBehavior: Clip.antiAlias,
+                            child: Stack(
+                              children: [
+                                AspectRatio(
+                                  aspectRatio: 16 / 9,
+                                  child: ypi.YoutubePlayer(
+                                    key: ValueKey(
+                                      'shared-youtube-${_sharedYoutubeSessionKey()}',
+                                    ),
+                                    controller: _youtubeController!,
+                                    aspectRatio: 16 / 9,
+                                  ),
+                                ),
+                                if (isVideoLoading)
+                                  Positioned.fill(
+                                    child: IgnorePointer(
+                                      child: Container(
+                                        color: Colors.black
+                                            .withValues(alpha: 0.18),
+                                        alignment: Alignment.center,
+                                        child: Container(
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 14,
+                                            vertical: 10,
+                                          ),
+                                          decoration: BoxDecoration(
+                                            color: Colors.black
+                                                .withValues(alpha: 0.56),
+                                            borderRadius:
+                                                BorderRadius.circular(999),
+                                            border: Border.all(
+                                                color: Colors.white10),
+                                          ),
+                                          child: const Row(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              SizedBox(
+                                                width: 14,
+                                                height: 14,
+                                                child:
+                                                    CircularProgressIndicator(
+                                                  strokeWidth: 2,
+                                                  color: Colors.white,
+                                                ),
+                                              ),
+                                              SizedBox(width: 10),
+                                              Text(
+                                                'Loading shared video',
+                                                style: TextStyle(
+                                                  color: Colors.white,
+                                                  fontSize: 12,
+                                                  fontWeight: FontWeight.w600,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
                                         ),
                                       ),
                                     ),
                                   ),
-                                ],
-                              ],
-                            ),
-                          ),
-                          Positioned(
-                            left: 12,
-                            top: 58,
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 10,
-                                vertical: 6,
-                              ),
-                              decoration: BoxDecoration(
-                                color: Colors.black.withValues(alpha: 0.55),
-                                borderRadius: BorderRadius.circular(999),
-                              ),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  const Icon(
-                                    Icons.smart_display_rounded,
-                                    size: 16,
-                                    color: Color(0xFFFF3D3D),
+                                Positioned(
+                                  left: 12,
+                                  right: 12,
+                                  top: 12,
+                                  child: Row(
+                                    children: [
+                                      Expanded(
+                                        child: Container(
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 12,
+                                            vertical: 9,
+                                          ),
+                                          decoration: BoxDecoration(
+                                            color: Colors.black.withValues(
+                                              alpha: 0.42,
+                                            ),
+                                            borderRadius:
+                                                BorderRadius.circular(16),
+                                          ),
+                                          child: Text(
+                                            _youtubeDisplayTitle,
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: const TextStyle(
+                                              color: Colors.white,
+                                              fontSize: 13,
+                                              fontWeight: FontWeight.w600,
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                      if (canControlStream) ...[
+                                        const SizedBox(width: 10),
+                                        Material(
+                                          color: Colors.black
+                                              .withValues(alpha: 0.42),
+                                          borderRadius:
+                                              BorderRadius.circular(16),
+                                          child: InkWell(
+                                            onTap: _showYouTubePicker,
+                                            borderRadius:
+                                                BorderRadius.circular(16),
+                                            child: const Padding(
+                                              padding: EdgeInsets.all(10),
+                                              child: Icon(
+                                                Icons.playlist_play_rounded,
+                                                color: Colors.white,
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ],
                                   ),
-                                  const SizedBox(width: 6),
-                                  Text(
-                                    'ID: ${videoId ?? '-'}',
-                                    style: const TextStyle(
-                                      color: Colors.white,
-                                      fontSize: 11,
-                                      fontWeight: FontWeight.w600,
+                                ),
+                                Positioned(
+                                  left: 12,
+                                  top: 58,
+                                  child: Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 10,
+                                      vertical: 6,
                                     ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-                          if (_youtubePlayerValue.hasError ||
-                              _showYoutubePlaybackRecovery)
-                            Positioned.fill(
-                              child: Container(
-                                color: Colors.black.withValues(alpha: 0.48),
-                                padding: const EdgeInsets.all(24),
-                                child: Center(
-                                  child: ConstrainedBox(
-                                    constraints: const BoxConstraints(
-                                      maxWidth: 280,
+                                    decoration: BoxDecoration(
+                                      color:
+                                          Colors.black.withValues(alpha: 0.55),
+                                      borderRadius: BorderRadius.circular(999),
                                     ),
-                                    child: Column(
+                                    child: Row(
                                       mainAxisSize: MainAxisSize.min,
                                       children: [
-                                        Icon(
-                                          _youtubePlayerValue.hasError
-                                              ? Icons.error_outline_rounded
-                                              : Icons.play_circle_fill_rounded,
-                                          size: 42,
-                                          color: Colors.white,
+                                        const Icon(
+                                          Icons.smart_display_rounded,
+                                          size: 16,
+                                          color: Color(0xFFFF3D3D),
                                         ),
-                                        const SizedBox(height: 14),
+                                        const SizedBox(width: 6),
                                         Text(
-                                          _youtubePlayerValue.hasError
-                                              ? 'This video needs to be reloaded on this device.'
-                                              : 'Tap once to start the shared video in Chrome.',
-                                          textAlign: TextAlign.center,
+                                          'ID: ${videoId ?? '-'}',
                                           style: const TextStyle(
                                             color: Colors.white,
-                                            fontSize: 14,
+                                            fontSize: 11,
                                             fontWeight: FontWeight.w600,
-                                          ),
-                                        ),
-                                        const SizedBox(height: 8),
-                                        Text(
-                                          _youtubePlayerValue.hasError
-                                              ? 'The player reported a loading error.'
-                                              : 'Some browsers block autoplay until you interact with the player.',
-                                          textAlign: TextAlign.center,
-                                          style: const TextStyle(
-                                            color: Colors.white70,
-                                            fontSize: 12,
-                                          ),
-                                        ),
-                                        const SizedBox(height: 16),
-                                        ElevatedButton.icon(
-                                          onPressed: () => unawaited(
-                                            _recoverYoutubePlayback(),
-                                          ),
-                                          style: ElevatedButton.styleFrom(
-                                            backgroundColor: Colors.white,
-                                            foregroundColor:
-                                                const Color(0xFF10151D),
-                                            elevation: 0,
-                                            padding: const EdgeInsets.symmetric(
-                                              horizontal: 18,
-                                              vertical: 12,
-                                            ),
-                                            shape: RoundedRectangleBorder(
-                                              borderRadius:
-                                                  BorderRadius.circular(999),
-                                            ),
-                                          ),
-                                          icon: Icon(
-                                            _youtubePlayerValue.hasError
-                                                ? Icons.refresh_rounded
-                                                : Icons.play_arrow_rounded,
-                                          ),
-                                          label: Text(
-                                            _youtubePlayerValue.hasError
-                                                ? 'Reload video'
-                                                : 'Start video',
                                           ),
                                         ),
                                       ],
                                     ),
                                   ),
                                 ),
-                              ),
-                            ),
-                          if (!canControlStream)
-                            Positioned(
-                              right: 12,
-                              top: 12,
-                              child: Container(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 10,
-                                  vertical: 6,
-                                ),
-                                decoration: BoxDecoration(
-                                  color: const Color(0xFF0F3140)
-                                      .withValues(alpha: 0.78),
-                                  borderRadius: BorderRadius.circular(999),
-                                ),
-                                child: const Text(
-                                  'Synced with host',
-                                  style: TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 11,
-                                    fontWeight: FontWeight.w700,
+                                if (_youtubePlayerValue.hasError ||
+                                    _showYoutubePlaybackRecovery)
+                                  Positioned.fill(
+                                    child: Container(
+                                      color:
+                                          Colors.black.withValues(alpha: 0.48),
+                                      padding: const EdgeInsets.all(24),
+                                      child: Center(
+                                        child: ConstrainedBox(
+                                          constraints: const BoxConstraints(
+                                            maxWidth: 280,
+                                          ),
+                                          child: Column(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              Icon(
+                                                _youtubePlayerValue.hasError
+                                                    ? Icons
+                                                        .error_outline_rounded
+                                                    : Icons
+                                                        .play_circle_fill_rounded,
+                                                size: 42,
+                                                color: Colors.white,
+                                              ),
+                                              const SizedBox(height: 14),
+                                              Text(
+                                                _youtubePlayerValue.hasError
+                                                    ? 'This shared video needs a fresh reload on this device.'
+                                                    : 'Tap once to start the current shared video on this device.',
+                                                textAlign: TextAlign.center,
+                                                style: const TextStyle(
+                                                  color: Colors.white,
+                                                  fontSize: 14,
+                                                  fontWeight: FontWeight.w600,
+                                                ),
+                                              ),
+                                              const SizedBox(height: 8),
+                                              Text(
+                                                _youtubePlayerValue.hasError
+                                                    ? 'We will rebind the player to the latest room video session.'
+                                                    : 'Autoplay can be blocked until you interact with the embedded player.',
+                                                textAlign: TextAlign.center,
+                                                style: const TextStyle(
+                                                  color: Colors.white70,
+                                                  fontSize: 12,
+                                                ),
+                                              ),
+                                              const SizedBox(height: 16),
+                                              ElevatedButton.icon(
+                                                onPressed: () => unawaited(
+                                                  _recoverYoutubePlayback(
+                                                    forceRebind:
+                                                        _youtubePlayerValue
+                                                            .hasError,
+                                                  ),
+                                                ),
+                                                style: ElevatedButton.styleFrom(
+                                                  backgroundColor: Colors.white,
+                                                  foregroundColor:
+                                                      const Color(0xFF10151D),
+                                                  elevation: 0,
+                                                  padding: const EdgeInsets
+                                                      .symmetric(
+                                                    horizontal: 18,
+                                                    vertical: 12,
+                                                  ),
+                                                  shape: RoundedRectangleBorder(
+                                                    borderRadius:
+                                                        BorderRadius.circular(
+                                                            999),
+                                                  ),
+                                                ),
+                                                icon: Icon(
+                                                  _youtubePlayerValue.hasError
+                                                      ? Icons.refresh_rounded
+                                                      : Icons
+                                                          .play_arrow_rounded,
+                                                ),
+                                                label: Text(
+                                                  _youtubePlayerValue.hasError
+                                                      ? 'Reload shared video'
+                                                      : 'Start shared video',
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                      ),
+                                    ),
                                   ),
-                                ),
-                              ),
+                                if (!canControlStream)
+                                  Positioned(
+                                    right: 12,
+                                    top: 12,
+                                    child: Container(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 10,
+                                        vertical: 6,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        color: const Color(0xFF0F3140)
+                                            .withValues(alpha: 0.78),
+                                        borderRadius:
+                                            BorderRadius.circular(999),
+                                      ),
+                                      child: const Text(
+                                        'Synced with host',
+                                        style: TextStyle(
+                                          color: Colors.white,
+                                          fontSize: 11,
+                                          fontWeight: FontWeight.w700,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                              ],
                             ),
-                        ],
-                      ),
+                          ),
+                        const SizedBox(height: 10),
+                        _buildVideoSectionDivider(),
+                        const SizedBox(height: 10),
+                        _buildYoutubeQueuePanel(
+                          queue: youtubeQueue,
+                          canControlStream: canControlStream,
+                        ),
+                      ],
                     ),
                   ),
-                if (hasVideo) ...[
+                  _buildSeatGrid(compact: true),
                   const SizedBox(height: 12),
-                  _buildYoutubeVolumeControl(),
+                  _buildRoomActivitySection(compact: true),
                 ],
-                const SizedBox(height: 12),
-                _buildYoutubeQueuePanel(
-                  queue: youtubeQueue,
-                  canControlStream: canControlStream,
-                ),
-              ],
+              ),
             ),
           ),
-          _buildSeatGrid(compact: true),
-          const SizedBox(height: 18),
-          _buildRoomActivitySection(compact: true),
-        ],
+        ),
       ),
     );
   }
 
-  Widget _buildYoutubeVolumeControl() {
-    final volumeLabel = '${(_youtubeLocalVolume * 100).round()}%';
-
+  Widget _buildVideoSectionDivider() {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      width: double.infinity,
+      height: 0.7,
       decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.06),
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: Colors.white10),
-      ),
-      child: Row(
-        children: [
-          Material(
-            color: Colors.transparent,
-            child: InkWell(
-              onTap: () => unawaited(_toggleYoutubeLocalMute()),
-              borderRadius: BorderRadius.circular(999),
-              child: Padding(
-                padding: const EdgeInsets.all(6),
-                child: Icon(
-                  _youtubeMutedLocally || _youtubeLocalVolume == 0
-                      ? Icons.volume_off_rounded
-                      : Icons.volume_up_rounded,
-                  color: Colors.white,
-                  size: 20,
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: SliderTheme(
-              data: SliderTheme.of(context).copyWith(
-                trackHeight: 3,
-                thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 7),
-              ),
-              child: Slider(
-                value: _youtubeMutedLocally ? 0.0 : _youtubeLocalVolume,
-                onChanged: (value) => unawaited(_setYoutubeLocalVolume(value)),
-                min: 0,
-                max: 1,
-                activeColor: const Color(0xFF31C8F5),
-                inactiveColor: Colors.white24,
-              ),
-            ),
-          ),
-          const SizedBox(width: 8),
-          Text(
-            volumeLabel,
-            style: const TextStyle(
-              color: Colors.white70,
-              fontSize: 12,
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-        ],
+        gradient: LinearGradient(
+          begin: Alignment.centerLeft,
+          end: Alignment.centerRight,
+          colors: [
+            Colors.white.withValues(alpha: 0),
+            Colors.white.withValues(alpha: 0.16),
+            Colors.white.withValues(alpha: 0),
+          ],
+        ),
       ),
     );
   }
@@ -5021,12 +5799,7 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
   }) {
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.05),
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: Colors.white10),
-      ),
+      padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 4),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -5047,6 +5820,44 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
                 ),
               ),
               const Spacer(),
+              if (canControlStream) ...[
+                TextButton.icon(
+                  onPressed:
+                      _isUpdatingYoutubeQueue ? null : _showYouTubePicker,
+                  style: TextButton.styleFrom(
+                    foregroundColor: const Color(0xFF31C8F5),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 8,
+                    ),
+                    minimumSize: Size.zero,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    backgroundColor:
+                        const Color(0xFF31C8F5).withValues(alpha: 0.12),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                  ),
+                  icon: _isUpdatingYoutubeQueue
+                      ? const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(
+                          Icons.add_rounded,
+                          size: 16,
+                        ),
+                  label: Text(
+                    _isUpdatingYoutubeQueue ? 'Updating' : 'Add video',
+                    style: const TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+              ],
               Text(
                 '${queue.length} video${queue.length == 1 ? '' : 's'}',
                 style: const TextStyle(
@@ -5057,16 +5868,12 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
               ),
             ],
           ),
-          const SizedBox(height: 10),
+          const SizedBox(height: 12),
+          _buildVideoSectionDivider(),
+          const SizedBox(height: 12),
           if (queue.isEmpty)
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(14),
-              decoration: BoxDecoration(
-                color: Colors.black.withValues(alpha: 0.18),
-                borderRadius: BorderRadius.circular(16),
-                border: Border.all(color: Colors.white10),
-              ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
               child: Text(
                 canControlStream
                     ? 'Added videos will appear here. Use Add video to build the shared playlist.'
@@ -5079,20 +5886,43 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
               ),
             )
           else
-            ...List.generate(queue.length, (index) {
-              final item = queue[index];
-              return Padding(
-                padding: EdgeInsets.only(
-                  bottom: index == queue.length - 1 ? 0 : 10,
-                ),
-                child: _buildYoutubeQueueTile(
-                  item: item,
-                  index: index,
-                  canControlStream: canControlStream,
-                ),
-              );
-            }),
+            _buildYoutubeQueueList(
+              queue: queue,
+              canControlStream: canControlStream,
+            ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildYoutubeQueueList({
+    required List<RoomYoutubeQueueItem> queue,
+    required bool canControlStream,
+  }) {
+    final queueListHeight = (queue.length * 96.0).clamp(96.0, 304.0).toDouble();
+
+    return SizedBox(
+      height: queueListHeight,
+      child: Scrollbar(
+        thumbVisibility: queue.length > 3,
+        child: ListView.separated(
+          primary: false,
+          padding: EdgeInsets.zero,
+          physics: const BouncingScrollPhysics(),
+          itemCount: queue.length,
+          separatorBuilder: (_, __) => Column(
+            children: [
+              const SizedBox(height: 10),
+              _buildVideoSectionDivider(),
+              const SizedBox(height: 10),
+            ],
+          ),
+          itemBuilder: (context, index) => _buildYoutubeQueueTile(
+            item: queue[index],
+            index: index,
+            canControlStream: canControlStream,
+          ),
+        ),
       ),
     );
   }
@@ -5111,12 +5941,9 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
       padding: const EdgeInsets.all(10),
       decoration: BoxDecoration(
         color: isCurrent
-            ? const Color(0xFF31C8F5).withValues(alpha: 0.14)
-            : Colors.black.withValues(alpha: 0.20),
+            ? const Color(0xFF31C8F5).withValues(alpha: 0.08)
+            : Colors.transparent,
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(
-          color: isCurrent ? const Color(0xFF31C8F5) : Colors.white10,
-        ),
       ),
       child: Row(
         children: [
@@ -5203,24 +6030,50 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
           ),
           if (canControlStream) ...[
             if (!isCurrent)
-              IconButton(
-                onPressed: () => unawaited(_playQueuedYoutubeItem(item)),
-                icon: const Icon(
-                  Icons.play_arrow_rounded,
-                  color: Colors.white,
-                ),
+              _buildYoutubeQueueActionButton(
+                onPressed: _isUpdatingYoutubeQueue
+                    ? null
+                    : () => unawaited(_playQueuedYoutubeItem(item)),
+                icon: Icons.play_arrow_rounded,
                 tooltip: 'Play now',
               ),
-            IconButton(
-              onPressed: () => unawaited(_removeQueuedYoutubeItem(item)),
-              icon: const Icon(
-                Icons.delete_outline_rounded,
-                color: Colors.white70,
-              ),
+            _buildYoutubeQueueActionButton(
+              onPressed: _isUpdatingYoutubeQueue
+                  ? null
+                  : () => unawaited(_removeQueuedYoutubeItem(item)),
+              icon: Icons.delete_outline_rounded,
               tooltip: 'Remove',
             ),
           ],
         ],
+      ),
+    );
+  }
+
+  Widget _buildYoutubeQueueActionButton({
+    required VoidCallback? onPressed,
+    required IconData icon,
+    required String tooltip,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.only(left: 8),
+      child: IconButton(
+        onPressed: onPressed,
+        tooltip: tooltip,
+        style: IconButton.styleFrom(
+          backgroundColor: Colors.white.withValues(alpha: 0.96),
+          foregroundColor: const Color(0xFF10151D),
+          padding: EdgeInsets.zero,
+          minimumSize: const Size(36, 36),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+        ),
+        icon: Icon(
+          icon,
+          size: 20,
+          color: const Color(0xFF10151D),
+        ),
       ),
     );
   }
@@ -6066,18 +6919,38 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
     double size = 60,
   }) {
     final role = participant.userId == _room.hostId ? 'host' : participant.role;
+    final currentUserId =
+        Provider.of<AuthProvider>(context, listen: false).user?.id;
+    final canManageSeatLocks =
+        seatKeyIndex > 0 && _canManageSeatLocks(currentUserId);
+    final seatState =
+        seatKeyIndex > 0 ? _room.seatStateFor(seatKeyIndex) : null;
 
-    return RepaintBoundary(
-      key: _seatKeyMap[seatKeyIndex],
-      child: RoomAvatar(
-        username: participant.username,
-        avatarUrl: participant.avatar,
-        role: role,
-        isSpeaking: participant.isSpeaking,
-        isMuting: participant.isMuted,
-        isVIP: participant.vipLevel > 0,
-        size: size,
-        onTap: () => _onParticipantTap(participant),
+    return RoomSeatTile(
+      seatIndex: seatKeyIndex,
+      isLocked: seatState?.isLocked ?? false,
+      hasOccupant: true,
+      canManageLock: canManageSeatLocks,
+      showLabel: false,
+      onToggleLock: seatKeyIndex > 0
+          ? () => _toggleSeatLock(
+                seatKeyIndex,
+                isLocked: seatState?.isLocked == true,
+                hasOccupant: true,
+              )
+          : null,
+      child: RepaintBoundary(
+        key: _seatKeyMap[seatKeyIndex],
+        child: RoomAvatar(
+          username: participant.username,
+          avatarUrl: participant.avatar,
+          role: role,
+          isSpeaking: participant.isSpeaking,
+          isMuting: participant.isMuted,
+          isVIP: participant.vipLevel > 0,
+          size: size,
+          onTap: () => _onParticipantTap(participant),
+        ),
       ),
     );
   }
@@ -6122,89 +6995,26 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
     bool showLabel = true,
   }) {
     final isClosedByLimit = index > _room.maxActiveSpeakers;
-    final isLocked = _room.isLockedSeat(index) || isClosedByLimit;
-    final canManageRoom = _canManageRoom(
+    final seatState = _room.seatStateFor(index);
+    final isLocked = seatState?.isLocked == true;
+    final canManageSeatLocks = _canManageSeatLocks(
       Provider.of<AuthProvider>(context, listen: false).user?.id,
     );
 
     return Container(
       key: _seatKeyMap[index],
-      child: Column(
-        children: [
-          GestureDetector(
-            onTap: isLocked ? null : () => _takeSeat(index),
-            onLongPress: canManageRoom && !isClosedByLimit
-                ? () async {
-                    try {
-                      if (isLocked) {
-                        await RoomService.unlockSeat(_room.id, index);
-                        _appendSystemMessage('Seat $index was unlocked.');
-                      } else {
-                        await RoomService.lockSeat(_room.id, index);
-                        _appendSystemMessage('Seat $index was locked.');
-                      }
-                      if (!mounted) return;
-                      await _refreshRoom();
-                    } catch (e) {
-                      if (!mounted) return;
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                          content: Text(
-                            e.toString().replaceFirst('Exception: ', ''),
-                          ),
-                        ),
-                      );
-                    }
-                  }
-                : null,
-            child: Container(
-              width: 56,
-              height: 56,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: isLocked
-                    ? const Color(0xFFFF3B30).withValues(alpha: 0.1)
-                    : Colors.white.withValues(alpha: 0.03),
-                border: Border.all(
-                  color: isLocked
-                      ? const Color(0xFFFF3B30).withValues(alpha: 0.3)
-                      : Colors.white10,
-                  width: 1.5,
-                  style: isLocked ? BorderStyle.solid : BorderStyle.none,
-                ),
-              ),
-              child: Stack(
-                alignment: Alignment.center,
-                children: [
-                  if (!isLocked)
-                    CustomPaint(
-                      size: const Size(56, 56),
-                      painter: _DottedCirclePainter(color: Colors.white24),
-                    ),
-                  Icon(
-                    isLocked ? Icons.lock_outline_rounded : Icons.add_rounded,
-                    color: isLocked ? const Color(0xFFFF3B30) : Colors.white24,
-                    size: 20,
-                  ),
-                ],
-              ),
-            ),
-          ),
-          if (showLabel) ...[
-            const SizedBox(height: 8),
-            Text(
-              isClosedByLimit
-                  ? 'Closed'
-                  : isLocked
-                      ? 'Locked'
-                      : 'Seat $index',
-              style: TextStyle(
-                color: isLocked ? Colors.redAccent : Colors.white24,
-                fontSize: 10,
-              ),
-            ),
-          ],
-        ],
+      child: RoomSeatTile(
+        seatIndex: index,
+        isLocked: isLocked,
+        isClosedByLimit: isClosedByLimit,
+        canManageLock: canManageSeatLocks,
+        showLabel: showLabel,
+        onTapSeat: () => _takeSeat(index),
+        onToggleLock: () => _toggleSeatLock(
+          index,
+          isLocked: isLocked,
+          hasOccupant: false,
+        ),
       ),
     );
   }
@@ -6265,6 +7075,47 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
     );
   }
 
+  Future<void> _toggleSeatLock(
+    int seatIndex, {
+    required bool isLocked,
+    required bool hasOccupant,
+  }) async {
+    if (hasOccupant && !isLocked) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Only empty seats can be locked.'),
+          backgroundColor: Colors.orange,
+        ),
+      );
+      return;
+    }
+
+    try {
+      final updatedRoom = isLocked
+          ? await RoomService.unlockSeat(_room.id, seatIndex)
+          : await RoomService.lockSeat(_room.id, seatIndex);
+      if (!mounted) return;
+      if (updatedRoom != null) {
+        setState(() => _room = updatedRoom);
+      } else {
+        await _refreshRoom();
+        if (!mounted) return;
+      }
+      _appendSystemMessage(
+        isLocked
+            ? 'This seat has been unlocked.'
+            : 'Seat $seatIndex was locked by room management.',
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(error.toString().replaceFirst('Exception: ', '')),
+        ),
+      );
+    }
+  }
+
   Future<void> _takeSeat(int seatIndex) async {
     if (seatIndex > _room.maxActiveSpeakers) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -6281,7 +7132,7 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
     if (_room.isLockedSeat(seatIndex)) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('This seat is locked right now.'),
+          content: Text('This seat is locked by room management.'),
           backgroundColor: Colors.redAccent,
         ),
       );
@@ -6878,17 +7729,21 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
           children: [
             _buildBottomDockActionButton(
               !_isVoiceConnected
-                  ? Icons.play_circle_fill_rounded
+                  ? null
                   : (_voiceService.isRemotePlaybackMuted ||
                           _voiceService.remotePlaybackVolume == 0)
                       ? Icons.volume_off_rounded
                       : Icons.volume_up_rounded,
               !_isVoiceConnected
                   ? const Color(0xFF69DFFF)
-                  : (_isSpeakerOn ? Colors.white70 : Colors.white38),
+                  : (_isSpeakerOn ? Colors.white : Colors.white54),
               _isVoiceConnected
                   ? _showVoiceAudioSheet
                   : () => unawaited(_connectToVoice()),
+              assetPath: !_isVoiceConnected
+                  ? 'assets/images/room_action_play.png'
+                  : null,
+              assetSize: 32,
               backgroundColor: !_isVoiceConnected
                   ? const Color(0xFF0C2C36).withValues(alpha: 0.9)
                   : _isSpeakerOn
@@ -6897,8 +7752,8 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
             ),
             const SizedBox(width: 6),
             _buildBottomDockActionButton(
-              _isMuted ? Icons.mic_off_rounded : Icons.mic_rounded,
-              _isMuted ? const Color(0xFFFF6B6B) : Colors.white70,
+              _isMuted ? null : Icons.mic_rounded,
+              _isMuted ? const Color(0xFFFF6B6B) : Colors.white,
               () async {
                 if (!_isVoiceConnected) {
                   ScaffoldMessenger.of(context).showSnackBar(
@@ -6923,6 +7778,9 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
                   );
                 }
               },
+              assetPath:
+                  _isMuted ? 'assets/images/room_action_mic_off.png' : null,
+              assetSize: 31,
               backgroundColor: _isMuted
                   ? const Color(0xFFFF3B30).withValues(alpha: 0.14)
                   : Colors.white.withValues(alpha: 0.06),
@@ -6933,19 +7791,23 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
             ),
             const SizedBox(width: 8),
             _buildBottomDockActionButton(
-              Icons.sentiment_satisfied_alt_rounded,
+              null,
               _showQuickReactions ? const Color(0xFFFFD60A) : Colors.white70,
               _showReactionPanel,
               onLongPress: _toggleQuickReactionTray,
+              assetPath: 'assets/images/room_action_reaction.png',
+              assetSize: 28,
               backgroundColor: _showQuickReactions
                   ? const Color(0xFFFFD60A).withValues(alpha: 0.1)
                   : Colors.white.withValues(alpha: 0.05),
             ),
             const SizedBox(width: 6),
             _buildBottomDockActionButton(
-              Icons.card_giftcard_rounded,
+              null,
               _canUseRoomGifts ? Colors.white : Colors.white54,
               _canUseRoomGifts ? _showGiftPanelForHost : _showGiftRestriction,
+              assetPath: 'assets/images/room_action_gift.png',
+              assetSize: 28,
               backgroundColor: _canUseRoomGifts
                   ? null
                   : Colors.white.withValues(alpha: 0.05),
@@ -6960,11 +7822,13 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
             ),
             const SizedBox(width: 6),
             _buildBottomDockActionButton(
-              _room.type == 'voice'
-                  ? Icons.auto_awesome_rounded
-                  : Icons.grid_view_rounded,
+              _room.type == 'voice' ? null : Icons.grid_view_rounded,
               Colors.white,
               _room.type == 'voice' ? _showVoiceFeatureLab : _showRoomControl,
+              assetPath: _room.type == 'voice'
+                  ? 'assets/images/room_action_feature.png'
+                  : null,
+              assetSize: 28,
               gradient: _room.type == 'voice'
                   ? const LinearGradient(
                       colors: [Color(0xFFFF7A45), Color(0xFF8C52FF)],
@@ -7098,42 +7962,58 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
   }
 
   Widget _buildBottomDockActionButton(
-    IconData icon,
+    IconData? icon,
     Color color,
     VoidCallback onTap, {
     VoidCallback? onLongPress,
     Color? backgroundColor,
     Gradient? gradient,
     Color? shadowColor,
+    String? assetPath,
+    double assetSize = 28,
+    bool showBoundary = false,
   }) {
+    assert(icon != null || assetPath != null);
+
     return GestureDetector(
       onTap: onTap,
       onLongPress: onLongPress,
       child: Container(
-        width: 32,
-        height: 32,
-        decoration: BoxDecoration(
-          color: gradient == null
-              ? (backgroundColor ?? Colors.white.withValues(alpha: 0.05))
-              : null,
-          gradient: gradient,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(
-            color: gradient == null
-                ? Colors.white.withValues(alpha: 0.06)
-                : Colors.transparent,
-          ),
-          boxShadow: shadowColor == null
-              ? null
-              : [
-                  BoxShadow(
-                    color: shadowColor.withValues(alpha: 0.45),
-                    blurRadius: 12,
-                    spreadRadius: -4,
-                  ),
-                ],
+        width: 44,
+        height: 44,
+        decoration: showBoundary
+            ? BoxDecoration(
+                color: gradient == null
+                    ? (backgroundColor ?? Colors.white.withValues(alpha: 0.05))
+                    : null,
+                gradient: gradient,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(
+                  color: gradient == null
+                      ? Colors.white.withValues(alpha: 0.06)
+                      : Colors.transparent,
+                ),
+                boxShadow: shadowColor == null
+                    ? null
+                    : [
+                        BoxShadow(
+                          color: shadowColor.withValues(alpha: 0.45),
+                          blurRadius: 12,
+                          spreadRadius: -4,
+                        ),
+                      ],
+              )
+            : null,
+        child: Center(
+          child: assetPath != null
+              ? Image.asset(
+                  assetPath,
+                  width: assetSize,
+                  height: assetSize,
+                  fit: BoxFit.contain,
+                )
+              : Icon(icon, color: color, size: assetSize),
         ),
-        child: Icon(icon, color: color, size: 18),
       ),
     );
   }
@@ -7192,12 +8072,18 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
                   children: [
                     IconButton(
                       style: IconButton.styleFrom(
-                        backgroundColor: Colors.white,
-                        foregroundColor: Colors.black87,
+                        backgroundColor: const Color(0xFF0E0E12),
+                        foregroundColor: Colors.white,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14),
+                          side: BorderSide(
+                            color: Colors.white.withValues(alpha: 0.08),
+                          ),
+                        ),
                       ),
                       icon: const Icon(
                         Icons.photo_library_outlined,
-                        color: Colors.black87,
+                        color: Colors.white,
                       ),
                       onPressed: () {
                         Navigator.pop(context);
@@ -7206,14 +8092,20 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
                     ),
                     IconButton(
                       style: IconButton.styleFrom(
-                        backgroundColor: Colors.white,
-                        foregroundColor: Colors.black87,
+                        backgroundColor: const Color(0xFF0E0E12),
+                        foregroundColor: Colors.white,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14),
+                          side: BorderSide(
+                            color: Colors.white.withValues(alpha: 0.08),
+                          ),
+                        ),
                       ),
                       icon: Icon(
                         showEmojiPicker
                             ? Icons.keyboard
                             : Icons.emoji_emotions_outlined,
-                        color: Colors.black87,
+                        color: Colors.white,
                       ),
                       onPressed: !_canSendTextMessages
                           ? _showTextChatRestriction
@@ -7227,33 +8119,57 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
                             },
                     ),
                     Expanded(
-                      child: TextField(
-                        controller: _messageController,
-                        autofocus: _canSendTextMessages,
-                        enabled: _canSendTextMessages,
-                        cursorColor: Colors.black87,
-                        style: const TextStyle(color: Colors.black87),
-                        decoration: InputDecoration(
-                          hintText: _canSendTextMessages
-                              ? 'Type a message...'
-                              : 'Text chat is locked right now',
-                          hintStyle: const TextStyle(color: Colors.black54),
-                          border: InputBorder.none,
+                      child: Container(
+                        height: 44,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF090A0D),
+                          borderRadius: BorderRadius.circular(22),
+                          border: Border.all(
+                            color: Colors.white.withValues(alpha: 0.08),
+                          ),
                         ),
-                        onTap: () {
-                          if (showEmojiPicker) {
-                            setModalState(() => showEmojiPicker = false);
-                          }
-                        },
-                        onSubmitted: (_) => _sendMessage(),
+                        child: TextField(
+                          controller: _messageController,
+                          autofocus: _canSendTextMessages,
+                          enabled: _canSendTextMessages,
+                          cursorColor: Colors.white,
+                          style: const TextStyle(color: Colors.white),
+                          decoration: InputDecoration(
+                            hintText: _canSendTextMessages
+                                ? 'Type a message...'
+                                : 'Text chat is locked right now',
+                            hintStyle: TextStyle(
+                              color: Colors.white.withValues(alpha: 0.5),
+                            ),
+                            border: InputBorder.none,
+                            filled: true,
+                            fillColor: Colors.transparent,
+                            contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 16,
+                              vertical: 12,
+                            ),
+                          ),
+                          onTap: () {
+                            if (showEmojiPicker) {
+                              setModalState(() => showEmojiPicker = false);
+                            }
+                          },
+                          onSubmitted: (_) => _sendMessage(),
+                        ),
                       ),
                     ),
                     IconButton(
                       style: IconButton.styleFrom(
-                        backgroundColor: Colors.white,
-                        foregroundColor: Colors.black87,
+                        backgroundColor: const Color(0xFF0E0E12),
+                        foregroundColor: Colors.white,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14),
+                          side: BorderSide(
+                            color: Colors.white.withValues(alpha: 0.08),
+                          ),
+                        ),
                       ),
-                      icon: const Icon(Icons.send, color: Colors.black87),
+                      icon: const Icon(Icons.send, color: Colors.white),
                       onPressed: _canSendTextMessages
                           ? _sendMessage
                           : _showTextChatRestriction,
@@ -7423,15 +8339,11 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
       _showGiftRestriction();
       return;
     }
-    showModalBottomSheet(
+    showGiftBottomSheet(
       context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (context) => GiftBottomSheet(
-        toUserId: userId,
-        toUsername: username,
-        roomId: _room.id,
-      ),
+      toUserId: userId,
+      toUsername: username,
+      roomId: _room.id,
     );
   }
 }
@@ -7578,8 +8490,15 @@ class RoomAvatar extends StatelessWidget {
                       shape: BoxShape.circle,
                       border: Border.all(color: Colors.white10, width: 1),
                     ),
-                    child: const Icon(Icons.mic_off_rounded,
-                        size: 10, color: Colors.white54),
+                    child: Padding(
+                      padding: const EdgeInsets.all(1),
+                      child: Image.asset(
+                        'assets/images/room_action_mic_off.png',
+                        width: 10,
+                        height: 10,
+                        fit: BoxFit.contain,
+                      ),
+                    ),
                   ),
                 ),
               if (isVIP)
@@ -7713,38 +8632,6 @@ class _SpeakingPulseEffectState extends State<_SpeakingPulseEffect>
       },
     );
   }
-}
-
-class _DottedCirclePainter extends CustomPainter {
-  final Color color;
-  _DottedCirclePainter({required this.color});
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = color
-      ..strokeWidth = 1.5
-      ..style = PaintingStyle.stroke;
-
-    const double dashWidth = 3;
-    const double dashSpace = 3;
-    final double radius = size.width / 2;
-    double startAngle = 0;
-
-    while (startAngle < 2 * 3.141592653589793) {
-      canvas.drawArc(
-        Rect.fromCircle(center: Offset(radius, radius), radius: radius),
-        startAngle,
-        dashWidth / radius,
-        false,
-        paint,
-      );
-      startAngle += (dashWidth + dashSpace) / radius;
-    }
-  }
-
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
 
 class _EqualizerBar extends StatefulWidget {

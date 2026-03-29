@@ -88,6 +88,7 @@ class RoomService {
   static Future<RoomModel?> createRoom({
     required String name,
     String? description,
+    String? announcement,
     String type = 'voice',
     String category = 'all',
     List<String>? tags,
@@ -98,6 +99,7 @@ class RoomService {
       final payload = _pruneNulls({
         'name': name,
         'description': description ?? '',
+        'announcement': announcement,
         'type': type,
         'category': category,
         'tags': tags ?? [],
@@ -290,8 +292,14 @@ class RoomService {
     });
   }
 
-  static Future<void> promoteParticipant(String roomId, String userId) async {
-    await ApiService.post('/rooms/$roomId/promote/$userId', {});
+  static Future<void> promoteParticipant(
+    String roomId,
+    String userId, {
+    int? seatIndex,
+  }) async {
+    await ApiService.post('/rooms/$roomId/promote/$userId', {
+      if (seatIndex != null) 'seatIndex': seatIndex,
+    });
   }
 
   static Future<void> demoteParticipant(String roomId, String userId) async {
@@ -358,10 +366,17 @@ class RoomService {
     }
   }
 
-  static Future<String?> reportRoom(String roomId, String reason) async {
+  static Future<String?> reportRoom(
+    String roomId,
+    String reason, {
+    String? targetUserId,
+    String type = 'room',
+  }) async {
     try {
       final response = await ApiService.post('/rooms/$roomId/report', {
         'reason': reason,
+        if (targetUserId != null) 'targetUserId': targetUserId,
+        'type': type,
       });
       return response['message']?.toString();
     } catch (e) {

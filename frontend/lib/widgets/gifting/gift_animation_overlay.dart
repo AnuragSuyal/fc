@@ -1,12 +1,18 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:lottie/lottie.dart';
-import 'dart:async';
+
 import '../../utils/haptics_util.dart';
+import '../gift_image.dart';
 
 class GiftAnimationOverlay extends StatefulWidget {
   final Stream<Map<String, dynamic>> giftStream;
 
-  const GiftAnimationOverlay({super.key, required this.giftStream});
+  const GiftAnimationOverlay({
+    super.key,
+    required this.giftStream,
+  });
 
   @override
   State<GiftAnimationOverlay> createState() => _GiftAnimationOverlayState();
@@ -21,9 +27,7 @@ class _GiftAnimationOverlayState extends State<GiftAnimationOverlay> {
   @override
   void initState() {
     super.initState();
-    _subscription = widget.giftStream.listen((giftData) {
-      _addGift(giftData);
-    });
+    _subscription = widget.giftStream.listen(_addGift);
   }
 
   @override
@@ -36,58 +40,63 @@ class _GiftAnimationOverlayState extends State<GiftAnimationOverlay> {
   }
 
   void _addGift(Map<String, dynamic> data) {
-    final giftName = data['giftName'] ?? 'Gift';
+    final giftName = data['giftName']?.toString() ?? 'Gift';
     String? animationPath;
 
-    // Map gift names to Lottie assets
-    if (giftName.toString().toLowerCase().contains('fire')) {
+    final normalized = giftName.toLowerCase();
+    if (normalized.contains('flame')) {
       animationPath = 'assets/animations/fire.json';
-    } else if (giftName.toString().toLowerCase().contains('diamond')) {
+    } else if (normalized.contains('diamond')) {
       animationPath = 'assets/animations/diamond.json';
-    } else if (giftName.toString().toLowerCase().contains('rocket')) {
+    } else if (normalized.contains('rocket')) {
       animationPath = 'assets/animations/rocket.json';
     }
 
     final gift = _ActiveGift(
       id: DateTime.now().millisecondsSinceEpoch.toString(),
-      senderName: data['fromUsername'] ?? 'Someone',
-      giftIcon: data['giftIcon'] ?? 'Ã°Å¸Å½Â',
+      senderName: data['fromUsername']?.toString() ??
+          data['sender']?['username']?.toString() ??
+          'Someone',
+      giftIcon: data['giftIcon']?.toString() ?? '',
       giftName: giftName,
       animationPath: animationPath,
     );
 
-    if (mounted) {
-      // Sync haptics with animation peaks for premium gifts
-      final isPremium = giftName.toString().toLowerCase().contains('diamond') ||
-          giftName.toString().toLowerCase().contains('rocket');
+    if (!mounted) return;
 
-      if (isPremium) {
-        // Delay haptic to match Lottie animation build-up/peak
-        final hapticTimer = Timer(const Duration(milliseconds: 800), () {
-          if (mounted) HapticsUtil.giftReceived();
-        });
-        _timers.add(hapticTimer);
-      } else {
-        HapticsUtil.giftReceived();
-      }
+    final isPremium = normalized.contains('diamond') ||
+        normalized.contains('rocket') ||
+        normalized.contains('royal') ||
+        normalized.contains('celebration');
 
-      setState(() {
-        _activeGifts.add(gift);
-        if (_activeGifts.length > _maxVisibleGifts) {
-          _activeGifts.removeRange(0, _activeGifts.length - _maxVisibleGifts);
+    if (isPremium) {
+      final hapticTimer = Timer(const Duration(milliseconds: 800), () {
+        if (mounted) {
+          HapticsUtil.giftReceived();
         }
       });
+      _timers.add(hapticTimer);
+    } else {
+      HapticsUtil.giftReceived();
     }
 
-    // Remove after animation finishes (5 seconds for Lottie)
-    final removeTimer =
-        Timer(Duration(milliseconds: animationPath != null ? 5000 : 3000), () {
-      if (mounted) {
-        setState(() {
-          _activeGifts.removeWhere((g) => g.id == gift.id);
-        });
+    setState(() {
+      _activeGifts.add(gift);
+      if (_activeGifts.length > _maxVisibleGifts) {
+        _activeGifts.removeRange(0, _activeGifts.length - _maxVisibleGifts);
       }
     });
+
+    final removeTimer = Timer(
+      Duration(milliseconds: animationPath != null ? 5000 : 3000),
+      () {
+        if (mounted) {
+          setState(() {
+            _activeGifts.removeWhere((entry) => entry.id == gift.id);
+          });
+        }
+      },
+    );
     _timers.add(removeTimer);
   }
 
@@ -97,8 +106,10 @@ class _GiftAnimationOverlayState extends State<GiftAnimationOverlay> {
       child: RepaintBoundary(
         child: Stack(
           children: _activeGifts
-              .map((gift) =>
-                  _FloatingGiftWidget(key: ValueKey(gift.id), gift: gift))
+              .map((gift) => _FloatingGiftWidget(
+                    key: ValueKey(gift.id),
+                    gift: gift,
+                  ))
               .toList(),
         ),
       ),
@@ -125,7 +136,10 @@ class _ActiveGift {
 class _FloatingGiftWidget extends StatefulWidget {
   final _ActiveGift gift;
 
-  const _FloatingGiftWidget({super.key, required this.gift});
+  const _FloatingGiftWidget({
+    super.key,
+    required this.gift,
+  });
 
   @override
   State<_FloatingGiftWidget> createState() => _FloatingGiftWidgetState();
@@ -146,7 +160,6 @@ class _FloatingGiftWidgetState extends State<_FloatingGiftWidget>
       duration: const Duration(milliseconds: 2500),
     );
 
-    // Slide up from bottom to center
     _slideAnimation = Tween<double>(begin: 1.0, end: 0.3).animate(
       CurvedAnimation(
         parent: _controller,
@@ -154,14 +167,12 @@ class _FloatingGiftWidgetState extends State<_FloatingGiftWidget>
       ),
     );
 
-    // Scale up and down
     _scaleAnimation = TweenSequence<double>([
       TweenSequenceItem(tween: Tween(begin: 0.0, end: 1.2), weight: 30),
       TweenSequenceItem(tween: Tween(begin: 1.2, end: 1.0), weight: 20),
       TweenSequenceItem(tween: ConstantTween(1.0), weight: 50),
     ]).animate(_controller);
 
-    // Fade in and out
     _opacityAnimation = TweenSequence<double>([
       TweenSequenceItem(tween: Tween(begin: 0.0, end: 1.0), weight: 20),
       TweenSequenceItem(tween: ConstantTween(1.0), weight: 60),
@@ -224,9 +235,15 @@ class _FloatingGiftWidgetState extends State<_FloatingGiftWidget>
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Text(
-                      widget.gift.giftIcon,
-                      style: const TextStyle(fontSize: 32),
+                    GiftImage(
+                      source: widget.gift.giftIcon,
+                      width: 36,
+                      height: 36,
+                      fallback: const Icon(
+                        Icons.card_giftcard_rounded,
+                        color: Colors.white,
+                        size: 28,
+                      ),
                     ),
                     const SizedBox(width: 12),
                     Column(

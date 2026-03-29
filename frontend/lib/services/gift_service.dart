@@ -17,7 +17,8 @@ class GiftService {
             categorized[category] = gifts
                 .map((g) => GiftModel.fromJson(g))
                 .where((g) => g.isAvailable())
-                .toList();
+                .toList()
+              ..sort((a, b) => a.sortOrder.compareTo(b.sortOrder));
           }
         });
       }
@@ -127,7 +128,6 @@ class GiftService {
     }
   }
 }
-
 
 
 

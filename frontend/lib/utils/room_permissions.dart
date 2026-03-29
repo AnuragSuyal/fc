@@ -9,19 +9,33 @@ class RoomPermissions {
   final RoomModel room;
   final String? userId;
 
+  bool _capability(String key, bool fallback) {
+    final value = room.capabilities[key];
+    if (value == null) return fallback;
+    return value;
+  }
+
   Participant? get selfParticipant => _participantFor(userId);
   String? get selfRole => selfParticipant?.role.toLowerCase();
 
   bool get isOwner =>
-      userId != null && (userId == room.hostId || selfRole == 'host');
+      _capability(
+        'isOwner',
+        userId != null && (userId == room.hostId || selfRole == 'host'),
+      );
   bool get isAdmin =>
-      userId != null &&
-      (isOwner ||
-          room.coHostIds.contains(userId) ||
-          room.moderatorIds.contains(userId) ||
-          selfRole == 'cohost' ||
-          selfRole == 'moderator');
+      _capability(
+        'isAdmin',
+        userId != null &&
+            (isOwner ||
+                room.coHostIds.contains(userId) ||
+                room.moderatorIds.contains(userId) ||
+                selfRole == 'cohost' ||
+                selfRole == 'moderator'),
+      );
   bool get isSpeaker {
+    final capabilityValue = room.capabilities['isSpeaker'];
+    if (capabilityValue != null) return capabilityValue;
     final participant = selfParticipant;
     if (participant == null) return false;
     return participant.seatIndex >= 0 ||
@@ -31,24 +45,46 @@ class RoomPermissions {
         participant.role == 'host';
   }
 
-  bool get canOpenRoomSettings => isAdmin;
-  bool get canManageRoom => isAdmin;
-  bool get canManageStage => isAdmin;
-  bool get canManageSafety => isAdmin;
-  bool get canManageRoomMedia => isAdmin;
-  bool get canManageRoomIdentity => isOwner;
-  bool get canManageRoomAccess => isOwner;
-  bool get canManageAdmins => isOwner;
-  bool get canManageGifting => isOwner;
-  bool get canEditAnnouncement => isOwner;
-  bool get canEndRoom => isOwner;
-  bool get canTransferOwnership => isOwner;
-  bool get canViewReports => isOwner;
-  bool get canUseRoomGifts => room.allowGifts || isOwner;
+  bool get canOpenRoomSettings =>
+      _capability('canOpenRoomSettings', isAdmin);
+  bool get canManageRoom => _capability('canManageRoom', isAdmin);
+  bool get canManageStage => _capability('canManageStage', isAdmin);
+  bool get canManageSeatLocks =>
+      _capability('canManageSeatLocks', isOwner || (isAdmin && room.allowAdminSeatControl));
+  bool get canManageSafety => _capability('canManageSafety', isAdmin);
+  bool get canManageRoomMedia => _capability('canManageRoomMedia', isAdmin);
+  bool get canManageRoomIdentity =>
+      _capability('canManageRoomIdentity', isOwner);
+  bool get canManageRoomAccess =>
+      _capability('canManageRoomAccess', isOwner);
+  bool get canManageAdmins => _capability('canManageAdmins', isOwner);
+  bool get canManageGifting =>
+      _capability('canManageGifting', isOwner || isAdmin);
+  bool get canEditAnnouncement =>
+      _capability('canEditAnnouncement', isOwner);
+  bool get canEndRoom => _capability('canEndRoom', isOwner);
+  bool get canTransferOwnership =>
+      _capability('canTransferOwnership', isOwner);
+  bool get canViewReports => _capability('canViewReports', isOwner);
+  bool get canViewBans => _capability('canViewBans', isAdmin);
+  bool get canInviteUsers => _capability('canInviteUsers', isAdmin);
+  bool get canRallyFans => _capability('canRallyFans', isAdmin);
+  bool get canSendRoomMessages =>
+      _capability('canSendRoomMessages', !room.banTextChat || isAdmin);
+  bool get canSendRoomImages =>
+      _capability('canSendRoomImages', !room.banPhotoChat || isAdmin);
+  bool get canUseRoomGifts =>
+      _capability('canSendRoomGifts', room.allowGifts || isOwner);
   bool get canJoinStageDirectly =>
-      isAdmin || (!room.stageJoinsLocked && !room.requireApproval);
+      _capability(
+        'canJoinStageDirectly',
+        isAdmin || (!room.stageJoinsLocked && !room.requireApproval),
+      );
   bool get canRequestMic =>
-      userId != null && !isAdmin && !isSpeaker && !room.isLockedSeat(1);
+      _capability(
+        'canRequestMic',
+        userId != null && !isAdmin && !isSpeaker && !room.isLockedSeat(1),
+      );
 
   int get authorityLevel {
     if (userId == null) return 0;

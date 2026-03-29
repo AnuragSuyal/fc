@@ -1,72 +1,59 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 
+import '../../providers/color_clash_session_controller.dart';
 import '../../theme/app_theme.dart';
 import '../../utils/constants.dart';
+import 'color_clash_home_screen.dart';
+import 'color_clash_season_screen.dart';
+import 'color_clash_table_screen.dart';
 
-class GamesScreen extends StatelessWidget {
+class GamesScreen extends StatefulWidget {
   const GamesScreen({super.key});
 
   @override
+  State<GamesScreen> createState() => _GamesScreenState();
+}
+
+class _GamesScreenState extends State<GamesScreen> {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final controller = context.read<ColorClashSessionController>();
+      controller.loadHome(force: true);
+      controller.loadSeasonSummary(force: true);
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final games = const [
-      _Game(
-        name: 'Werewolf',
-        subtitle: 'Voice strategy party',
-        players: '2.3k playing',
-        icon: Icons.nightlight_round,
-        color: AppColors.primaryBlue,
-      ),
-      _Game(
-        name: 'Ludo Star',
-        subtitle: 'Classic board chaos',
-        players: '1.5k playing',
-        icon: Icons.casino_rounded,
-        color: AppColors.accentYellow,
-      ),
-      _Game(
-        name: 'Uno Party',
-        subtitle: 'Fast social cards',
-        players: '800 playing',
-        icon: Icons.style_rounded,
-        color: AppColors.accentSky,
-      ),
-      _Game(
-        name: 'Teen Patti',
-        subtitle: 'Table energy on',
-        players: '3.1k playing',
-        icon: Icons.auto_awesome_rounded,
-        color: AppColors.secondaryBlue,
-      ),
-      _Game(
-        name: 'Chess King',
-        subtitle: 'Quiet ranked battles',
-        players: '400 playing',
-        icon: Icons.extension_rounded,
-        color: AppColors.accentBerry,
-      ),
-      _Game(
-        name: 'Antakshari',
-        subtitle: 'Sing-off rooms',
-        players: '1.2k playing',
-        icon: Icons.music_note_rounded,
-        color: AppColors.primaryBlue,
-      ),
-    ];
+    final controller = context.watch<ColorClashSessionController>();
+    final home = controller.home;
+    final season = home?.season;
+    final progress = home?.userProgress.currentSeason;
 
     return ListView(
       padding: const EdgeInsets.fromLTRB(20, 18, 20, 28),
       children: [
         Container(
-          padding: const EdgeInsets.all(22),
+          padding: const EdgeInsets.all(24),
           decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(32),
-            gradient: context.mood.heroGradient,
+            borderRadius: BorderRadius.circular(34),
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [
+                AppColors.primaryBlue,
+                context.mood.berry,
+                AppColors.secondaryBlue,
+              ],
+            ),
             boxShadow: [
               BoxShadow(
-                color: context.mood.shadow,
-                blurRadius: 24,
-                offset: const Offset(0, 12),
+                color: AppColors.primaryBlue.withValues(alpha: 0.18),
+                blurRadius: 26,
+                offset: const Offset(0, 14),
               ),
             ],
           ),
@@ -77,131 +64,250 @@ class GamesScreen extends StatelessWidget {
                 padding:
                     const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                 decoration: BoxDecoration(
-                  color: Colors.white.withValues(alpha: 0.18),
+                  color: Colors.white.withValues(alpha: 0.14),
                   borderRadius: BorderRadius.circular(999),
                 ),
                 child: Text(
-                  'Game night energy',
-                  style: theme.textTheme.labelLarge?.copyWith(
-                    color: Colors.white,
-                  ),
+                  'Featured original game',
+                  style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                        color: Colors.white,
+                      ),
                 ),
               ),
               const SizedBox(height: 16),
               Text(
-                'Jump into playful lobbies',
-                style: theme.textTheme.displaySmall?.copyWith(
-                  color: Colors.white,
-                ),
+                'Color Clash',
+                style: Theme.of(context).textTheme.displaySmall?.copyWith(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w900,
+                    ),
               ),
               const SizedBox(height: 8),
               Text(
-                'Party tables, casual competitions, and warm-up rounds built for fast fun.',
-                style: theme.textTheme.bodyMedium?.copyWith(
-                  color: Colors.white.withValues(alpha: 0.84),
-                ),
+                'Premium social card sessions built on the new realtime backend spine.',
+                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      color: Colors.white.withValues(alpha: 0.84),
+                    ),
+              ),
+              const SizedBox(height: 18),
+              Row(
+                children: [
+                  Expanded(
+                    child: FilledButton(
+                      style: FilledButton.styleFrom(
+                        backgroundColor: Colors.white,
+                        foregroundColor: AppColors.primaryBlue,
+                      ),
+                      onPressed: () {
+                        Navigator.of(context).pushNamed(
+                          ColorClashHomeScreen.routeName,
+                        );
+                      },
+                      child: const Text('Open game'),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: OutlinedButton(
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: Colors.white,
+                        side: BorderSide(
+                          color: Colors.white.withValues(alpha: 0.28),
+                        ),
+                      ),
+                      onPressed: () {
+                        Navigator.of(context).pushNamed(
+                          ColorClashSeasonScreen.routeName,
+                        );
+                      },
+                      child: const Text('Season'),
+                    ),
+                  ),
+                ],
               ),
             ],
           ),
         ),
-        const SizedBox(height: 22),
-        Text('Popular games', style: theme.textTheme.headlineSmall),
-        const SizedBox(height: 12),
-        GridView.builder(
-          shrinkWrap: true,
-          physics: const NeverScrollableScrollPhysics(),
-          itemCount: games.length,
-          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-            crossAxisCount: 2,
-            crossAxisSpacing: 14,
-            mainAxisSpacing: 14,
-            childAspectRatio: 0.86,
+        if (home?.activeMatch != null) ...[
+          const SizedBox(height: 18),
+          Text(
+            'Resume live match',
+            style: Theme.of(context).textTheme.headlineSmall,
           ),
-          itemBuilder: (context, index) {
-            final game = games[index];
-            return Container(
-              padding: const EdgeInsets.all(18),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(28),
-                border: Border.all(color: context.mood.outlineSoft),
-                boxShadow: [
-                  BoxShadow(
-                    color: game.color.withValues(alpha: 0.12),
-                    blurRadius: 18,
-                    offset: const Offset(0, 8),
+          const SizedBox(height: 12),
+          Container(
+            padding: const EdgeInsets.all(18),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(28),
+              border: Border.all(color: context.mood.outlineSoft),
+            ),
+            child: Row(
+              children: [
+                Container(
+                  width: 52,
+                  height: 52,
+                  decoration: BoxDecoration(
+                    color: AppColors.primaryBlue.withValues(alpha: 0.08),
+                    borderRadius: BorderRadius.circular(18),
                   ),
-                ],
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  CircleAvatar(
-                    radius: 28,
-                    backgroundColor: game.color.withValues(alpha: 0.14),
-                    child: Icon(game.icon, color: game.color, size: 28),
+                  child: const Icon(
+                    Icons.play_circle_fill_rounded,
+                    color: AppColors.primaryBlue,
                   ),
-                  const SizedBox(height: 16),
-                  Text(
-                    game.name,
-                    style: theme.textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.w800,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(game.subtitle, style: theme.textTheme.bodySmall),
-                  const Spacer(),
-                  Row(
+                ),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Icon(
-                        Icons.people_alt_outlined,
-                        size: 16,
-                        color: AppColors.textSecondary.withValues(alpha: 0.9),
+                      Text(
+                        'Round ${home!.activeMatch!.publicState?.roundNumber ?? 1}',
+                        style:
+                            Theme.of(context).textTheme.titleMedium?.copyWith(
+                                  fontWeight: FontWeight.w800,
+                                ),
                       ),
-                      const SizedBox(width: 6),
-                      Expanded(
-                        child: Text(game.players,
-                            style: theme.textTheme.bodySmall),
+                      const SizedBox(height: 4),
+                      Text(
+                        '${home.activeMatch!.tableMode.replaceAll('_', ' ')} • version ${home.activeMatch!.version}',
+                        style: Theme.of(context).textTheme.bodySmall,
                       ),
                     ],
                   ),
-                  const SizedBox(height: 12),
-                  SizedBox(
-                    width: double.infinity,
-                    child: FilledButton(
-                      onPressed: () {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(
-                              content: Text('Opening ${game.name} lobby...')),
-                        );
+                ),
+                FilledButton(
+                  onPressed: () {
+                    Navigator.of(context).pushNamed(
+                      ColorClashTableScreen.routeName,
+                      arguments: <String, dynamic>{
+                        'matchId': home.activeMatch!.matchId,
+                        'roomId': home.activeMatch!.roomId,
                       },
-                      style:
-                          FilledButton.styleFrom(backgroundColor: game.color),
-                      child: const Text('Play now'),
+                    );
+                  },
+                  child: const Text('Resume'),
+                ),
+              ],
+            ),
+          ),
+        ],
+        const SizedBox(height: 18),
+        Text(
+          'Season snapshot',
+          style: Theme.of(context).textTheme.headlineSmall,
+        ),
+        const SizedBox(height: 12),
+        Container(
+          padding: const EdgeInsets.all(18),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(28),
+            border: Border.all(color: context.mood.outlineSoft),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                season?.name ?? 'Color Clash Season',
+                style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                      fontWeight: FontWeight.w900,
                     ),
-                  ),
-                ],
               ),
-            );
-          },
+              const SizedBox(height: 8),
+              Text(
+                progress == null
+                    ? 'Open the season page to see your current placement and eligibility.'
+                    : '${progress.tierName} • Division ${progress.division} • Rating ${progress.rating}',
+                style: Theme.of(context).textTheme.bodyMedium,
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 18),
+        Text(
+          'More game nights',
+          style: Theme.of(context).textTheme.headlineSmall,
+        ),
+        const SizedBox(height: 12),
+        GridView.count(
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+          crossAxisCount: 2,
+          mainAxisSpacing: 12,
+          crossAxisSpacing: 12,
+          childAspectRatio: 1.05,
+          children: const [
+            _FutureGameCard(
+              title: 'Voice Mysteries',
+              subtitle: 'Social deduction next',
+              icon: Icons.nightlight_round,
+            ),
+            _FutureGameCard(
+              title: 'Board Social',
+              subtitle: 'Classic rolls later',
+              icon: Icons.casino_rounded,
+            ),
+            _FutureGameCard(
+              title: 'Music Rooms',
+              subtitle: 'Mic-led party modes',
+              icon: Icons.music_note_rounded,
+            ),
+            _FutureGameCard(
+              title: 'Quiet Strategy',
+              subtitle: 'Deep ranked tables',
+              icon: Icons.extension_rounded,
+            ),
+          ],
         ),
       ],
     );
   }
 }
 
-class _Game {
-  final String name;
-  final String subtitle;
-  final String players;
-  final IconData icon;
-  final Color color;
-
-  const _Game({
-    required this.name,
+class _FutureGameCard extends StatelessWidget {
+  const _FutureGameCard({
+    required this.title,
     required this.subtitle,
-    required this.players,
     required this.icon,
-    required this.color,
   });
+
+  final String title;
+  final String subtitle;
+  final IconData icon;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(28),
+        border: Border.all(color: context.mood.outlineSoft),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 46,
+            height: 46,
+            decoration: BoxDecoration(
+              color: AppColors.backgroundWhite,
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: Icon(icon, color: AppColors.primaryBlue),
+          ),
+          const Spacer(),
+          Text(
+            title,
+            style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                  fontWeight: FontWeight.w800,
+                ),
+          ),
+          const SizedBox(height: 4),
+          Text(subtitle, style: Theme.of(context).textTheme.bodySmall),
+        ],
+      ),
+    );
+  }
 }

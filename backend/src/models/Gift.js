@@ -1,6 +1,18 @@
 const mongoose = require('mongoose');
 
 const giftSchema = new mongoose.Schema({
+    giftId: {
+        type: String,
+        trim: true,
+        unique: true,
+        sparse: true,
+        index: true
+    },
+    catalogVersion: {
+        type: String,
+        trim: true
+    },
+
     // Basic Info
     name: {
         type: String,
@@ -15,6 +27,10 @@ const giftSchema = new mongoose.Schema({
         type: String,
         required: true
     }, // Emoji or image URL
+    assetPath: {
+        type: String,
+        trim: true
+    },
 
     // Pricing
     price: {
@@ -33,7 +49,7 @@ const giftSchema = new mongoose.Schema({
     // Categorization
     category: {
         type: String,
-        enum: ['simple', 'premium', 'luxury', 'legendary'],
+        enum: ['simple', 'premium', 'luxury', 'limited', 'legendary'],
         default: 'simple',
         required: true,
         index: true
@@ -42,6 +58,17 @@ const giftSchema = new mongoose.Schema({
         type: Number,
         enum: [1, 2, 3, 4],
         default: 1,
+        index: true
+    },
+    rarity: {
+        type: String,
+        trim: true,
+        default: 'simple',
+        index: true
+    },
+    sortOrder: {
+        type: Number,
+        default: 0,
         index: true
     },
 
@@ -172,12 +199,12 @@ giftSchema.pre('save', async function () {
 
 // Indexes
 giftSchema.index({ category: 1, tier: 1 });
+giftSchema.index({ category: 1, sortOrder: 1 });
 giftSchema.index({ 'price.coins': 1 });
 giftSchema.index({ 'stats.totalSent': -1 });
 giftSchema.index({ active: 1, 'availability.endDate': 1 });
 
 module.exports = mongoose.model('Gift', giftSchema);
-
 
 
 

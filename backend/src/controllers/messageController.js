@@ -4,10 +4,33 @@ const Room = require('../models/Room');
 const Group = require('../models/Group');
 const mongoose = require('mongoose');
 const economyController = require('./economyController');
-const { isRoomAdmin } = require('../utils/roomPermissions');
+const {
+    ROOM_ACTIONS,
+    canPerformRoomAction,
+    isRoomAdmin
+} = require('../services/roomPermissionService');
 
 const INTRO_MESSAGE_LIMIT = 3;
 const NON_FRIEND_BLOCKED_DM_TYPES = new Set(['gift', 'system']);
+
+const resolveRoomFeedStartAt = (room, userId) => {
+    if (!room || !userId) return null;
+
+    const participant = (room.participants || []).find(
+        (entry) => entry?.userId?.toString() === userId.toString()
+    );
+    if (!participant) {
+        return null;
+    }
+
+    const joinedAt = participant.joinedAt || participant.lastActive;
+    if (!joinedAt) {
+        return null;
+    }
+
+    const parsed = new Date(joinedAt);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+};
 
 const sanitizeMessageForViewer = (message) => {
     if (!message) return message;
@@ -165,14 +188,19 @@ exports.sendRoomMessage = async (req, res, next) => {
             throw error;
         }
 
-        const canModerate = isRoomAdmin(room, req.userId);
-        if (type === 'text' && room.settings?.banTextChat && !canModerate) {
-            const error = new Error('Text chat is currently limited to hosts and admins');
-            error.status = 403;
-            throw error;
-        }
-        if (type === 'image' && room.settings?.banPhotoChat && !canModerate) {
-            const error = new Error('Photo sharing is currently disabled in this room');
+        const messageAction = type === 'image'
+            ? ROOM_ACTIONS.SEND_ROOM_IMAGE
+            : ROOM_ACTIONS.SEND_ROOM_MESSAGE;
+        if (!canPerformRoomAction({
+            room,
+            actorUserId: req.userId,
+            action: messageAction
+        })) {
+            const error = new Error(
+                type === 'image'
+                    ? 'Photo sharing is not available for your role in this room'
+                    : 'You cannot send room chat right now'
+            );
             error.status = 403;
             throw error;
         }
@@ -314,15 +342,43 @@ exports.getRoomMessages = async (req, res, next) => {
     try {
         const { roomId } = req.params;
         const { page = 1, limit = 50 } = req.query;
+        const room = await Room.findById(roomId).select('participants bans');
+        if (!room) {
+            const error = new Error('Room not found');
+            error.status = 404;
+            throw error;
+        }
+        const isInRoom = room.participants.some((participant) => participant.userId.toString() === req.userId);
+        if (!isInRoom) {
+            const error = new Error('Join the room to view its messages');
+            error.status = 403;
+            throw error;
+        }
+        const isBanned = room.bans?.some((ban) =>
+            ban.userId.toString() === req.userId &&
+            (!ban.expiresAt || ban.expiresAt > Date.now())
+        );
+        if (isBanned) {
+            const error = new Error('You are banned from this room');
+            error.status = 403;
+            throw error;
+        }
 
-        const messages = await Message.find({ roomId, isDeleted: false })
+        const feedStartAt = resolveRoomFeedStartAt(room, req.userId);
+        const messageQuery = {
+            roomId,
+            isDeleted: false,
+            ...(feedStartAt ? { createdAt: { $gte: feedStartAt } } : {})
+        };
+
+        const messages = await Message.find(messageQuery)
             .populate('senderId', 'username avatar level')
             .populate('replyTo')
             .sort({ createdAt: -1 })
             .limit(parseInt(limit))
             .skip((parseInt(page) - 1) * parseInt(limit));
 
-        const total = await Message.countDocuments({ roomId, isDeleted: false });
+        const total = await Message.countDocuments(messageQuery);
         res.json({
             messages: messages.reverse().map(sanitizeMessageForViewer),
             pagination: { page: parseInt(page), limit: parseInt(limit), total, pages: Math.ceil(total / parseInt(limit)) }

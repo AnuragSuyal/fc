@@ -19,6 +19,7 @@ class _CreateRoomScreenState extends State<CreateRoomScreen> {
   final _formKey = GlobalKey<FormState>();
   final _nameController = TextEditingController();
   final _descriptionController = TextEditingController();
+  final _announcementController = TextEditingController();
   final _passwordController = TextEditingController();
 
   String _selectedType = 'voice';
@@ -73,6 +74,7 @@ class _CreateRoomScreenState extends State<CreateRoomScreen> {
   void dispose() {
     _nameController.dispose();
     _descriptionController.dispose();
+    _announcementController.dispose();
     _passwordController.dispose();
     super.dispose();
   }
@@ -88,9 +90,11 @@ class _CreateRoomScreenState extends State<CreateRoomScreen> {
 
     try {
       final password = _passwordController.text.trim();
+      final announcement = _announcementController.text.trim();
       final room = await RoomService.createRoom(
         name: _nameController.text.trim(),
         description: _descriptionController.text.trim(),
+        announcement: announcement.isEmpty ? null : announcement,
         type: _selectedType,
         category: _selectedCategory,
         settings: {
@@ -201,6 +205,13 @@ class _CreateRoomScreenState extends State<CreateRoomScreen> {
         backgroundColor: Colors.transparent,
         elevation: 0,
         foregroundColor: Colors.white,
+        leading: IconButton(
+          onPressed: () => Navigator.maybePop(context),
+          icon: const Icon(
+            Icons.arrow_back_ios_new_rounded,
+            color: Colors.black,
+          ),
+        ),
         title: const Text(
           'Create Room',
           style: TextStyle(fontWeight: FontWeight.w700),
@@ -259,6 +270,20 @@ class _CreateRoomScreenState extends State<CreateRoomScreen> {
                           validator: (value) {
                             if ((value?.trim().length ?? 0) > 200) {
                               return 'Description must be under 200 characters';
+                            }
+                            return null;
+                          },
+                        ),
+                        const SizedBox(height: 18),
+                        _buildLabel('Announcement'),
+                        const SizedBox(height: 10),
+                        _buildTextField(
+                          controller: _announcementController,
+                          hintText: 'Pin a short note for everyone joining live',
+                          maxLines: 3,
+                          validator: (value) {
+                            if ((value?.trim().length ?? 0) > 500) {
+                              return 'Announcement must be under 500 characters';
                             }
                             return null;
                           },

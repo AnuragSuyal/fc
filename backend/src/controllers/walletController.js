@@ -1,5 +1,7 @@
 const User = require('../models/User');
 const Transaction = require('../models/Transaction');
+const { findGiftByIdentifier } = require('../services/giftCatalogService');
+const { serializeGift } = require('../utils/giftCatalog');
 
 // @desc    Get user balance
 exports.getBalance = async (req, res, next) => {
@@ -33,16 +35,41 @@ exports.getTransactions = async (req, res, next) => {
         if (type) query.type = type;
 
         const transactions = await Transaction.find(query)
-            .populate('reference.giftId', 'name icon')
             .populate('reference.recipientId', 'username avatar')
             .populate('reference.roomId', 'name')
             .sort({ createdAt: -1 })
             .limit(parseInt(limit))
             .skip((parseInt(page) - 1) * parseInt(limit));
 
+        const hydratedTransactions = await Promise.all(
+            transactions.map(async (transaction) => {
+                const serialized = transaction.toObject({ virtuals: true });
+                const giftReference = serialized.reference?.giftId;
+                if (!giftReference) {
+                    return serialized;
+                }
+
+                const identifier = typeof giftReference === 'object'
+                    ? giftReference._id?.toString?.()
+                        || giftReference._id
+                        || giftReference.giftId
+                        || giftReference.toString?.()
+                        || ''
+                    : giftReference;
+                const giftDoc = await findGiftByIdentifier(String(identifier));
+                return {
+                    ...serialized,
+                    reference: {
+                        ...(serialized.reference || {}),
+                        giftId: serializeGift(giftDoc)
+                    }
+                };
+            })
+        );
+
         const total = await Transaction.countDocuments(query);
         const grouped = {};
-        transactions.forEach(t => {
+        hydratedTransactions.forEach(t => {
             const date = t.createdAt.toISOString().slice(0, 10);
             if (!grouped[date]) grouped[date] = [];
             grouped[date].push(t);
@@ -273,8 +300,6 @@ exports.convertCoinsToGems = async (req, res, next) => {
 };
 
 exports.getSpecialOffers = (req, res) => res.json([]);
-
-
 
 
 

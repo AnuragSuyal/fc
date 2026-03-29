@@ -36,6 +36,7 @@ class _FriendsScreenState extends State<FriendsScreen>
   List<dynamic> _blockedUsers = [];
 
   bool _isLoading = true;
+  bool _hasLoadedOnce = false;
   String? _error;
   bool _isDisposed = false;
   final List<StreamSubscription> _socketSubscriptions = [];
@@ -72,7 +73,7 @@ class _FriendsScreenState extends State<FriendsScreen>
       SocketService.friendStream.listen(_handleRealtimeFriendEvent),
       SocketService.resyncStream.listen((_) {
         if (!mounted) return;
-        _loadData();
+        _loadData(silent: true);
       }),
     ]);
   }
@@ -83,14 +84,17 @@ class _FriendsScreenState extends State<FriendsScreen>
     switch (type) {
       case 'friend_request_received':
         _upsertIncomingRequest(event);
+        _removeSuggestionByUserId(_userIdFrom(event['from']));
         _scheduleRealtimeReload();
         break;
       case 'friend_request_sent':
         _upsertOutgoingRequest(event);
+        _removeSuggestionByUserId(_peerUserId(event));
         _scheduleRealtimeReload();
         break;
       case 'friend_request_accepted':
         _removeRequestsForUser(_peerUserId(event));
+        _removeSuggestionByUserId(_peerUserId(event));
         _scheduleRealtimeReload();
         break;
       case 'friend_request_rejected':
@@ -115,13 +119,17 @@ class _FriendsScreenState extends State<FriendsScreen>
     _realtimeReloadDebounce?.cancel();
     _realtimeReloadDebounce = Timer(
       const Duration(milliseconds: 600),
-      _loadData,
+      () => _loadData(silent: true),
     );
   }
 
-  Future<void> _loadData() async {
+  Future<void> _loadData({bool silent = false}) async {
+    final showLoading = !_hasLoadedOnce || !silent;
+
     _safeSetState(() {
-      _isLoading = true;
+      if (showLoading) {
+        _isLoading = true;
+      }
       _error = null;
     });
 
@@ -155,14 +163,19 @@ class _FriendsScreenState extends State<FriendsScreen>
             : [];
         _suggestions = suggestions;
         _blockedUsers = blocked;
+        _hasLoadedOnce = true;
         _isLoading = false;
       });
       _syncPendingRequestCount(_incomingRequests.length);
     } catch (e) {
-      _safeSetState(() {
-        _error = e.toString();
-        _isLoading = false;
-      });
+      if (!silent || !_hasLoadedOnce) {
+        _safeSetState(() {
+          _error = e.toString();
+          _isLoading = false;
+        });
+      } else {
+        debugPrint('Silent friend refresh failed: $e');
+      }
     }
   }
 
@@ -222,7 +235,7 @@ class _FriendsScreenState extends State<FriendsScreen>
               if (!dialogContext.mounted) return;
               debounce?.cancel();
               Navigator.pop(dialogContext);
-              await _loadData();
+              await _loadData(silent: true);
               scaffoldMessenger.showSnackBar(
                 SnackBar(
                   content: Text('Friend request sent to ${user.username}!'),
@@ -358,6 +371,38 @@ class _FriendsScreenState extends State<FriendsScreen>
     return const <String, dynamic>{};
   }
 
+  Map<String, dynamic>? _mapUser(dynamic user) {
+    if (user is Map<String, dynamic>) {
+      return Map<String, dynamic>.from(user);
+    }
+    if (user is Map) {
+      return Map<String, dynamic>.from(user);
+    }
+    return null;
+  }
+
+  Map<String, dynamic>? _findKnownUser(String userId) {
+    final sources = <dynamic>[
+      ..._suggestions,
+      ..._onlineFriends,
+      ..._allFriends,
+      ..._blockedUsers,
+      ..._incomingRequests.map(_requestUser),
+      ..._outgoingRequests.map(
+        (request) => _requestUser(request, outgoing: true),
+      ),
+    ];
+
+    for (final source in sources) {
+      final user = _mapUser(source);
+      if (user != null && _userIdFrom(user) == userId) {
+        return user;
+      }
+    }
+
+    return null;
+  }
+
   String _requestSubtitle(dynamic request, {required bool outgoing}) {
     final requestMap = request is Map ? Map<String, dynamic>.from(request) : {};
     final sentAt = requestMap['sentAt']?.toString();
@@ -475,6 +520,47 @@ class _FriendsScreenState extends State<FriendsScreen>
     _syncPendingRequestCount();
   }
 
+  void _removeSuggestionByUserId(String? userId) {
+    if (userId == null || userId.isEmpty) return;
+
+    _safeSetState(() {
+      _suggestions =
+          _suggestions.where((item) => _userIdFrom(item) != userId).toList();
+    });
+  }
+
+  void _removeBlockedUserByUserId(String? userId) {
+    if (userId == null || userId.isEmpty) return;
+
+    _safeSetState(() {
+      _blockedUsers =
+          _blockedUsers.where((item) => _userIdFrom(item) != userId).toList();
+    });
+  }
+
+  void _removeFromFriendCollections(String? userId) {
+    if (userId == null || userId.isEmpty) return;
+
+    _safeSetState(() {
+      _onlineFriends =
+          _onlineFriends.where((item) => _userIdFrom(item) != userId).toList();
+      _allFriends =
+          _allFriends.where((item) => _userIdFrom(item) != userId).toList();
+    });
+  }
+
+  void _upsertBlockedUser(Map<String, dynamic> user) {
+    final userId = _userIdFrom(user);
+    if (userId.isEmpty) return;
+
+    _safeSetState(() {
+      _blockedUsers = [
+        user,
+        ..._blockedUsers.where((item) => _userIdFrom(item) != userId),
+      ];
+    });
+  }
+
   void _patchPresence(String? userId, bool isOnline) {
     if (userId == null || userId.isEmpty) return;
 
@@ -495,10 +581,40 @@ class _FriendsScreenState extends State<FriendsScreen>
       }).toList();
     }
 
+    List<dynamic> patchRequestList(
+      List<dynamic> source, {
+      required bool outgoing,
+    }) {
+      return source.map((entry) {
+        if (entry is! Map) {
+          return entry;
+        }
+
+        final request = Map<String, dynamic>.from(entry);
+        final user = _requestUser(request, outgoing: outgoing);
+        if (_userIdFrom(user) != userId) {
+          return request;
+        }
+
+        final updatedUser = Map<String, dynamic>.from(user);
+        final status = updatedUser['status'] is Map
+            ? Map<String, dynamic>.from(updatedUser['status'] as Map)
+            : <String, dynamic>{};
+        status['isOnline'] = isOnline;
+        status['lastActive'] = DateTime.now().toIso8601String();
+        updatedUser['status'] = status;
+        request[outgoing ? 'user' : 'from'] = updatedUser;
+        return request;
+      }).toList();
+    }
+
     _safeSetState(() {
       _onlineFriends = patchList(_onlineFriends);
       _allFriends = patchList(_allFriends);
       _suggestions = patchList(_suggestions);
+      _blockedUsers = patchList(_blockedUsers);
+      _incomingRequests = patchRequestList(_incomingRequests, outgoing: false);
+      _outgoingRequests = patchRequestList(_outgoingRequests, outgoing: true);
     });
   }
 
@@ -537,7 +653,9 @@ class _FriendsScreenState extends State<FriendsScreen>
   Future<void> _handleAcceptRequest(String userId) async {
     final success = await FriendService.acceptFriendRequest(userId);
     if (success && mounted) {
-      await _loadData();
+      _removeRequestsForUser(userId);
+      _removeSuggestionByUserId(userId);
+      unawaited(_loadData(silent: true));
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -552,7 +670,8 @@ class _FriendsScreenState extends State<FriendsScreen>
   Future<void> _handleRejectRequest(String userId) async {
     final success = await FriendService.rejectFriendRequest(userId);
     if (success && mounted) {
-      await _loadData();
+      _removeRequestsForUser(userId);
+      unawaited(_loadData(silent: true));
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -587,7 +706,8 @@ class _FriendsScreenState extends State<FriendsScreen>
     if (confirm == true) {
       final success = await FriendService.removeFriend(userId);
       if (success && mounted) {
-        await _loadData();
+        _removeFromFriendCollections(userId);
+        unawaited(_loadData(silent: true));
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
@@ -603,7 +723,8 @@ class _FriendsScreenState extends State<FriendsScreen>
   Future<void> _handleSendRequest(String userId, String username) async {
     final success = await FriendService.sendFriendRequest(userId);
     if (success && mounted) {
-      await _loadData();
+      _removeSuggestionByUserId(userId);
+      unawaited(_loadData(silent: true));
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -636,9 +757,16 @@ class _FriendsScreenState extends State<FriendsScreen>
     );
 
     if (confirm == true) {
+      final knownUser = _findKnownUser(userId);
       final success = await FriendService.blockUser(userId);
       if (success && mounted) {
-        await _loadData();
+        _removeSuggestionByUserId(userId);
+        _removeRequestsForUser(userId);
+        _removeFromFriendCollections(userId);
+        if (knownUser != null) {
+          _upsertBlockedUser(knownUser);
+        }
+        unawaited(_loadData(silent: true));
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
@@ -674,7 +802,8 @@ class _FriendsScreenState extends State<FriendsScreen>
     if (confirm == true) {
       final success = await FriendService.unblockUser(userId);
       if (success && mounted) {
-        await _loadData();
+        _removeBlockedUserByUserId(userId);
+        unawaited(_loadData(silent: true));
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
@@ -765,7 +894,7 @@ class _FriendsScreenState extends State<FriendsScreen>
                                   color: AppColors.textSecondary)),
                           const SizedBox(height: 24),
                           ElevatedButton(
-                            onPressed: _loadData,
+                            onPressed: () => _loadData(),
                             style: ElevatedButton.styleFrom(
                                 backgroundColor: AppColors.primaryBlue,
                                 foregroundColor: Colors.white),
@@ -775,7 +904,7 @@ class _FriendsScreenState extends State<FriendsScreen>
                       ),
                     )
                   : RefreshIndicator(
-                      onRefresh: _loadData,
+                      onRefresh: () => _loadData(silent: true),
                       color: AppColors.primaryBlue,
                       child: TabBarView(
                         controller: _tabController,

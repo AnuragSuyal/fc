@@ -6,6 +6,8 @@ class RoomControlBottomSheet extends StatelessWidget {
   final bool canOpenRoomSettings;
   final bool canChangeRoomMode;
   final bool canEditAnnouncement;
+  final bool canInviteUsers;
+  final bool canRallyFans;
   final VoidCallback onExit;
   final VoidCallback onSettings;
   final VoidCallback onInvite;
@@ -24,6 +26,8 @@ class RoomControlBottomSheet extends StatelessWidget {
     required this.canOpenRoomSettings,
     required this.canChangeRoomMode,
     required this.canEditAnnouncement,
+    required this.canInviteUsers,
+    required this.canRallyFans,
     required this.onExit,
     required this.onSettings,
     required this.onInvite,
@@ -373,15 +377,17 @@ class RoomControlBottomSheet extends StatelessWidget {
               borderRadius: BorderRadius.circular(24),
               border: Border.all(color: Colors.white10),
             ),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-              children: [
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                  children: [
                 _buildConnectAction(
-                    'Rally', Icons.campaign_rounded, onRallyFans),
+                    'Rally', Icons.campaign_rounded, onRallyFans,
+                    enabled: canRallyFans),
                 _buildConnectAction(
                     'Sounds', Icons.music_note_rounded, onGiftSound),
                 _buildConnectAction(
-                    'Invite', Icons.person_add_alt_1_rounded, onInvite),
+                    'Invite', Icons.person_add_alt_1_rounded, onInvite,
+                    enabled: canInviteUsers),
               ],
             ),
           ),
@@ -390,25 +396,36 @@ class RoomControlBottomSheet extends StatelessWidget {
     );
   }
 
-  Widget _buildConnectAction(String label, IconData icon, VoidCallback onTap) {
+  Widget _buildConnectAction(
+    String label,
+    IconData icon,
+    VoidCallback onTap, {
+    bool enabled = true,
+  }) {
     return GestureDetector(
-      onTap: onTap,
+      onTap: enabled ? onTap : null,
       child: Column(
         children: [
           Container(
             width: 56,
             height: 56,
             decoration: BoxDecoration(
-              color: Colors.white.withValues(alpha: 0.05),
+              color: enabled
+                  ? Colors.white.withValues(alpha: 0.05)
+                  : Colors.white.withValues(alpha: 0.02),
               borderRadius: BorderRadius.circular(16),
             ),
-            child: Icon(icon, color: Colors.white70, size: 24),
+            child: Icon(
+              icon,
+              color: enabled ? Colors.white70 : Colors.white30,
+              size: 24,
+            ),
           ),
           const SizedBox(height: 8),
           Text(
             label,
-            style: const TextStyle(
-              color: Colors.white70,
+            style: TextStyle(
+              color: enabled ? Colors.white70 : Colors.white30,
               fontSize: 11,
               fontWeight: FontWeight.w500,
             ),

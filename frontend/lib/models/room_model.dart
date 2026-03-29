@@ -10,6 +10,7 @@ class RoomSettings {
   final bool banRedPacket;
   final bool allowGifts;
   final bool stageJoinsLocked;
+  final bool allowAdminSeatControl;
   final int maxActiveSpeakers;
   final bool requireApproval;
 
@@ -23,6 +24,7 @@ class RoomSettings {
     required this.banRedPacket,
     required this.allowGifts,
     required this.stageJoinsLocked,
+    required this.allowAdminSeatControl,
     required this.maxActiveSpeakers,
     required this.requireApproval,
   });
@@ -38,6 +40,7 @@ class RoomSettings {
       banRedPacket: json['banRedPacket'] ?? false,
       allowGifts: json['allowGifts'] ?? true,
       stageJoinsLocked: json['stageJoinsLocked'] ?? false,
+      allowAdminSeatControl: json['allowAdminSeatControl'] ?? true,
       maxActiveSpeakers: json['maxActiveSpeakers'] ?? 8,
       requireApproval: json['requireApproval'] ?? false,
     );
@@ -53,6 +56,7 @@ class RoomSettings {
     bool? banRedPacket,
     bool? allowGifts,
     bool? stageJoinsLocked,
+    bool? allowAdminSeatControl,
     int? maxActiveSpeakers,
     bool? requireApproval,
   }) {
@@ -66,6 +70,8 @@ class RoomSettings {
       banRedPacket: banRedPacket ?? this.banRedPacket,
       allowGifts: allowGifts ?? this.allowGifts,
       stageJoinsLocked: stageJoinsLocked ?? this.stageJoinsLocked,
+      allowAdminSeatControl:
+          allowAdminSeatControl ?? this.allowAdminSeatControl,
       maxActiveSpeakers: maxActiveSpeakers ?? this.maxActiveSpeakers,
       requireApproval: requireApproval ?? this.requireApproval,
     );
@@ -160,6 +166,71 @@ class Participant {
   }
 }
 
+class RoomSeatState {
+  final int seatIndex;
+  final String? occupiedByUserId;
+  final bool isLocked;
+  final String? lockedByUserId;
+  final DateTime? lockedAt;
+  final String lockReason;
+  final String seatType;
+  final DateTime? updatedAt;
+
+  const RoomSeatState({
+    required this.seatIndex,
+    this.occupiedByUserId,
+    this.isLocked = false,
+    this.lockedByUserId,
+    this.lockedAt,
+    this.lockReason = '',
+    this.seatType = 'speaker',
+    this.updatedAt,
+  });
+
+  factory RoomSeatState.fromJson(Map<String, dynamic> json) {
+    return RoomSeatState(
+      seatIndex: json['seatIndex'] is int
+          ? json['seatIndex'] as int
+          : int.tryParse('${json['seatIndex']}') ?? 0,
+      occupiedByUserId: json['occupiedByUserId']?.toString(),
+      isLocked: json['isLocked'] == true,
+      lockedByUserId: json['lockedByUserId']?.toString(),
+      lockedAt: json['lockedAt'] != null
+          ? DateTime.tryParse(json['lockedAt'].toString())
+          : null,
+      lockReason: json['lockReason']?.toString() ?? '',
+      seatType: json['seatType']?.toString() ?? 'speaker',
+      updatedAt: json['updatedAt'] != null
+          ? DateTime.tryParse(json['updatedAt'].toString())
+          : null,
+    );
+  }
+
+  RoomSeatState copyWith({
+    String? occupiedByUserId,
+    bool? isLocked,
+    String? lockedByUserId,
+    DateTime? lockedAt,
+    String? lockReason,
+    String? seatType,
+    DateTime? updatedAt,
+  }) {
+    return RoomSeatState(
+      seatIndex: seatIndex,
+      occupiedByUserId: occupiedByUserId ?? this.occupiedByUserId,
+      isLocked: isLocked ?? this.isLocked,
+      lockedByUserId: lockedByUserId ?? this.lockedByUserId,
+      lockedAt: lockedAt ?? this.lockedAt,
+      lockReason: lockReason ?? this.lockReason,
+      seatType: seatType ?? this.seatType,
+      updatedAt: updatedAt ?? this.updatedAt,
+    );
+  }
+
+  bool get isOccupied =>
+      occupiedByUserId != null && occupiedByUserId!.isNotEmpty;
+}
+
 class RoomYoutubeQueueItem {
   final String videoId;
   final String url;
@@ -217,6 +288,7 @@ class RoomModel {
   final String name;
   final String description;
   final String type;
+  final String mode;
   final String category;
   final List<String> tags;
 
@@ -230,6 +302,7 @@ class RoomModel {
   final int participantCount;
   final int onlineCount;
   final List<Participant> participants;
+  final List<RoomSeatState> seatStates;
   final List<int> lockedSeats;
   final List<String> followerIds;
   final List<String> coHostIds;
@@ -249,6 +322,8 @@ class RoomModel {
   final String? youtubeTitle;
   final String? youtubeThumbnail;
   final List<RoomYoutubeQueueItem> youtubeQueue;
+  final String? youtubeActiveVideoId;
+  final int youtubeSessionVersion;
   final int youtubePositionMs;
   final String youtubePlaybackState;
   final DateTime? youtubeSyncedAt;
@@ -263,6 +338,8 @@ class RoomModel {
 
   final DateTime createdAt;
   final DateTime? endedAt;
+  final Map<String, bool> capabilities;
+  final Map<String, dynamic> roomSettingsSnapshot;
 
   RoomModel({
     required this.id,
@@ -270,6 +347,7 @@ class RoomModel {
     required this.name,
     required this.description,
     required this.type,
+    this.mode = 'normal',
     required this.category,
     required this.tags,
     required this.hostId,
@@ -280,6 +358,7 @@ class RoomModel {
     required this.participantCount,
     required this.onlineCount,
     required this.participants,
+    this.seatStates = const [],
     required this.lockedSeats,
     required this.followerIds,
     required this.coHostIds,
@@ -296,6 +375,8 @@ class RoomModel {
     this.youtubeTitle,
     this.youtubeThumbnail,
     this.youtubeQueue = const [],
+    this.youtubeActiveVideoId,
+    this.youtubeSessionVersion = 0,
     this.youtubePositionMs = 0,
     this.youtubePlaybackState = 'paused',
     this.youtubeSyncedAt,
@@ -309,6 +390,8 @@ class RoomModel {
     this.rallyExpiresAt,
     required this.createdAt,
     this.endedAt,
+    this.capabilities = const {},
+    this.roomSettingsSnapshot = const {},
   });
 
   factory RoomModel.fromJson(Map<String, dynamic> json) {
@@ -335,6 +418,35 @@ class RoomModel {
         : <String, dynamic>{};
 
     final announcementValue = json['announcement'];
+    final capabilitiesMap = json['capabilities'] is Map<String, dynamic>
+        ? (json['capabilities'] as Map<String, dynamic>)
+            .map((key, value) => MapEntry(key, value == true))
+        : <String, bool>{};
+    final roomSettingsSnapshot = json['roomSettings'] is Map<String, dynamic>
+        ? Map<String, dynamic>.from(
+            json['roomSettings'] as Map<String, dynamic>)
+        : <String, dynamic>{};
+    final rawLockedSeats = json['lockedSeats'] is List
+        ? (json['lockedSeats'] as List)
+            .map((seat) => seat is int ? seat : int.tryParse('$seat'))
+            .whereType<int>()
+            .toList()
+        : const <int>[];
+    final roomSettingsSeatItems =
+        roomSettingsSnapshot['seats'] is Map<String, dynamic>
+            ? (roomSettingsSnapshot['seats'] as Map<String, dynamic>)['items']
+            : null;
+    final seatStates = _parseSeatStates(
+      json['seatStates'] ?? roomSettingsSeatItems,
+      participantsList,
+      rawLockedSeats,
+    );
+    final lockedSeats = seatStates.isNotEmpty
+        ? seatStates
+            .where((seatState) => seatState.isLocked)
+            .map((seatState) => seatState.seatIndex)
+            .toList()
+        : rawLockedSeats;
     final rallyExpiresAt = json['rallyExpiresAt'] != null
         ? DateTime.tryParse(json['rallyExpiresAt'].toString())
         : null;
@@ -347,6 +459,12 @@ class RoomModel {
       name: json['name']?.toString() ?? 'Unnamed Room',
       description: json['description']?.toString() ?? '',
       type: json['type']?.toString() ?? 'voice',
+      mode: json['mode']?.toString() ??
+          (json['type']?.toString() == 'auction'
+              ? 'auction'
+              : json['type']?.toString() == 'chat'
+                  ? 'acquaint'
+                  : 'normal'),
       category: json['category']?.toString() ?? 'all',
       tags: json['tags'] is List ? List<String>.from(json['tags']) : [],
       hostId: hostUser?.id ?? (hostJson is String ? hostJson : ''),
@@ -357,12 +475,8 @@ class RoomModel {
       participantCount: json['participantCount'] ?? participantsList.length,
       onlineCount: json['onlineCount'] ?? 0,
       participants: participantsList,
-      lockedSeats: json['lockedSeats'] is List
-          ? (json['lockedSeats'] as List)
-              .map((seat) => seat is int ? seat : int.tryParse('$seat'))
-              .whereType<int>()
-              .toList()
-          : const [],
+      seatStates: seatStates,
+      lockedSeats: lockedSeats,
       followerIds: _parseIdList(json['followers']),
       coHostIds: _parseIdList(json['coHosts']),
       moderatorIds: _parseIdList(json['moderators']),
@@ -388,6 +502,10 @@ class RoomModel {
               .where((entry) => entry.url.isNotEmpty)
               .toList()
           : const [],
+      youtubeActiveVideoId: themeMap['youtubeActiveVideoId']?.toString(),
+      youtubeSessionVersion: themeMap['youtubeSessionVersion'] is int
+          ? themeMap['youtubeSessionVersion'] as int
+          : int.tryParse('${themeMap['youtubeSessionVersion']}') ?? 0,
       youtubePositionMs: themeMap['youtubePositionMs'] is int
           ? themeMap['youtubePositionMs'] as int
           : int.tryParse('${themeMap['youtubePositionMs']}') ?? 0,
@@ -412,15 +530,20 @@ class RoomModel {
       endedAt: json['endedAt'] != null
           ? DateTime.parse(json['endedAt'].toString())
           : null,
+      capabilities: capabilitiesMap,
+      roomSettingsSnapshot: roomSettingsSnapshot,
     );
   }
 
   RoomModel copyWith({
     String? name,
+    String? type,
+    String? mode,
     String? category,
     int? onlineCount,
     int? participantCount,
     List<Participant>? participants,
+    List<RoomSeatState>? seatStates,
     List<int>? lockedSeats,
     List<String>? followerIds,
     int? followers,
@@ -433,6 +556,8 @@ class RoomModel {
     String? youtubeTitle,
     String? youtubeThumbnail,
     List<RoomYoutubeQueueItem>? youtubeQueue,
+    String? youtubeActiveVideoId,
+    int? youtubeSessionVersion,
     int? youtubePositionMs,
     String? youtubePlaybackState,
     DateTime? youtubeSyncedAt,
@@ -441,13 +566,24 @@ class RoomModel {
     bool? musicLoop,
     bool? isRallyActive,
     DateTime? rallyExpiresAt,
+    Map<String, bool>? capabilities,
+    Map<String, dynamic>? roomSettingsSnapshot,
   }) {
+    final nextSeatStates = seatStates ?? this.seatStates;
+    final nextLockedSeats = lockedSeats ??
+        (seatStates != null
+            ? nextSeatStates
+                .where((seatState) => seatState.isLocked)
+                .map((seatState) => seatState.seatIndex)
+                .toList()
+            : this.lockedSeats);
     return RoomModel(
       id: id,
       roomId: roomId,
       name: name ?? this.name,
       description: description,
-      type: type,
+      type: type ?? this.type,
+      mode: mode ?? this.mode,
       category: category ?? this.category,
       tags: tags,
       hostId: hostId,
@@ -458,7 +594,8 @@ class RoomModel {
       participantCount: participantCount ?? this.participantCount,
       onlineCount: onlineCount ?? this.onlineCount,
       participants: participants ?? this.participants,
-      lockedSeats: lockedSeats ?? this.lockedSeats,
+      seatStates: nextSeatStates,
+      lockedSeats: nextLockedSeats,
       followerIds: followerIds ?? this.followerIds,
       coHostIds: coHostIds,
       moderatorIds: moderatorIds,
@@ -474,6 +611,9 @@ class RoomModel {
       youtubeTitle: youtubeTitle ?? this.youtubeTitle,
       youtubeThumbnail: youtubeThumbnail ?? this.youtubeThumbnail,
       youtubeQueue: youtubeQueue ?? this.youtubeQueue,
+      youtubeActiveVideoId: youtubeActiveVideoId ?? this.youtubeActiveVideoId,
+      youtubeSessionVersion:
+          youtubeSessionVersion ?? this.youtubeSessionVersion,
       youtubePositionMs: youtubePositionMs ?? this.youtubePositionMs,
       youtubePlaybackState: youtubePlaybackState ?? this.youtubePlaybackState,
       youtubeSyncedAt: youtubeSyncedAt ?? this.youtubeSyncedAt,
@@ -487,6 +627,8 @@ class RoomModel {
       rallyExpiresAt: rallyExpiresAt ?? this.rallyExpiresAt,
       createdAt: createdAt,
       endedAt: endedAt,
+      capabilities: capabilities ?? this.capabilities,
+      roomSettingsSnapshot: roomSettingsSnapshot ?? this.roomSettingsSnapshot,
     );
   }
 
@@ -506,8 +648,30 @@ class RoomModel {
     return followerIds.contains(userId);
   }
 
+  RoomSeatState? seatStateFor(int seatIndex) {
+    for (final seatState in seatStates) {
+      if (seatState.seatIndex == seatIndex) {
+        return seatState;
+      }
+    }
+    if (seatIndex < 1) return null;
+    String? occupiedByUserId;
+    for (final participant in participants) {
+      if (participant.seatIndex == seatIndex) {
+        occupiedByUserId = participant.userId;
+        break;
+      }
+    }
+    return RoomSeatState(
+      seatIndex: seatIndex,
+      occupiedByUserId: occupiedByUserId,
+      isLocked: lockedSeats.contains(seatIndex),
+      seatType: 'speaker',
+    );
+  }
+
   bool isLockedSeat(int seatIndex) {
-    return lockedSeats.contains(seatIndex);
+    return seatStateFor(seatIndex)?.isLocked == true;
   }
 
   bool get isPrivate => settings.isPrivate;
@@ -519,6 +683,7 @@ class RoomModel {
   bool get banRedPacket => settings.banRedPacket;
   bool get allowGifts => settings.allowGifts;
   bool get stageJoinsLocked => settings.stageJoinsLocked;
+  bool get allowAdminSeatControl => settings.allowAdminSeatControl;
   int get maxActiveSpeakers => settings.maxActiveSpeakers;
   bool get requireApproval => settings.requireApproval;
   bool get isYoutubePlaying => youtubePlaybackState == 'playing';
@@ -538,5 +703,43 @@ class RoomModel {
         })
         .where((id) => id.isNotEmpty)
         .toList();
+  }
+
+  static List<RoomSeatState> _parseSeatStates(
+    dynamic value,
+    List<Participant> participants,
+    List<int> fallbackLockedSeats,
+  ) {
+    final parsed = <RoomSeatState>[];
+    if (value is List) {
+      for (final entry in value) {
+        if (entry is Map<String, dynamic>) {
+          parsed.add(RoomSeatState.fromJson(entry));
+        } else if (entry is Map) {
+          parsed.add(RoomSeatState.fromJson(Map<String, dynamic>.from(entry)));
+        }
+      }
+    }
+    if (parsed.isNotEmpty) {
+      parsed.sort((left, right) => left.seatIndex.compareTo(right.seatIndex));
+      return parsed;
+    }
+
+    return List<RoomSeatState>.generate(8, (index) {
+      final seatIndex = index + 1;
+      String? occupiedByUserId;
+      for (final participant in participants) {
+        if (participant.seatIndex == seatIndex) {
+          occupiedByUserId = participant.userId;
+          break;
+        }
+      }
+      return RoomSeatState(
+        seatIndex: seatIndex,
+        occupiedByUserId: occupiedByUserId,
+        isLocked: fallbackLockedSeats.contains(seatIndex),
+        seatType: 'speaker',
+      );
+    });
   }
 }

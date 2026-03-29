@@ -6,10 +6,12 @@ import 'floating_reaction.dart';
 
 class ReactionAnimationOverlay extends StatefulWidget {
   final Map<int, GlobalKey> seatKeys;
+  final String? filterRoomId;
 
   const ReactionAnimationOverlay({
     super.key,
     required this.seatKeys,
+    this.filterRoomId,
   });
 
   @override
@@ -19,6 +21,7 @@ class ReactionAnimationOverlay extends StatefulWidget {
 
 class _ReactionAnimationOverlayState extends State<ReactionAnimationOverlay> {
   static const int _maxVisibleReactions = 24;
+  static const int _seedChunkMax = 1 << 16;
 
   final List<_PendingReaction> _reactions = [];
   StreamSubscription? _subscription;
@@ -40,12 +43,14 @@ class _ReactionAnimationOverlayState extends State<ReactionAnimationOverlay> {
   void initState() {
     super.initState();
     _subscription = SocketService.reactionStream.listen((data) {
+      if (!_matchesRoom(data)) return;
       final seatIndex = data['seatIndex'] as int? ?? -1;
       final emojis = _extractEmojis(data);
       _triggerReactionBurst(seatIndex: seatIndex, emojis: emojis);
     });
 
     _messageSubscription = SocketService.roomMessageStream.listen((data) {
+      if (!_matchesRoom(data)) return;
       if (data['type'] != 'emoji' || data['emojis'] == null) return;
 
       final seatIndex = data['seatIndex'] as int? ?? -1;
@@ -54,11 +59,20 @@ class _ReactionAnimationOverlayState extends State<ReactionAnimationOverlay> {
     });
 
     _soundSubscription = SocketService.soundStream.listen((data) {
+      if (!_matchesRoom(data)) return;
       final seatIndex = data['seatIndex'] as int? ?? -1;
       final soundId = data['soundId']?.toString();
       final emoji = _soundToEmoji[soundId] ?? '🎵';
       _triggerReactionBurst(seatIndex: seatIndex, emojis: [emoji]);
     });
+  }
+
+  bool _matchesRoom(Map<String, dynamic> data) {
+    final filterRoomId = widget.filterRoomId;
+    if (filterRoomId == null || filterRoomId.isEmpty) {
+      return true;
+    }
+    return data['roomId']?.toString() == filterRoomId;
   }
 
   List<String> _extractEmojis(Map<String, dynamic> data) {
@@ -102,7 +116,7 @@ class _ReactionAnimationOverlayState extends State<ReactionAnimationOverlay> {
                 random.nextDouble() * 42 - 21,
                 -6 - random.nextDouble() * 14,
               ),
-          seed: random.nextInt(1 << 32),
+          seed: _nextSafeSeed(random),
           delayMs: i * 55 + random.nextInt(45),
         ),
     ];
@@ -123,6 +137,12 @@ class _ReactionAnimationOverlayState extends State<ReactionAnimationOverlay> {
     setState(() {
       _reactions.removeWhere((reaction) => reaction.id == id);
     });
+  }
+
+  int _nextSafeSeed(Random random) {
+    final left = random.nextInt(_seedChunkMax);
+    final right = random.nextInt(_seedChunkMax);
+    return (left << 16) ^ right;
   }
 
   @override

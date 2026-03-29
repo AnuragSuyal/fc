@@ -12,10 +12,12 @@ import 'package:frontend/main.dart';
 import 'package:frontend/utils/constants.dart';
 
 void main() {
-  const secureStorageChannel = MethodChannel('plugins.it_nomads.com/flutter_secure_storage');
+  const secureStorageChannel =
+      MethodChannel('plugins.it_nomads.com/flutter_secure_storage');
 
   TestWidgetsFlutterBinding.ensureInitialized();
-  final messenger = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+  final messenger =
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
   messenger.setMockMethodCallHandler(secureStorageChannel, (methodCall) async {
     // Simplest mock for secure storage used during startup.
     switch (methodCall.method) {
@@ -44,9 +46,3 @@ void main() {
     await tester.pumpAndSettle();
   });
 }
-
-
-
-
-
-

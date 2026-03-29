@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import '../../services/ranking_service.dart';
+
 import '../../providers/auth_provider.dart';
+import '../../services/ranking_service.dart';
 import '../../utils/constants.dart';
 import '../../widgets/rounded_scaffold.dart';
 import '../../widgets/user_avatar.dart';
@@ -15,35 +16,38 @@ class RankingsScreen extends StatefulWidget {
 
 class _RankingsScreenState extends State<RankingsScreen>
     with TickerProviderStateMixin {
-  // CHANGED: SingleTickerProvider â†’ TickerProviderStateMixin
-  late TabController _mainTabController;
-  late TabController _periodTabController;
+  late final TabController _mainTabController;
+  late final TabController _periodTabController;
 
-  Map<String, dynamic> _giftRankings = {};
-  Map<String, dynamic> _charmRankings = {};
-  Map<String, dynamic> _werewolfRankings = {};
-  Map<String, dynamic> _drawingRankings = {};
-  Map<String, dynamic> _karaokeRankings = {};
-  Map<String, dynamic> _unoRankings = {};
-  Map<String, dynamic> _overallRankings = {};
+  Map<String, dynamic> _giftRankings = <String, dynamic>{};
+  Map<String, dynamic> _charmRankings = <String, dynamic>{};
+  Map<String, dynamic> _werewolfRankings = <String, dynamic>{};
+  Map<String, dynamic> _drawingRankings = <String, dynamic>{};
+  Map<String, dynamic> _karaokeRankings = <String, dynamic>{};
+  Map<String, dynamic> _colorClashRankings = <String, dynamic>{};
+  Map<String, dynamic> _overallRankings = <String, dynamic>{};
 
   bool _isLoading = true;
   bool _isDisposed = false;
   String _selectedPeriod = 'alltime';
   int _selectedGameIndex = 0;
 
-  final List<Map<String, dynamic>> _periods = [
+  final List<Map<String, dynamic>> _periods = const [
     {'id': 'daily', 'name': 'Daily', 'icon': Icons.today},
     {'id': 'weekly', 'name': 'Weekly', 'icon': Icons.date_range},
     {'id': 'monthly', 'name': 'Monthly', 'icon': Icons.calendar_month},
     {'id': 'alltime', 'name': 'All Time', 'icon': Icons.history},
   ];
 
-  final List<Map<String, dynamic>> _gameTabs = [
-    {'id': 'werewolf', 'name': 'Werewolf', 'icon': 'ðŸº'},
-    {'id': 'drawing', 'name': 'Drawing', 'icon': 'ðŸŽ¨'},
-    {'id': 'karaoke', 'name': 'Karaoke', 'icon': 'ðŸŽ¤'},
-    {'id': 'uno', 'name': 'UNO', 'icon': 'ðŸƒ'},
+  final List<Map<String, dynamic>> _gameTabs = const [
+    {'id': 'werewolf', 'name': 'Werewolf', 'icon': Icons.pets_rounded},
+    {'id': 'drawing', 'name': 'Drawing', 'icon': Icons.brush_rounded},
+    {'id': 'karaoke', 'name': 'Karaoke', 'icon': Icons.mic_rounded},
+    {
+      'id': 'color_clash',
+      'name': 'Color Clash',
+      'icon': Icons.auto_awesome_rounded,
+    },
   ];
 
   @override
@@ -69,25 +73,27 @@ class _RankingsScreenState extends State<RankingsScreen>
   }
 
   void _onMainTabChanged() {
-    if (!_isDisposed && mounted && !_mainTabController.indexIsChanging) {
-      _loadRankingsForTab(_mainTabController.index);
+    if (_isDisposed || !mounted || _mainTabController.indexIsChanging) {
+      return;
     }
+    _loadRankingsForTab(_mainTabController.index);
   }
 
   void _onPeriodChanged() {
-    if (!_isDisposed && mounted && !_periodTabController.indexIsChanging) {
-      setState(() {
-        _selectedPeriod = _periods[_periodTabController.index]['id'];
-      });
-      _loadRankingsForTab(_mainTabController.index);
+    if (_isDisposed || !mounted || _periodTabController.indexIsChanging) {
+      return;
     }
+    setState(() {
+      _selectedPeriod =
+          _periods[_periodTabController.index]['id'].toString();
+    });
+    _loadRankingsForTab(_mainTabController.index);
   }
 
   Future<void> _loadAllRankings() async {
     if (_isDisposed) return;
 
     setState(() => _isLoading = true);
-
     try {
       await Future.wait([
         _loadGiftRankings(),
@@ -95,11 +101,11 @@ class _RankingsScreenState extends State<RankingsScreen>
         _loadGameRankings('werewolf'),
         _loadGameRankings('drawing'),
         _loadGameRankings('karaoke'),
-        _loadGameRankings('uno'),
+        _loadGameRankings('color_clash'),
         _loadOverallRankings(),
       ]);
-    } catch (e) {
-      debugPrint('Error loading rankings: $e');
+    } catch (error) {
+      debugPrint('Error loading rankings: $error');
     } finally {
       if (!_isDisposed && mounted) {
         setState(() => _isLoading = false);
@@ -108,29 +114,26 @@ class _RankingsScreenState extends State<RankingsScreen>
   }
 
   Future<void> _loadRankingsForTab(int index) async {
-    if (_isDisposed) return;
-
-    if (!mounted) return;
+    if (_isDisposed || !mounted) return;
 
     setState(() => _isLoading = true);
-
     try {
       switch (index) {
-        case 0: // Gifts
+        case 0:
           await _loadGiftRankings();
           break;
-        case 1: // Charm
+        case 1:
           await _loadCharmRankings();
           break;
-        case 2: // Games
-          await _loadGameRankings(_gameTabs[_selectedGameIndex]['id']);
+        case 2:
+          await _loadGameRankings(_currentGameId);
           break;
-        case 3: // Overall
+        case 3:
           await _loadOverallRankings();
           break;
       }
-    } catch (e) {
-      debugPrint('Error loading rankings for tab: $e');
+    } catch (error) {
+      debugPrint('Error loading rankings for tab: $error');
     } finally {
       if (!_isDisposed && mounted) {
         setState(() => _isLoading = false);
@@ -179,8 +182,8 @@ class _RankingsScreenState extends State<RankingsScreen>
           case 'karaoke':
             _karaokeRankings = data;
             break;
-          case 'uno':
-            _unoRankings = data;
+          case 'color_clash':
+            _colorClashRankings = data;
             break;
         }
       });
@@ -195,23 +198,25 @@ class _RankingsScreenState extends State<RankingsScreen>
     }
   }
 
+  String get _currentGameId =>
+      _gameTabs[_selectedGameIndex]['id'].toString();
+
   @override
   Widget build(BuildContext context) {
-    if (_isDisposed) return const SizedBox.shrink();
+    if (_isDisposed) {
+      return const SizedBox.shrink();
+    }
 
-    final authProvider = Provider.of<AuthProvider>(context);
-    final currentUserId = authProvider.user?.id;
+    final currentUserId = context.read<AuthProvider>().user?.id;
 
     return RoundedScaffold(
       title: 'Leaderboards',
       body: Column(
         children: [
-          // Header tabs area (inside rounded body)
           Container(
             color: Colors.white,
             child: Column(
               children: [
-                // Main category tabs
                 TabBar(
                   controller: _mainTabController,
                   tabs: const [
@@ -223,13 +228,8 @@ class _RankingsScreenState extends State<RankingsScreen>
                   labelColor: AppColors.primaryBlue,
                   unselectedLabelColor: Colors.grey,
                   indicatorColor: AppColors.primaryBlue,
-                  onTap: (index) {
-                    setState(
-                        () {}); // Ensure state updates for period tabs visibility
-                  },
+                  onTap: (_) => setState(() {}),
                 ),
-
-                // Period tabs (only for non-overall tabs)
                 if (_mainTabController.index != 3)
                   Container(
                     margin: const EdgeInsets.symmetric(vertical: 8),
@@ -237,11 +237,13 @@ class _RankingsScreenState extends State<RankingsScreen>
                       controller: _periodTabController,
                       isScrollable: true,
                       tabs: _periods
-                          .map((p) => Tab(
-                                text: p['name'],
-                                icon: Icon(p['icon'], size: 16),
-                              ))
-                          .toList(),
+                          .map(
+                            (period) => Tab(
+                              text: period['name'].toString(),
+                              icon: Icon(period['icon'] as IconData, size: 16),
+                            ),
+                          )
+                          .toList(growable: false),
                       labelColor: AppColors.primaryBlue,
                       unselectedLabelColor: Colors.grey,
                       indicatorColor: AppColors.primaryBlue,
@@ -257,28 +259,21 @@ class _RankingsScreenState extends State<RankingsScreen>
                 : IndexedStack(
                     index: _mainTabController.index,
                     children: [
-                      // Gifts tab
                       _buildRankingsList(
-                        _giftRankings['rankings'] ?? [],
-                        _giftRankings['userRank'],
+                        _giftRankings['rankings'] as List<dynamic>? ?? const [],
+                        _giftRankings['userRank'] as Map<String, dynamic>?,
                         currentUserId,
                         'gifts',
                       ),
-
-                      // Charm tab
                       _buildRankingsList(
-                        _charmRankings['rankings'] ?? [],
-                        _charmRankings['userRank'],
+                        _charmRankings['rankings'] as List<dynamic>? ?? const [],
+                        _charmRankings['userRank'] as Map<String, dynamic>?,
                         currentUserId,
                         'charm',
                       ),
-
-                      // Games tab
                       _buildGamesTab(currentUserId),
-
-                      // Overall tab
                       _buildRankingsList(
-                        _overallRankings['rankings'] ?? [],
+                        _overallRankings['rankings'] as List<dynamic>? ?? const [],
                         null,
                         currentUserId,
                         'overall',
@@ -294,9 +289,8 @@ class _RankingsScreenState extends State<RankingsScreen>
   Widget _buildGamesTab(String? currentUserId) {
     return Column(
       children: [
-        // Game selector chips
         Container(
-          height: 50,
+          height: 56,
           padding: const EdgeInsets.symmetric(horizontal: 16),
           child: ListView.builder(
             scrollDirection: Axis.horizontal,
@@ -304,30 +298,37 @@ class _RankingsScreenState extends State<RankingsScreen>
             itemBuilder: (context, index) {
               final game = _gameTabs[index];
               final isSelected = _selectedGameIndex == index;
+              final icon = game['icon'] as IconData;
 
               return Padding(
                 padding: const EdgeInsets.only(right: 8),
                 child: FilterChip(
                   label: Row(
+                    mainAxisSize: MainAxisSize.min,
                     children: [
-                      Text(game['icon']),
-                      const SizedBox(width: 4),
-                      Text(game['name']),
+                      Icon(
+                        icon,
+                        size: 16,
+                        color: isSelected
+                            ? AppColors.primaryBlue
+                            : Colors.black87,
+                      ),
+                      const SizedBox(width: 6),
+                      Text(game['name'].toString()),
                     ],
                   ),
                   selected: isSelected,
-                  onSelected: (selected) {
-                    if (!_isDisposed && mounted) {
-                      setState(() {
-                        _selectedGameIndex = index;
-                        _isLoading = true;
-                      });
-                      _loadGameRankings(game['id']).then((_) {
-                        if (!_isDisposed && mounted) {
-                          setState(() => _isLoading = false);
-                        }
-                      });
-                    }
+                  onSelected: (_) {
+                    if (_isDisposed || !mounted) return;
+                    setState(() {
+                      _selectedGameIndex = index;
+                      _isLoading = true;
+                    });
+                    _loadGameRankings(game['id'].toString()).then((_) {
+                      if (!_isDisposed && mounted) {
+                        setState(() => _isLoading = false);
+                      }
+                    });
                   },
                   backgroundColor: Colors.grey.shade100,
                   selectedColor: AppColors.primaryBlue.withValues(alpha: 0.1),
@@ -340,10 +341,7 @@ class _RankingsScreenState extends State<RankingsScreen>
             },
           ),
         ),
-
         const SizedBox(height: 8),
-
-        // Game rankings
         Expanded(
           child: _buildRankingsList(
             _getCurrentGameRankings(),
@@ -357,30 +355,30 @@ class _RankingsScreenState extends State<RankingsScreen>
   }
 
   List<dynamic> _getCurrentGameRankings() {
-    switch (_gameTabs[_selectedGameIndex]['id']) {
+    switch (_currentGameId) {
       case 'werewolf':
-        return _werewolfRankings['rankings'] ?? [];
+        return _werewolfRankings['rankings'] as List<dynamic>? ?? const [];
       case 'drawing':
-        return _drawingRankings['rankings'] ?? [];
+        return _drawingRankings['rankings'] as List<dynamic>? ?? const [];
       case 'karaoke':
-        return _karaokeRankings['rankings'] ?? [];
-      case 'uno':
-        return _unoRankings['rankings'] ?? [];
+        return _karaokeRankings['rankings'] as List<dynamic>? ?? const [];
+      case 'color_clash':
+        return _colorClashRankings['rankings'] as List<dynamic>? ?? const [];
       default:
-        return [];
+        return const [];
     }
   }
 
   Map<String, dynamic>? _getCurrentGameUserRank() {
-    switch (_gameTabs[_selectedGameIndex]['id']) {
+    switch (_currentGameId) {
       case 'werewolf':
-        return _werewolfRankings['userRank'];
+        return _werewolfRankings['userRank'] as Map<String, dynamic>?;
       case 'drawing':
-        return _drawingRankings['userRank'];
+        return _drawingRankings['userRank'] as Map<String, dynamic>?;
       case 'karaoke':
-        return _karaokeRankings['userRank'];
-      case 'uno':
-        return _unoRankings['userRank'];
+        return _karaokeRankings['userRank'] as Map<String, dynamic>?;
+      case 'color_clash':
+        return _colorClashRankings['userRank'] as Map<String, dynamic>?;
       default:
         return null;
     }
@@ -392,7 +390,9 @@ class _RankingsScreenState extends State<RankingsScreen>
     String? currentUserId,
     String type,
   ) {
-    if (_isDisposed) return const SizedBox.shrink();
+    if (_isDisposed) {
+      return const SizedBox.shrink();
+    }
 
     if (rankings.isEmpty) {
       return Center(
@@ -407,10 +407,7 @@ class _RankingsScreenState extends State<RankingsScreen>
             const SizedBox(height: 16),
             Text(
               'No rankings yet',
-              style: TextStyle(
-                fontSize: 18,
-                color: Colors.grey.shade600,
-              ),
+              style: TextStyle(fontSize: 18, color: Colors.grey.shade600),
             ),
             const SizedBox(height: 8),
             Text(
@@ -424,7 +421,6 @@ class _RankingsScreenState extends State<RankingsScreen>
 
     return Column(
       children: [
-        // User's rank card (if available)
         if (userRank != null)
           Container(
             margin: const EdgeInsets.all(16),
@@ -433,7 +429,8 @@ class _RankingsScreenState extends State<RankingsScreen>
               color: AppColors.primaryBlue.withValues(alpha: 0.1),
               borderRadius: BorderRadius.circular(12),
               border: Border.all(
-                  color: AppColors.primaryBlue.withValues(alpha: 0.3)),
+                color: AppColors.primaryBlue.withValues(alpha: 0.3),
+              ),
             ),
             child: Row(
               children: [
@@ -475,14 +472,12 @@ class _RankingsScreenState extends State<RankingsScreen>
               ],
             ),
           ),
-
-        // Rankings list
         Expanded(
           child: ListView.builder(
             padding: const EdgeInsets.all(16),
             itemCount: rankings.length,
             itemBuilder: (context, index) {
-              final rank = rankings[index];
+              final rank = rankings[index] as Map<String, dynamic>;
               final isCurrentUser = rank['userId'] == currentUserId;
 
               return Container(
@@ -501,7 +496,6 @@ class _RankingsScreenState extends State<RankingsScreen>
                 ),
                 child: Row(
                   children: [
-                    // Rank badge
                     Container(
                       width: 36,
                       height: 36,
@@ -520,26 +514,25 @@ class _RankingsScreenState extends State<RankingsScreen>
                       ),
                     ),
                     const SizedBox(width: 12),
-
-                    // Avatar
                     UserAvatar(
-                      imageUrl: rank['avatar'],
-                      username: rank['username'] ?? '',
+                      imageUrl: rank['avatar']?.toString(),
+                      username: rank['username']?.toString() ?? '',
                       radius: 20,
                     ),
                     const SizedBox(width: 12),
-
-                    // User info
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Row(
                             children: [
-                              Text(
-                                rank['username'] ?? 'Unknown',
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.bold,
+                              Flexible(
+                                child: Text(
+                                  rank['username']?.toString() ?? 'Unknown',
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.bold,
+                                  ),
                                 ),
                               ),
                               if ((rank['vipLevel'] ?? 0) > 0) ...[
@@ -562,8 +555,6 @@ class _RankingsScreenState extends State<RankingsScreen>
                         ],
                       ),
                     ),
-
-                    // Score
                     Container(
                       padding: const EdgeInsets.symmetric(
                         horizontal: 12,
@@ -659,9 +650,3 @@ class _RankingsScreenState extends State<RankingsScreen>
     }
   }
 }
-
-
-
-
-
-

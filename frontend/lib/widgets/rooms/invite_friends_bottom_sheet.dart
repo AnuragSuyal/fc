@@ -255,13 +255,31 @@ class _InviteFriendsBottomSheetState extends State<InviteFriendsBottomSheet> {
               ),
               child: TextField(
                 controller: _searchController,
+                cursorColor: Colors.white,
                 style: const TextStyle(color: Colors.white),
+                textInputAction: TextInputAction.search,
                 onChanged: (value) => setState(() => _searchQuery = value),
                 decoration: InputDecoration(
-                  icon: const AppSearchIcon(size: 20),
+                  filled: false,
+                  fillColor: Colors.transparent,
+                  isDense: true,
+                  contentPadding: const EdgeInsets.symmetric(vertical: 12),
+                  prefixIcon: const Padding(
+                    padding: EdgeInsets.only(right: 12),
+                    child: AppSearchIcon(size: 20),
+                  ),
+                  prefixIconConstraints: const BoxConstraints(
+                    minWidth: 20,
+                    minHeight: 20,
+                  ),
                   hintText: 'Search friends by name or UID',
                   hintStyle:
                       TextStyle(color: Colors.white.withValues(alpha: 0.32)),
+                  suffixIconColor: Colors.white38,
+                  suffixIconConstraints: const BoxConstraints(
+                    minWidth: 36,
+                    minHeight: 20,
+                  ),
                   suffixIcon: _searchQuery.isEmpty
                       ? null
                       : IconButton(
@@ -275,6 +293,9 @@ class _InviteFriendsBottomSheetState extends State<InviteFriendsBottomSheet> {
                           ),
                         ),
                   border: InputBorder.none,
+                  enabledBorder: InputBorder.none,
+                  focusedBorder: InputBorder.none,
+                  disabledBorder: InputBorder.none,
                 ),
               ),
             ),

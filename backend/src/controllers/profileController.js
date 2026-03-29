@@ -15,13 +15,13 @@ const buildProfileStats = (user) => {
         (user.gameStats?.werewolf?.played || 0) +
         (user.gameStats?.drawing?.played || 0) +
         (user.gameStats?.karaoke?.played || 0) +
-        (user.gameStats?.uno?.played || 0);
+        (user.gameStats?.colorClash?.played || 0);
 
     const totalWins =
         (user.gameStats?.werewolf?.won || 0) +
         (user.gameStats?.drawing?.won || 0) +
         (user.gameStats?.karaoke?.won || 0) +
-        (user.gameStats?.uno?.won || 0);
+        (user.gameStats?.colorClash?.won || 0);
 
     const winRate = totalGames > 0 ? ((totalWins / totalGames) * 100).toFixed(1) : 0;
 
@@ -392,7 +392,7 @@ exports.addVisitor = async (req, res, next) => {
 exports.updateGameStats = async (req, res, next) => {
     try {
         const { game, won } = req.body;
-        const validGames = ['werewolf', 'drawing', 'karaoke', 'uno'];
+        const validGames = ['werewolf', 'drawing', 'karaoke', 'colorClash'];
         if (!validGames.includes(game)) {
             const error = new Error('Invalid game');
             error.status = 400;

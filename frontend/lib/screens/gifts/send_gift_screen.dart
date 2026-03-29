@@ -8,6 +8,7 @@ import '../../models/user_model.dart';
 import '../../utils/constants.dart';
 import '../../widgets/app_search_icon.dart';
 import '../../widgets/currency_icon.dart';
+import '../../widgets/gift_image.dart';
 import '../../widgets/user_avatar.dart';
 
 class SendGiftScreen extends StatefulWidget {
@@ -116,13 +117,18 @@ class _SendGiftScreenState extends State<SendGiftScreen> {
       showDialog(
         context: context,
         builder: (context) => AlertDialog(
-          title: const Text('Gift Sent! ðŸŽ'),
+          title: const Text('Gift Sent!'),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Text(
-                widget.gift.icon,
-                style: const TextStyle(fontSize: 64),
+              GiftImage(
+                source: widget.gift.artworkSource,
+                width: 72,
+                height: 72,
+                fallback: const Icon(
+                  Icons.card_giftcard_rounded,
+                  size: 52,
+                ),
               ),
               const SizedBox(height: 16),
               Text(
@@ -215,9 +221,14 @@ class _SendGiftScreenState extends State<SendGiftScreen> {
                       ),
                       child: Column(
                         children: [
-                          Text(
-                            widget.gift.icon,
-                            style: const TextStyle(fontSize: 80),
+                          GiftImage(
+                            source: widget.gift.artworkSource,
+                            width: 96,
+                            height: 96,
+                            fallback: const Icon(
+                              Icons.card_giftcard_rounded,
+                              size: 64,
+                            ),
                           ),
                           const SizedBox(height: 16),
                           Text(
@@ -561,3 +572,4 @@ class _SendGiftScreenState extends State<SendGiftScreen> {
     );
   }
 }
+

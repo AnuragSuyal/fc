@@ -1450,9 +1450,9 @@ class _EnhancedProfileScreenState extends State<EnhancedProfileScreen>
         color: const Color(0xFFB56CFF),
       ),
       (
-        key: 'uno',
-        title: 'UNO',
-        icon: Icons.casino_rounded,
+        key: 'colorClash',
+        title: 'Color Clash',
+        icon: Icons.auto_awesome_rounded,
         color: const Color(0xFF34D399),
       ),
     ];

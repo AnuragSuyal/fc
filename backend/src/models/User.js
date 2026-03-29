@@ -35,7 +35,7 @@ const allocateNextUserUid = async () => {
             $inc: { seq: 1 }
         },
         {
-            new: true
+            returnDocument: 'after'
         }
     );
 
@@ -103,6 +103,10 @@ const userSchema = new mongoose.Schema({
         trim: true,
         default: 'Global'
     },
+    isGuest: {
+        type: Boolean,
+        default: false
+    },
 
     // Profile views/visitors
     profileVisitors: [{
@@ -137,6 +141,19 @@ const userSchema = new mongoose.Schema({
             won: { type: Number, default: 0 },
             level: { type: Number, default: 1 },
             strategy: String
+        },
+        colorClash: {
+            played: { type: Number, default: 0 },
+            won: { type: Number, default: 0 },
+            casualPlayed: { type: Number, default: 0 },
+            casualWon: { type: Number, default: 0 },
+            level: { type: Number, default: 1 },
+            rankedPlayed: { type: Number, default: 0 },
+            rankedWon: { type: Number, default: 0 },
+            stakePlayed: { type: Number, default: 0 },
+            stakeNetCoins: { type: Number, default: 0 },
+            currentRating: { type: Number, default: 0 },
+            seasonBestTier: { type: String, default: '' }
         }
     },
 
@@ -323,6 +340,77 @@ const userSchema = new mongoose.Schema({
             start: { type: String, default: '22:00' },
             end: { type: String, default: '08:00' }
         },
+        colorClash: {
+            equippedThemePackId: { type: String, default: 'forest_picnic' },
+            ownedThemePackIds: {
+                type: [String],
+                default: () => ['forest_picnic', 'neon_orbit', 'candy_carnival']
+            },
+            rankedLock: {
+                active: { type: Boolean, default: false },
+                reason: { type: String, default: '' },
+                flagId: { type: mongoose.Schema.Types.ObjectId, ref: 'AntiFraudFlag', default: null },
+                appliedAt: { type: Date, default: null }
+            },
+            stakeLock: {
+                active: { type: Boolean, default: false },
+                reason: { type: String, default: '' },
+                flagId: { type: mongoose.Schema.Types.ObjectId, ref: 'AntiFraudFlag', default: null },
+                appliedAt: { type: Date, default: null }
+            },
+            rankedAccessLocked: {
+                type: Boolean,
+                default: false
+            },
+            rankedAccessLockReason: {
+                type: String,
+                default: ''
+            },
+            stakeAccessLocked: {
+                type: Boolean,
+                default: false
+            },
+            stakeAccessLockReason: {
+                type: String,
+                default: ''
+            },
+            riskState: {
+                severity: {
+                    type: String,
+                    enum: ['none', 'low', 'medium', 'high', 'critical'],
+                    default: 'none'
+                },
+                score: {
+                    type: Number,
+                    default: 0
+                },
+                lastFlagType: {
+                    type: String,
+                    default: ''
+                },
+                lastAutoAction: {
+                    type: String,
+                    enum: ['none', 'ranked_lock', 'stake_lock', 'manual_review'],
+                    default: 'none'
+                },
+                activeFlagCount: {
+                    type: Number,
+                    default: 0
+                }
+            },
+            lastRiskActionAt: {
+                type: Date,
+                default: null
+            },
+            deviceHash: {
+                type: String,
+                default: ''
+            },
+            tutorialCompletedVersions: {
+                type: [String],
+                default: () => []
+            }
+        },
         language: { type: String, default: 'en' },
         currency: { type: String, default: 'USD' }
     },
@@ -488,5 +576,3 @@ userSchema.methods.toJSON = function () {
 };
 
 module.exports = mongoose.model('User', userSchema);
-
-

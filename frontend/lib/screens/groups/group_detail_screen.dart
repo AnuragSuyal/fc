@@ -1,6 +1,8 @@
 import 'dart:async';
 
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 
 import '../../models/group_model.dart';
@@ -11,6 +13,7 @@ import '../../services/group_service.dart';
 import '../../services/message_service.dart';
 import '../../services/room_service.dart';
 import '../../services/socket_service.dart';
+import '../../services/upload_service.dart';
 import '../../utils/constants.dart';
 import '../../utils/media_url.dart';
 import '../../widgets/gifting/gift_bottom_sheet.dart';
@@ -249,9 +252,48 @@ class _GroupDetailScreenState extends State<GroupDetailScreen>
       }
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
+      _showError(e);
+    } finally {
+      if (mounted) {
+        setState(() => _isSending = false);
+      }
+    }
+  }
+
+  Future<void> _pickAndSendImage() async {
+    if (_group?.isMember != true || _isSending) return;
+
+    final picked = await ImagePicker().pickImage(
+      source: ImageSource.gallery,
+      maxWidth: 1440,
+      maxHeight: 1440,
+      imageQuality: 82,
+    );
+    if (picked == null) return;
+
+    setState(() => _isSending = true);
+    try {
+      final upload = await UploadService.uploadImage(picked);
+      final url = upload['url']?.toString();
+      if (url == null || url.isEmpty) {
+        throw Exception('Image upload failed');
+      }
+
+      final sent = await MessageService.sendGroupMessage(
+        groupId: widget.groupId,
+        content: url,
+        type: 'image',
       );
+      if (!mounted) return;
+
+      SocketService.sendTyping(groupId: widget.groupId, isTyping: false);
+      if (sent != null && !_messages.any((item) => item.id == sent.id)) {
+        setState(() => _messages = [..._messages, sent]);
+        _scrollChatToBottom();
+      }
+    } catch (e) {
+      if (!mounted) return;
+      _showError(e);
     } finally {
       if (mounted) {
         setState(() => _isSending = false);
@@ -337,14 +379,10 @@ class _GroupDetailScreenState extends State<GroupDetailScreen>
 
   Future<void> _giftMember(GroupUserModel user) async {
     if (user.id.isEmpty) return;
-    await showModalBottomSheet(
+    await showGiftBottomSheet(
       context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (_) => GiftBottomSheet(
-        toUserId: user.id,
-        toUsername: user.username,
-      ),
+      toUserId: user.id,
+      toUsername: user.username,
     );
   }
 
@@ -359,6 +397,97 @@ class _GroupDetailScreenState extends State<GroupDetailScreen>
         SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
       );
     }
+  }
+
+  void _showError(Object error) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(error.toString().replaceFirst('Exception: ', ''))),
+    );
+  }
+
+  void _openImagePreview(String url) {
+    showDialog<void>(
+      context: context,
+      builder: (_) => Dialog(
+        insetPadding: const EdgeInsets.all(18),
+        backgroundColor: Colors.transparent,
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(22),
+          child: InteractiveViewer(
+            child: CachedNetworkImage(
+              imageUrl: url,
+              fit: BoxFit.contain,
+              errorWidget: (_, __, ___) => Container(
+                padding: const EdgeInsets.all(24),
+                color: Colors.black87,
+                child: const Text(
+                  'Image unavailable',
+                  style: TextStyle(color: Colors.white),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMessageBody(MessageModel message) {
+    if (message.isImage || message.isPrivateImage) {
+      return _buildImageMessage(message);
+    }
+
+    return Text(message.content);
+  }
+
+  Widget _buildImageMessage(MessageModel message) {
+    final imageUrl = resolveMediaUrl(message.content);
+
+    return InkWell(
+      onTap: imageUrl == null ? null : () => _openImagePreview(imageUrl),
+      borderRadius: BorderRadius.circular(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          ClipRRect(
+            borderRadius: BorderRadius.circular(14),
+            child: AspectRatio(
+              aspectRatio: 1,
+              child: imageUrl == null
+                  ? Container(
+                      color: const Color(0xFFE2E8F0),
+                      alignment: Alignment.center,
+                      child: const Text(
+                        'Image unavailable',
+                        style: TextStyle(color: AppColors.textSecondary),
+                      ),
+                    )
+                  : CachedNetworkImage(
+                      imageUrl: imageUrl,
+                      fit: BoxFit.cover,
+                      errorWidget: (_, __, ___) => Container(
+                        color: const Color(0xFFE2E8F0),
+                        alignment: Alignment.center,
+                        child: const Text(
+                          'Image unavailable',
+                          style: TextStyle(color: AppColors.textSecondary),
+                        ),
+                      ),
+                    ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            message.isPrivateImage ? 'Private photo' : 'Photo',
+            style: const TextStyle(
+              color: AppColors.textSecondary,
+              fontSize: 12,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _rejectJoinRequest(GroupJoinRequestModel request) async {
@@ -935,7 +1064,7 @@ class _GroupDetailScreenState extends State<GroupDetailScreen>
                                           ],
                                         ),
                                         const SizedBox(height: 6),
-                                        Text(message.content),
+                                        _buildMessageBody(message),
                                       ],
                                     ),
                                   ),
@@ -963,6 +1092,11 @@ class _GroupDetailScreenState extends State<GroupDetailScreen>
             ),
           Row(
             children: [
+              IconButton(
+                onPressed: _isSending ? null : _pickAndSendImage,
+                icon: const Icon(Icons.image_outlined),
+                tooltip: 'Send image',
+              ),
               Expanded(
                 child: TextField(
                   controller: _composerController,

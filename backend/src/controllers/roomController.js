@@ -18,6 +18,7 @@ const {
     getRoomAdminLimit
 } = require('../services/roomProgressionService');
 const {
+    ROOM_ACTIONS,
     canJoinStageDirectly,
     canManageStage,
     canManageTarget,
@@ -26,8 +27,27 @@ const {
     getParticipant,
     isRoomAdmin,
     isRoomOwner,
-    sanitizeRoomUpdatePayload
-} = require('../utils/roomPermissions');
+    sanitizeRoomUpdatePayload,
+    assertRoomPermission,
+    canPerformRoomAction,
+    getRoomMode
+} = require('../services/roomPermissionService');
+const {
+    ROOM_UPDATE_EVENTS,
+    applyRoomMode,
+    canonicalTypeForMode,
+    decorateRoomPayload,
+    emitRoomUpdate,
+    populateRoomById
+} = require('../services/roomSettingsService');
+const {
+    muteParticipant: applyMuteParticipant,
+    kickParticipant: applyKickParticipant
+} = require('../services/roomModerationService');
+const {
+    assertSeatJoinAllowed
+} = require('../services/roomSeatService');
+const { logRoomAuditEvent } = require('../services/roomAuditService');
 
 const roomCacheKey = (roomId) => `cache:room:${roomId}`;
 const escapeRegex = (value = '') => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -37,6 +57,39 @@ const STREAM_HOST_SEAT_INDEX = 1;
 const STREAM_PLAYBACK_STATES = new Set(['paused', 'playing']);
 const YOUTUBE_SEARCH_RESULT_LIMIT = 12;
 const ROOM_INVITE_MESSAGE_TYPE = 'system';
+
+const emitRoomSystemMessage = async ({ io, roomId, senderId, content, metadata = {}, createdAt = new Date() }) => {
+    if (!io || !roomId || !senderId || !content) return;
+
+    const message = new Message({
+        roomId,
+        senderId,
+        content,
+        type: 'system',
+        metadata,
+        createdAt
+    });
+
+    await message.save();
+    await message.populate([
+        { path: 'senderId', select: 'username avatar level' },
+        { path: 'replyTo' }
+    ]);
+
+    io.to(`room:${roomId}`).emit('room:message', message.toObject({ virtuals: false }));
+};
+
+const clearSeatLockMetadata = (room, seatIndex) => {
+    room.lockedSeats = (room.lockedSeats || []).filter((entry) => entry !== seatIndex);
+    if (!Array.isArray(room.seatStates)) return;
+    const seatState = room.seatStates.find((entry) => Number(entry?.seatIndex) === seatIndex);
+    if (!seatState) return;
+    seatState.isLocked = false;
+    seatState.lockedByUserId = null;
+    seatState.lockedAt = null;
+    seatState.lockReason = '';
+    seatState.updatedAt = new Date();
+};
 
 const normalizeYoutubePositionMs = (value) => {
     const numericValue = Number(value);
@@ -56,6 +109,35 @@ const normalizeYoutubePlaybackState = (value) => {
     return normalized;
 };
 
+const extractYoutubeVideoId = (input = '') => {
+    const value = String(input || '').trim();
+    if (!value) {
+        return '';
+    }
+
+    try {
+        const parsed = new URL(value);
+        if (parsed.hostname.includes('youtu.be')) {
+            return parsed.pathname.replace(/\//g, '').trim();
+        }
+
+        const videoId = parsed.searchParams.get('v');
+        if (videoId) {
+            return videoId.trim();
+        }
+
+        const embedMatch = parsed.pathname.match(/\/(?:embed|shorts)\/([A-Za-z0-9_-]{6,})/);
+        if (embedMatch) {
+            return embedMatch[1];
+        }
+    } catch (_) {
+        // fall back to a lightweight pattern match below
+    }
+
+    const match = value.match(/([A-Za-z0-9_-]{11})/);
+    return match ? match[1] : '';
+};
+
 const normalizeYoutubeQueueEntry = (entry = {}) => {
     if (!entry || typeof entry !== 'object') {
         return null;
@@ -68,7 +150,7 @@ const normalizeYoutubeQueueEntry = (entry = {}) => {
 
     const parsedAddedAt = entry.addedAt ? new Date(entry.addedAt) : new Date();
     return {
-        videoId: String(entry.videoId || '').trim(),
+        videoId: String(entry.videoId || extractYoutubeVideoId(url) || '').trim(),
         url,
         title: String(entry.title || entry.youtubeTitle || '').trim().slice(0, 160),
         thumbnailUrl: String(entry.thumbnailUrl || entry.youtubeThumbnail || '').trim(),
@@ -100,6 +182,15 @@ const buildYoutubeQueueEntryFromTheme = (theme = {}) => {
     });
 };
 
+const getYoutubeSessionVersion = (theme = {}) => {
+    const rawVersion = Number(theme?.youtubeSessionVersion);
+    if (!Number.isFinite(rawVersion) || rawVersion < 0) {
+        return 0;
+    }
+
+    return Math.trunc(rawVersion);
+};
+
 const syncYoutubeThemeQueueState = (theme = {}) => {
     let queue = normalizeYoutubeQueue(theme.youtubeQueue);
 
@@ -117,6 +208,7 @@ const syncYoutubeThemeQueueState = (theme = {}) => {
         theme.youtubeUrl = '';
         theme.youtubeTitle = '';
         theme.youtubeThumbnail = '';
+        theme.youtubeActiveVideoId = '';
         theme.youtubePositionMs = 0;
         theme.youtubePlaybackState = 'paused';
         return null;
@@ -125,6 +217,7 @@ const syncYoutubeThemeQueueState = (theme = {}) => {
     theme.youtubeUrl = current.url;
     theme.youtubeTitle = current.title || '';
     theme.youtubeThumbnail = current.thumbnailUrl || '';
+    theme.youtubeActiveVideoId = current.videoId || extractYoutubeVideoId(current.url) || '';
     return current;
 };
 
@@ -171,6 +264,12 @@ const normalizeThemePatch = (theme = {}) => {
     if (patch.youtubeSyncedAt !== undefined) {
         delete patch.youtubeSyncedAt;
     }
+    if (patch.youtubeActiveVideoId !== undefined) {
+        delete patch.youtubeActiveVideoId;
+    }
+    if (patch.youtubeSessionVersion !== undefined) {
+        delete patch.youtubeSessionVersion;
+    }
 
     return patch;
 };
@@ -178,9 +277,7 @@ const normalizeThemePatch = (theme = {}) => {
 const resetSeatsForStreamMode = (room) => {
     if (!room) return;
 
-    room.lockedSeats = (room.lockedSeats || []).filter(
-        (seatIndex) => seatIndex !== STREAM_HOST_SEAT_INDEX
-    );
+    clearSeatLockMetadata(room, STREAM_HOST_SEAT_INDEX);
 
     const hostId = room.hostId?.toString();
     let hostParticipant = null;
@@ -220,9 +317,7 @@ const anchorHostToStreamSeat = (room) => {
     const hostId = room.hostId?.toString();
     if (!hostId) return;
 
-    room.lockedSeats = (room.lockedSeats || []).filter(
-        (seatIndex) => seatIndex !== STREAM_HOST_SEAT_INDEX
-    );
+    clearSeatLockMetadata(room, STREAM_HOST_SEAT_INDEX);
 
     let hostParticipant = null;
     room.participants = (room.participants || []).map((participant) => {
@@ -361,37 +456,6 @@ const updateRoomPresence = async (redis, roomId, userId, action) => {
     await redis.set(`room:${roomId}:count`, count.toString());
 };
 
-const emitLobbyUpdate = (io, room, action = 'updated') => {
-    if (!io || !room) return;
-
-    const roomId = room._id?.toString() || room.id?.toString() || room.roomId?.toString();
-    if (!roomId) return;
-
-    io.emit('room:lobby:update', {
-        roomId,
-        action,
-        name: room.name,
-        category: room.category,
-        type: room.type,
-        hostAvatar: room.hostId?.avatar || room.hostAvatar || '',
-        coverImage: room.theme?.coverImage || room.coverImage || '',
-        participantCount: room.participantCount ?? room.participants?.length ?? 0,
-        onlineCount: room.onlineCount ?? 0,
-        rallyActive: room.rallyActive === true &&
-            (!room.rallyExpiresAt || new Date(room.rallyExpiresAt) > new Date()),
-        rallyExpiresAt: room.rallyExpiresAt || null,
-        endedAt: room.endedAt || null,
-        updatedAt: new Date().toISOString()
-    });
-};
-
-const populateRoomById = async (roomId) => Room.findById(roomId)
-    .populate('hostId', 'username avatar level vipLevel')
-    .populate('coHosts', 'username avatar level vipLevel')
-    .populate('moderators', 'username avatar level vipLevel')
-    .populate('participants.userId', 'username avatar level vipLevel status.isOnline')
-    .populate('bans.userId', 'username avatar');
-
 const buildLivekitToken = async (roomId, userId, username, avatar) => {
     if (!process.env.LIVEKIT_API_KEY || !process.env.LIVEKIT_API_SECRET) return null;
 
@@ -449,17 +513,30 @@ exports.createRoom = async (req, res, next) => {
         const {
             name,
             description,
+            announcement,
             type,
+            mode,
             category,
             tags,
             settings,
             theme
         } = req.body;
+        const announcementText = String(announcement || '').trim();
 
         const room = new Room({
             name,
             description: description || '',
+            ...(announcementText
+                ? {
+                    announcement: {
+                        text: announcementText,
+                        updatedAt: new Date(),
+                        updatedBy: req.userId
+                    }
+                }
+                : {}),
             type: type || 'voice',
+            mode: mode || (type === 'auction' ? 'auction' : type === 'chat' ? 'acquaint' : 'normal'),
             category: category || 'all',
             tags: tags || [],
             hostId: req.userId,
@@ -476,6 +553,7 @@ exports.createRoom = async (req, res, next) => {
                 allowScreenShare: settings?.allowScreenShare || false,
                 allowVideo: settings?.allowVideo || false,
                 stageJoinsLocked: settings?.stageJoinsLocked || false,
+                allowAdminSeatControl: settings?.allowAdminSeatControl ?? true,
                 maxActiveSpeakers: settings?.maxActiveSpeakers || 8,
                 requireApproval: settings?.requireApproval || false,
                 slowMode: settings?.slowMode || 0,
@@ -507,12 +585,15 @@ exports.createRoom = async (req, res, next) => {
             populatedRoom.hostId?.username,
             populatedRoom.hostId?.avatar
         );
-        const roomPayload = populatedRoom.toObject();
+        const roomPayload = decorateRoomPayload(populatedRoom, req.userId);
 
         const io = req.app.get('io');
         if (io) {
             io.emit('room:created', roomPayload);
-            emitLobbyUpdate(io, roomPayload, 'created');
+            emitRoomUpdate(io, populatedRoom, {
+                updateEvent: ROOM_UPDATE_EVENTS.IDENTITY,
+                lobbyAction: 'created'
+            });
         }
 
         res.status(201).json({ ...roomPayload, livekitToken });
@@ -615,7 +696,9 @@ exports.getRoomById = async (req, res, next) => {
                         throw error;
                     }
                 }
-                return res.json(parsed);
+                return res.json(decorateRoomPayload(parsed, req.userId || null, {
+                    includeModeration: Boolean(req.userId)
+                }));
             }
         }
 
@@ -664,7 +747,9 @@ exports.getRoomById = async (req, res, next) => {
             await redis.set(roomCacheKey(room._id), JSON.stringify(room.toObject()), { EX: 60 });
         }
 
-        res.json(room);
+        res.json(decorateRoomPayload(room, req.userId || null, {
+            includeModeration: Boolean(req.userId)
+        }));
     } catch (error) {
         next(error);
     }
@@ -759,6 +844,7 @@ exports.joinRoom = async (req, res, next) => {
         // Add to participants if not already there
         const existingIdx = room.participants.findIndex(p => p.userId.toString() === req.userId);
         const didJoinRoom = existingIdx === -1;
+        const joinTimestamp = new Date();
         if (didJoinRoom) {
             let role = 'listener';
             if (room.hostId.toString() === req.userId) role = 'host';
@@ -768,15 +854,15 @@ exports.joinRoom = async (req, res, next) => {
             room.participants.push({
                 userId: req.userId,
                 role,
-                joinedAt: Date.now(),
-                lastActive: Date.now()
+                joinedAt: joinTimestamp,
+                lastActive: joinTimestamp
             });
 
             if (room.participants.length > room.metrics.peakParticipants) {
                 room.metrics.peakParticipants = room.participants.length;
             }
         } else {
-            room.participants[existingIdx].lastActive = Date.now();
+            room.participants[existingIdx].lastActive = joinTimestamp;
         }
 
         anchorHostToStreamSeat(room);
@@ -809,17 +895,37 @@ exports.joinRoom = async (req, res, next) => {
         const io = req.app.get('io');
         if (io) {
             io.to(`room:${room._id}`).emit('room:participant:joined', {
+                roomId: room._id.toString(),
                 userId: req.userId,
                 username: user.username,
                 avatar: user.avatar,
-                joinedAt: Date.now()
+                joinedAt: joinTimestamp.toISOString()
             });
+            if (didJoinRoom) {
+                await emitRoomSystemMessage({
+                    io,
+                    roomId: room._id,
+                    senderId: user._id,
+                    content: `Welcome ${user.username}`,
+                    metadata: {
+                        systemEvent: 'participant_joined',
+                        joinedUserId: user._id.toString(),
+                        joinedUsername: user.username,
+                        joinedAt: joinTimestamp.toISOString()
+                    },
+                    createdAt: joinTimestamp
+                });
+            }
             // Update balance for the user
             io.to(`user:${user._id}`).emit('balance_update', { coins: user.coins, gems: user.gems });
-            emitLobbyUpdate(io, populatedRoom, 'participant_joined');
+            emitRoomUpdate(io, populatedRoom, {
+                updateEvent: ROOM_UPDATE_EVENTS.ROLES,
+                lobbyAction: 'participant_joined',
+                extraPayload: { userId: req.userId }
+            });
         }
 
-        const roomPayload = populatedRoom.toObject();
+        const roomPayload = decorateRoomPayload(populatedRoom, req.userId);
         res.json({ ...roomPayload, livekitToken });
     } catch (error) {
         next(error);
@@ -864,9 +970,15 @@ exports.leaveRoom = async (req, res, next) => {
 
         const io = req.app.get('io');
         if (io) {
-            io.to(`room:${room._id}`).emit('room:participant:left', { userId: req.userId });
-            io.to(`room:${room._id}`).emit('room:updated', room);
-            emitLobbyUpdate(io, room, room.endedAt ? 'ended' : 'participant_left');
+            io.to(`room:${room._id}`).emit('room:participant:left', {
+                roomId: room._id.toString(),
+                userId: req.userId
+            });
+            emitRoomUpdate(io, room, {
+                updateEvent: ROOM_UPDATE_EVENTS.ROLES,
+                lobbyAction: room.endedAt ? 'ended' : 'participant_left',
+                extraPayload: { userId: req.userId, ended: Boolean(room.endedAt) }
+            });
         }
 
         res.json({ success: true, message: 'Left room successfully' });
@@ -906,16 +1018,31 @@ exports.updateRoom = async (req, res, next) => {
             throw error;
         }
 
+        const previousSnapshot = {
+            name: room.name,
+            announcement: room.announcement?.text || room.announcement || '',
+            category: room.category,
+            type: room.type,
+            mode: room.mode || getRoomMode(room),
+            settings: { ...(room.settings?.toObject?.() || room.settings || {}) },
+            theme: { ...(room.theme?.toObject?.() || room.theme || {}) }
+        };
         const previousType = room.type;
         const previousYoutubeUrl = room.theme?.youtubeUrl || '';
+        const previousYoutubeActiveVideoId = String(
+            room.theme?.youtubeActiveVideoId || extractYoutubeVideoId(previousYoutubeUrl)
+        ).trim();
+        const previousYoutubeSessionVersion = getYoutubeSessionVersion(room.theme);
         const normalizedThemePatch = normalizeThemePatch(patch.theme);
-        const allowedUpdates = ['name', 'description', 'type', 'category', 'tags', 'settings', 'theme', 'announcement'];
+        const allowedUpdates = ['name', 'description', 'type', 'mode', 'category', 'tags', 'settings', 'theme', 'announcement'];
         allowedUpdates.forEach(field => {
             if (patch[field] !== undefined) {
                 if (field === 'settings') {
                     room.settings = { ...room.settings, ...patch.settings };
                 } else if (field === 'theme') {
                     room.theme = { ...room.theme, ...normalizedThemePatch };
+                } else if (field === 'mode') {
+                    applyRoomMode(room, patch.mode);
                 } else if (field === 'announcement') {
                     room.announcement = {
                         text: patch.announcement,
@@ -927,6 +1054,14 @@ exports.updateRoom = async (req, res, next) => {
                 }
             }
         });
+
+        if (patch.type !== undefined && patch.mode === undefined) {
+            room.mode = patch.type === 'auction'
+                ? 'auction'
+                : patch.type === 'chat'
+                    ? 'acquaint'
+                    : 'normal';
+        }
 
         const switchedIntoStreamMode =
             patch.type === STREAM_ROOM_TYPE && previousType !== STREAM_ROOM_TYPE;
@@ -942,19 +1077,35 @@ exports.updateRoom = async (req, res, next) => {
         }
 
         const nextYoutubeUrl = room.theme?.youtubeUrl || '';
-        const youtubeVideoChanged =
-            (
-                normalizedThemePatch.youtubeQueue !== undefined ||
+        const nextYoutubeActiveVideoId = String(
+            room.theme?.youtubeActiveVideoId || extractYoutubeVideoId(nextYoutubeUrl)
+        ).trim();
+        const youtubeQueuePatchProvided =
+            normalizedThemePatch.youtubeQueue !== undefined ||
                 normalizedThemePatch.youtubeUrl !== undefined ||
                 normalizedThemePatch.youtubeTitle !== undefined ||
-                normalizedThemePatch.youtubeThumbnail !== undefined
-            ) &&
-            nextYoutubeUrl !== previousYoutubeUrl;
+                normalizedThemePatch.youtubeThumbnail !== undefined;
+        const youtubeActiveSourceChanged =
+            nextYoutubeUrl !== previousYoutubeUrl ||
+            nextYoutubeActiveVideoId !== previousYoutubeActiveVideoId;
+        const youtubeVideoChanged =
+            youtubeQueuePatchProvided &&
+            youtubeActiveSourceChanged;
         const youtubePlaybackPatchProvided =
             normalizedThemePatch.youtubePositionMs !== undefined ||
             normalizedThemePatch.youtubePlaybackState !== undefined;
+        const youtubeSessionShouldAdvance =
+            switchedIntoStreamMode ||
+            youtubeActiveSourceChanged ||
+            (Boolean(previousYoutubeUrl) && !nextYoutubeUrl);
 
         if (room.type === STREAM_ROOM_TYPE) {
+            if (youtubeSessionShouldAdvance) {
+                room.theme.youtubeSessionVersion = previousYoutubeSessionVersion + 1;
+            } else {
+                room.theme.youtubeSessionVersion = getYoutubeSessionVersion(room.theme);
+            }
+
             if (!nextYoutubeUrl) {
                 room.theme.youtubePositionMs = 0;
                 room.theme.youtubePlaybackState = 'paused';
@@ -999,11 +1150,41 @@ exports.updateRoom = async (req, res, next) => {
         const io = req.app.get('io');
         const populatedRoom = await populateRoomById(room._id);
         if (io) {
-            io.to(`room:${room._id}`).emit('room:updated', populatedRoom);
-            emitLobbyUpdate(io, populatedRoom, 'updated');
+            const themeKeys = Object.keys(normalizedThemePatch || {});
+            const hasRealtimeThemePatch = themeKeys.some((key) => key !== 'coverImage');
+            const updateEvent =
+                hasRealtimeThemePatch ? ROOM_UPDATE_EVENTS.THEME :
+                    patch.mode !== undefined || patch.type !== undefined ? ROOM_UPDATE_EVENTS.MODE :
+                        patch.name !== undefined || patch.announcement !== undefined || patch.theme?.coverImage !== undefined
+                            ? ROOM_UPDATE_EVENTS.IDENTITY
+                            : ROOM_UPDATE_EVENTS.SETTINGS;
+            emitRoomUpdate(io, populatedRoom, {
+                updateEvent,
+                lobbyAction: 'updated'
+            });
         }
 
-        res.json(populatedRoom);
+        await logRoomAuditEvent({
+            roomId: room._id,
+            actorId: req.userId,
+            actorRole: isRoomAdmin(room, req.userId) ? 'admin' : 'member',
+            action: 'room.update_settings',
+            before: previousSnapshot,
+            after: {
+                name: populatedRoom.name,
+                announcement: populatedRoom.announcement?.text || populatedRoom.announcement || '',
+                category: populatedRoom.category,
+                type: populatedRoom.type,
+                mode: populatedRoom.mode || getRoomMode(populatedRoom),
+                settings: populatedRoom.settings,
+                theme: populatedRoom.theme
+            },
+            source: 'rest',
+            success: true,
+            requestId: req.id
+        });
+
+        res.json(decorateRoomPayload(populatedRoom, req.userId));
     } catch (error) {
         next(error);
     }
@@ -1030,6 +1211,12 @@ exports.getRoomToken = async (req, res, next) => {
             error.status = 403;
             throw error;
         }
+
+        assertRoomPermission({
+            room,
+            actorUserId: req.userId,
+            action: ROOM_ACTIONS.GET_ROOM_TOKEN
+        }, 'Join the room before requesting voice access');
 
         const user = await User.findById(req.userId).select('username avatar');
         const token = await buildLivekitToken(room.roomId || room._id, req.userId, user?.username, user?.avatar);
@@ -1062,6 +1249,11 @@ exports.inviteFriendToRoom = async (req, res, next) => {
             error.status = 403;
             throw error;
         }
+        assertRoomPermission({
+            room,
+            actorUserId: req.userId,
+            action: ROOM_ACTIONS.INVITE_USER
+        }, 'Only hosts and admins can invite friends');
 
         const { targetUserId } = req.body;
         if (targetUserId === req.userId) {
@@ -1182,26 +1374,11 @@ exports.takeSeat = async (req, res, next) => {
         }
 
         const maxActiveSpeakers = getMaxActiveSpeakers(room);
-        if (seatIndex > maxActiveSpeakers) {
-            const error = new Error(`Only ${maxActiveSpeakers} active speaker seats are open right now`);
-            error.status = 403;
-            throw error;
-        }
-
-        if ((room.lockedSeats || []).includes(seatIndex)) {
-            const error = new Error('This seat is locked');
-            error.status = 403;
-            throw error;
-        }
-
-        const occupied = room.participants.find(
-            (p) => p.seatIndex === seatIndex && p.userId.toString() !== req.userId
-        );
-        if (occupied) {
-            const error = new Error('Seat already occupied');
-            error.status = 400;
-            throw error;
-        }
+        assertSeatJoinAllowed({
+            room,
+            userId: req.userId,
+            seatIndex
+        });
 
         const participant = getParticipant(room, req.userId);
         if (!participant) {
@@ -1212,7 +1389,7 @@ exports.takeSeat = async (req, res, next) => {
 
         if (participant.seatIndex === seatIndex) {
             const populatedRoom = await populateRoomById(room._id);
-            res.json(populatedRoom);
+            res.json(decorateRoomPayload(populatedRoom, req.userId));
             return;
         }
 
@@ -1226,11 +1403,14 @@ exports.takeSeat = async (req, res, next) => {
             const io = req.app.get('io');
             const populatedRoom = await populateRoomById(room._id);
             if (io) {
-                io.to(`room:${room._id}`).emit('room:updated', populatedRoom);
-                emitLobbyUpdate(io, populatedRoom, 'stage_request');
+                emitRoomUpdate(io, populatedRoom, {
+                    updateEvent: ROOM_UPDATE_EVENTS.SEATS,
+                    lobbyAction: 'stage_request',
+                    extraPayload: { userId: req.userId, requestPending: true }
+                });
             }
 
-            res.json(populatedRoom);
+            res.json(decorateRoomPayload(populatedRoom, req.userId));
             return;
         }
 
@@ -1245,11 +1425,14 @@ exports.takeSeat = async (req, res, next) => {
             const io = req.app.get('io');
             const populatedRoom = await populateRoomById(room._id);
             if (io) {
-                io.to(`room:${room._id}`).emit('room:updated', populatedRoom);
-                emitLobbyUpdate(io, populatedRoom, 'seat_updated');
+                emitRoomUpdate(io, populatedRoom, {
+                    updateEvent: ROOM_UPDATE_EVENTS.SEATS,
+                    lobbyAction: 'seat_updated',
+                    extraPayload: { userId: req.userId, seatIndex: STREAM_HOST_SEAT_INDEX }
+                });
             }
 
-            res.json(populatedRoom);
+            res.json(decorateRoomPayload(populatedRoom, req.userId));
             return;
         }
 
@@ -1269,11 +1452,14 @@ exports.takeSeat = async (req, res, next) => {
         const io = req.app.get('io');
         const populatedRoom = await populateRoomById(room._id);
         if (io) {
-            io.to(`room:${room._id}`).emit('room:updated', populatedRoom);
-            emitLobbyUpdate(io, populatedRoom, 'seat_updated');
+            emitRoomUpdate(io, populatedRoom, {
+                updateEvent: ROOM_UPDATE_EVENTS.SEATS,
+                lobbyAction: 'seat_updated',
+                extraPayload: { userId: req.userId, seatIndex }
+            });
         }
 
-        res.json(populatedRoom);
+        res.json(decorateRoomPayload(populatedRoom, req.userId));
     } catch (error) {
         next(error);
     }
@@ -1311,11 +1497,14 @@ exports.leaveSeat = async (req, res, next) => {
         const io = req.app.get('io');
         const populatedRoom = await populateRoomById(room._id);
         if (io) {
-            io.to(`room:${room._id}`).emit('room:updated', populatedRoom);
-            emitLobbyUpdate(io, populatedRoom, 'seat_updated');
+            emitRoomUpdate(io, populatedRoom, {
+                updateEvent: ROOM_UPDATE_EVENTS.SEATS,
+                lobbyAction: 'seat_updated',
+                extraPayload: { userId: req.userId, seatIndex: -1 }
+            });
         }
 
-        res.json(populatedRoom);
+        res.json(decorateRoomPayload(populatedRoom, req.userId));
     } catch (error) {
         next(error);
     }
@@ -1349,8 +1538,8 @@ exports.searchYoutubeVideos = async (req, res, next) => {
             gl: 'US'
         });
 
+        const seenVideoIds = new Set();
         const results = (searchResponse.videos || [])
-            .slice(0, YOUTUBE_SEARCH_RESULT_LIMIT)
             .map((video) => ({
                 id: video.videoId?.toString() || '',
                 title: video.title?.toString() || 'Untitled video',
@@ -1365,7 +1554,14 @@ exports.searchYoutubeVideos = async (req, res, next) => {
                         ? `https://i.ytimg.com/vi/${video.videoId}/hqdefault.jpg`
                         : '')
             }))
-            .filter((video) => video.id);
+            .filter((video) => {
+                if (!video.id || seenVideoIds.has(video.id)) {
+                    return false;
+                }
+                seenVideoIds.add(video.id);
+                return true;
+            })
+            .slice(0, YOUTUBE_SEARCH_RESULT_LIMIT);
 
         res.json({ results });
     } catch (error) {
@@ -1406,8 +1602,20 @@ exports.deleteRoom = async (req, res, next) => {
         const io = req.app.get('io');
         if (io) {
             io.to(`room:${room._id}`).emit('room:deleted', { roomId: room._id });
-            emitLobbyUpdate(io, room, 'deleted');
+            emitRoomUpdate(io, room, {
+                updateEvent: ROOM_UPDATE_EVENTS.IDENTITY,
+                lobbyAction: 'deleted'
+            });
         }
+        await logRoomAuditEvent({
+            roomId: room._id,
+            actorId: req.userId,
+            actorRole: 'host',
+            action: 'room.delete',
+            source: 'rest',
+            success: true,
+            requestId: req.id
+        });
         res.json({ success: true });
     } catch (error) {
         next(error);
@@ -1420,7 +1628,10 @@ exports.getMyRooms = async (req, res, next) => {
         const rooms = await Room.find({ 'participants.userId': req.userId, endedAt: null })
             .populate('hostId', 'username avatar level')
             .sort({ rallyActive: -1, rallyExpiresAt: -1, updatedAt: -1 });
-        res.json(rooms);
+        res.json(rooms.map((room) => decorateRoomPayload(room, req.userId, {
+            includeCapabilities: false,
+            includeModeration: false
+        })));
     } catch (error) {
         next(error);
     }
@@ -1432,7 +1643,10 @@ exports.getFollowedRooms = async (req, res, next) => {
         const rooms = await Room.find({ followers: req.userId, endedAt: null })
             .populate('hostId', 'username avatar level')
             .sort({ rallyActive: -1, rallyExpiresAt: -1, updatedAt: -1 });
-        res.json(rooms);
+        res.json(rooms.map((room) => decorateRoomPayload(room, req.userId, {
+            includeCapabilities: false,
+            includeModeration: false
+        })));
     } catch (error) {
         next(error);
     }
@@ -1465,36 +1679,8 @@ exports.muteParticipant = async (req, res, next) => {
             throw error;
         }
 
-        if (!canManageStage(room, req.userId)) {
-            const error = new Error('Not authorized');
-            error.status = 403;
-            throw error;
-        }
-
-        if (!canManageTarget(room, req.userId, userId)) {
-            const error = new Error('You cannot moderate that participant');
-            error.status = 403;
-            throw error;
-        }
-
-        const participant = getParticipant(room, userId);
-        if (!participant) {
-            const error = new Error('User not in room');
-            error.status = 404;
-            throw error;
-        }
-
         const shouldMute = muted === undefined ? true : Boolean(muted);
-        participant.isMuted = shouldMute;
-
-        if (shouldMute) {
-            const exists = room.mutes?.some(m => m.userId.toString() === userId);
-            if (!exists) {
-                room.mutes.push({ userId });
-            }
-        } else {
-            room.mutes = (room.mutes || []).filter(m => m.userId.toString() !== userId);
-        }
+        applyMuteParticipant({ room, actorUserId: req.userId, targetUserId: userId, muted: shouldMute });
 
         await room.save();
 
@@ -1503,10 +1689,30 @@ exports.muteParticipant = async (req, res, next) => {
 
         const io = req.app.get('io');
         if (io) {
-            io.to(`room:${room._id}`).emit('room:participant:muted', { userId, muted: shouldMute });
+            io.to(`room:${room._id}`).emit('room:participant:muted', {
+                roomId: room._id.toString(),
+                userId,
+                muted: shouldMute
+            });
             io.to(`user:${userId}`).emit('room:mute', { roomId: room._id, muted: shouldMute });
-            emitLobbyUpdate(io, room, 'moderation_updated');
+            emitRoomUpdate(io, room, {
+                updateEvent: ROOM_UPDATE_EVENTS.ROLES,
+                lobbyAction: 'moderation_updated',
+                extraPayload: { userId, muted: shouldMute }
+            });
         }
+
+        await logRoomAuditEvent({
+            roomId: room._id,
+            actorId: req.userId,
+            actorRole: 'admin',
+            targetUserId: userId,
+            action: shouldMute ? 'room.mute_participant' : 'room.unmute_participant',
+            after: { muted: shouldMute },
+            source: 'rest',
+            success: true,
+            requestId: req.id
+        });
 
         res.json({ muted: shouldMute });
     } catch (error) {
@@ -1532,25 +1738,7 @@ exports.kickParticipant = async (req, res, next) => {
             throw error;
         }
 
-        if (!canManageStage(room, req.userId)) {
-            const error = new Error('Not authorized');
-            error.status = 403;
-            throw error;
-        }
-
-        if (!canManageTarget(room, req.userId, userId)) {
-            const error = new Error('You cannot remove that participant');
-            error.status = 403;
-            throw error;
-        }
-
-        const beforeCount = room.participants.length;
-        room.participants = room.participants.filter(p => p.userId.toString() !== userId);
-        if (room.participants.length === beforeCount) {
-            const error = new Error('User not in room');
-            error.status = 404;
-            throw error;
-        }
+        applyKickParticipant({ room, actorUserId: req.userId, targetUserId: userId });
         await room.save();
 
         const redis = req.app.get('redis');
@@ -1559,10 +1747,29 @@ exports.kickParticipant = async (req, res, next) => {
 
         const io = req.app.get('io');
         if (io) {
-            io.to(`room:${room._id}`).emit('room:participant:left', { userId });
+            io.to(`room:${room._id}`).emit('room:participant:left', {
+                roomId: room._id.toString(),
+                userId
+            });
             io.to(`user:${userId}`).emit('user:kicked', { roomId: room._id, reason: reason || null });
-            emitLobbyUpdate(io, room, 'participant_left');
+            emitRoomUpdate(io, room, {
+                updateEvent: ROOM_UPDATE_EVENTS.ROLES,
+                lobbyAction: 'participant_left',
+                extraPayload: { userId, kicked: true }
+            });
         }
+
+        await logRoomAuditEvent({
+            roomId: room._id,
+            actorId: req.userId,
+            actorRole: 'admin',
+            targetUserId: userId,
+            action: 'room.kick_participant',
+            after: { reason: reason || null },
+            source: 'rest',
+            success: true,
+            requestId: req.id
+        });
 
         res.json({ success: true });
     } catch (error) {
@@ -1630,7 +1837,11 @@ exports.addAdmin = async (req, res, next) => {
         const io = req.app.get('io');
         if (io) {
             io.to(`room:${room._id}`).emit('admin:added', { userId });
-            emitLobbyUpdate(io, room, 'roles_updated');
+            emitRoomUpdate(io, room, {
+                updateEvent: ROOM_UPDATE_EVENTS.ROLES,
+                lobbyAction: 'roles_updated',
+                extraPayload: { userId, role: 'moderator' }
+            });
         }
 
         res.json({ admins: room.moderators });

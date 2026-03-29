@@ -130,7 +130,8 @@ exports.guestLogin = async (req, res, next) => {
         const user = new User({
             username,
             password: Math.random().toString(36).substring(2, 12),
-            coins: 50 // Less coins for guests
+            coins: 50, // Less coins for guests
+            isGuest: true
         });
 
         await user.save();
@@ -479,4 +480,3 @@ exports.disable2FA = async (req, res, next) => {
         res.json({ success: true, message: '2FA disabled' });
     } catch (error) { next(error); }
 };
-

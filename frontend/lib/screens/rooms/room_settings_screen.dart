@@ -13,6 +13,7 @@ import '../../services/upload_service.dart';
 import '../../utils/constants.dart';
 import '../../utils/room_permissions.dart';
 import '../../utils/room_presets.dart';
+import '../../widgets/rooms/seat_lock_badge.dart';
 import '../../widgets/user_avatar.dart';
 
 class RoomSettingsScreen extends StatefulWidget {
@@ -85,7 +86,7 @@ class _RoomSettingsScreenState extends State<RoomSettingsScreen> {
   }
 
   Future<void> _loadBans() async {
-    if (!_canModerate) {
+    if (!_permissions.canViewBans) {
       if (mounted) setState(() => _loadingBans = false);
       return;
     }
@@ -434,6 +435,17 @@ class _RoomSettingsScreenState extends State<RoomSettingsScreen> {
     );
   }
 
+  Future<void> _toggleAdminSeatControl(bool value) async {
+    if (!_permissions.canManageRoomIdentity) return;
+    await _toggleFlag(
+      'allowAdminSeatControl',
+      value,
+      value
+          ? 'Admins can now lock and unlock seats.'
+          : 'Seat locking is now host-only.',
+    );
+  }
+
   Future<void> _changeMaxActiveSpeakers() async {
     if (!_permissions.canManageRoomIdentity) return;
 
@@ -504,6 +516,80 @@ class _RoomSettingsScreenState extends State<RoomSettingsScreen> {
     await _savePatch({
       'settings': {key: value}
     }, success: success);
+  }
+
+  Future<int?> _pickSeatForParticipant(Participant participant) async {
+    final currentSeat = participant.seatIndex;
+    return showModalBottomSheet<int>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (context) => _sheet(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              participant.seatIndex >= 0
+                  ? 'Move ${participant.username}'
+                  : 'Assign ${participant.username}',
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 18,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              'Choose which live speaker seat they should take.',
+              style: TextStyle(
+                color: Colors.white.withValues(alpha: 0.6),
+                fontSize: 12,
+              ),
+            ),
+            const SizedBox(height: 18),
+            Wrap(
+              spacing: 10,
+              runSpacing: 10,
+              children: List.generate(_room.maxActiveSpeakers, (index) {
+                final seatIndex = index + 1;
+                final occupant = _room.participants.cast<Participant?>().firstWhere(
+                      (entry) =>
+                          entry != null &&
+                          entry.seatIndex == seatIndex &&
+                          entry.userId != participant.userId,
+                      orElse: () => null,
+                    );
+                final locked = _room.isLockedSeat(seatIndex);
+                final isCurrent = currentSeat == seatIndex;
+                final enabled = !locked && occupant == null;
+
+                return ChoiceChip(
+                  label: Text(
+                    occupant != null
+                        ? 'Seat $seatIndex • ${occupant.username}'
+                        : 'Seat $seatIndex',
+                  ),
+                  selected: isCurrent,
+                  onSelected: enabled ? (_) => Navigator.pop(context, seatIndex) : null,
+                  selectedColor: const Color(0xFFFF7A45),
+                  backgroundColor: const Color(0xFF1A1A22),
+                  disabledColor: Colors.white.withValues(alpha: 0.04),
+                  labelStyle: TextStyle(
+                    color: enabled || isCurrent ? Colors.white : Colors.white38,
+                    fontWeight: FontWeight.w700,
+                  ),
+                  side: BorderSide(
+                    color: isCurrent
+                        ? const Color(0xFFFF7A45)
+                        : Colors.white.withValues(alpha: 0.08),
+                  ),
+                );
+              }),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   Future<void> _pickCover() async {
@@ -633,11 +719,19 @@ class _RoomSettingsScreenState extends State<RoomSettingsScreen> {
                                 if (canManageSpeakerState)
                                   PopupMenuItem(
                                     value: participant.seatIndex >= 0
-                                        ? 'move_to_audience'
-                                        : 'approve_mic',
+                                        ? 'move_seat'
+                                        : 'move_to_seat',
                                     child: Text(participant.seatIndex >= 0
-                                        ? 'Move to audience'
-                                        : 'Approve mic request'),
+                                        ? 'Move to another seat'
+                                        : participant.raisedHand
+                                            ? 'Approve mic request'
+                                            : 'Move to seat'),
+                                  ),
+                                if (canManageSpeakerState &&
+                                    participant.seatIndex >= 0)
+                                  PopupMenuItem(
+                                    value: 'move_to_audience',
+                                    child: const Text('Move to audience'),
                                   ),
                                 if (canModerateParticipant)
                                   PopupMenuItem(
@@ -664,7 +758,21 @@ class _RoomSettingsScreenState extends State<RoomSettingsScreen> {
                               }
 
                               return PopupMenuButton<String>(
-                                iconColor: Colors.white54,
+                                padding: EdgeInsets.zero,
+                                icon: Container(
+                                  width: 40,
+                                  height: 40,
+                                  decoration: const BoxDecoration(
+                                    color: Colors.white,
+                                    shape: BoxShape.circle,
+                                  ),
+                                  alignment: Alignment.center,
+                                  child: const Icon(
+                                    Icons.more_horiz_rounded,
+                                    color: Colors.black87,
+                                    size: 20,
+                                  ),
+                                ),
                                 onSelected: (action) {
                                   Navigator.pop(context);
                                   _handleMemberAction(participant, action);
@@ -725,16 +833,21 @@ class _RoomSettingsScreenState extends State<RoomSettingsScreen> {
                 itemBuilder: (context, index) {
                   final seatIndex = index + 1;
                   final isClosedByLimit = seatIndex > _room.maxActiveSpeakers;
-                  final isLocked = _room.isLockedSeat(seatIndex);
-                  final isOccupied = _room.participants.any(
-                    (participant) => participant.seatIndex == seatIndex,
-                  );
+                  final seatState = _room.seatStateFor(seatIndex);
+                  final isLocked = seatState?.isLocked == true;
+                  final isOccupied = seatState?.isOccupied == true;
 
                   return GestureDetector(
-                    onTap: isClosedByLimit
-                        ? null
-                        : () async {
-                            try {
+                    onTap: () async {
+                          if (isOccupied && !isLocked) {
+                            ScaffoldMessenger.of(this.context).showSnackBar(
+                              const SnackBar(
+                                content: Text('Only empty seats can be locked.'),
+                              ),
+                            );
+                            return;
+                          }
+                          try {
                               final updatedRoom = isLocked
                                   ? await RoomService.unlockSeat(
                                       _room.id,
@@ -756,7 +869,7 @@ class _RoomSettingsScreenState extends State<RoomSettingsScreen> {
                                 SnackBar(
                                   content: Text(
                                     isLocked
-                                        ? 'Seat $seatIndex opened.'
+                                        ? 'This seat has been unlocked.'
                                         : 'Seat $seatIndex locked.',
                                   ),
                                 ),
@@ -769,19 +882,17 @@ class _RoomSettingsScreenState extends State<RoomSettingsScreen> {
                       duration: const Duration(milliseconds: 180),
                       padding: const EdgeInsets.all(14),
                       decoration: BoxDecoration(
-                        color: isClosedByLimit
-                            ? Colors.white.withValues(alpha: 0.03)
-                            : isLocked
-                                ? const Color(0xFFFF7A45)
-                                    .withValues(alpha: 0.12)
+                        color: isLocked
+                            ? const Color(0xFF172241).withValues(alpha: 0.92)
+                            : isClosedByLimit
+                                ? Colors.white.withValues(alpha: 0.03)
                                 : Colors.white.withValues(alpha: 0.06),
                         borderRadius: BorderRadius.circular(18),
                         border: Border.all(
-                          color: isClosedByLimit
-                              ? Colors.white10
-                              : isLocked
-                                  ? const Color(0xFFFF7A45)
-                                      .withValues(alpha: 0.38)
+                          color: isLocked
+                              ? const Color(0xFFFFD451).withValues(alpha: 0.34)
+                              : isClosedByLimit
+                                  ? Colors.white10
                                   : Colors.white.withValues(alpha: 0.08),
                         ),
                       ),
@@ -790,18 +901,24 @@ class _RoomSettingsScreenState extends State<RoomSettingsScreen> {
                         children: [
                           Row(
                             children: [
-                              Icon(
-                                isClosedByLimit
-                                    ? Icons.block_rounded
-                                    : isLocked
-                                        ? Icons.lock_rounded
-                                        : Icons.lock_open_rounded,
-                                size: 18,
-                                color: isClosedByLimit
-                                    ? Colors.white38
-                                    : isLocked
-                                        ? const Color(0xFFFF7A45)
-                                        : const Color(0xFF63E6BE),
+                              SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: isLocked
+                                    ? const SeatLockBadge(
+                                        size: 16,
+                                        backgroundColor: Color(0x00000000),
+                                        showGlow: false,
+                                      )
+                                    : Icon(
+                                        isClosedByLimit
+                                            ? Icons.block_rounded
+                                            : Icons.lock_open_rounded,
+                                        size: 18,
+                                        color: isClosedByLimit
+                                            ? Colors.white38
+                                            : const Color(0xFF63E6BE),
+                                      ),
                               ),
                               const SizedBox(width: 8),
                               Text(
@@ -816,14 +933,14 @@ class _RoomSettingsScreenState extends State<RoomSettingsScreen> {
                           ),
                           const Spacer(),
                           Text(
-                            isClosedByLimit
-                                ? 'Closed by active seat limit'
-                                : isLocked
-                                    ? isOccupied
-                                        ? 'Locked after the speaker leaves'
-                                        : 'Locked for new joiners'
-                                    : isOccupied
-                                        ? 'Live speaker seat'
+                            isLocked
+                                ? isClosedByLimit
+                                    ? 'Locked and currently outside the active seat limit'
+                                    : 'Locked for new joiners and seat moves'
+                                : isOccupied
+                                    ? 'Live speaker seat'
+                                    : isClosedByLimit
+                                        ? 'Currently outside the active seat limit'
                                         : 'Open for stage joins',
                             style: TextStyle(
                               color: Colors.white.withValues(alpha: 0.54),
@@ -890,7 +1007,15 @@ class _RoomSettingsScreenState extends State<RoomSettingsScreen> {
             if (updated != null && mounted) setState(() => _room = updated);
             break;
           case 'approve_mic':
-            await RoomService.promoteParticipant(_room.id, participant.userId);
+          case 'move_to_seat':
+          case 'move_seat':
+            final seatIndex = await _pickSeatForParticipant(participant);
+            if (seatIndex == null) break;
+            await RoomService.promoteParticipant(
+              _room.id,
+              participant.userId,
+              seatIndex: seatIndex,
+            );
             await _reload();
             break;
           case 'move_to_audience':
@@ -1066,8 +1191,15 @@ class _RoomSettingsScreenState extends State<RoomSettingsScreen> {
                     final user = report['userId'] is Map
                         ? Map<String, dynamic>.from(report['userId'] as Map)
                         : const <String, dynamic>{};
+                    final targetUser = report['targetUserId'] is Map
+                        ? Map<String, dynamic>.from(
+                            report['targetUserId'] as Map,
+                          )
+                        : const <String, dynamic>{};
                     final username = user['username']?.toString() ?? 'Unknown';
                     final avatar = user['avatar']?.toString();
+                    final targetUsername =
+                        targetUser['username']?.toString() ?? '';
                     final createdAt = DateTime.tryParse(
                       report['createdAt']?.toString() ?? '',
                     );
@@ -1083,8 +1215,12 @@ class _RoomSettingsScreenState extends State<RoomSettingsScreen> {
                           style: const TextStyle(color: Colors.white)),
                       subtitle: Text(
                         report['reason']?.toString().isNotEmpty == true
-                            ? report['reason'].toString()
-                            : 'Room report',
+                            ? (targetUsername.isNotEmpty
+                                ? '${report['reason']} • Target: $targetUsername'
+                                : report['reason'].toString())
+                            : (targetUsername.isNotEmpty
+                                ? 'User report • Target: $targetUsername'
+                                : 'Room report'),
                         style: const TextStyle(color: Colors.white54),
                       ),
                       trailing: createdAt == null
@@ -1328,6 +1464,15 @@ class _RoomSettingsScreenState extends State<RoomSettingsScreen> {
                 onChanged: _toggleStageLock,
               ),
               _switchItem(
+                title: 'Allow Admin Seat Control',
+                subtitle: 'Let admins lock and unlock individual speaker seats',
+                icon: Icons.admin_panel_settings_rounded,
+                iconColor: const Color(0xFFFFD451),
+                value: _room.allowAdminSeatControl,
+                enabled: _permissions.canManageRoomIdentity,
+                onChanged: _toggleAdminSeatControl,
+              ),
+              _switchItem(
                 title: 'Require Mic Approval',
                 subtitle: 'Guests send a request before becoming a speaker',
                 icon: Icons.record_voice_over_rounded,
@@ -1362,7 +1507,7 @@ class _RoomSettingsScreenState extends State<RoomSettingsScreen> {
                 title: 'Seat Controls',
                 count: '${_room.lockedSeats.length} locked',
                 icon: Icons.event_seat_rounded,
-                onTap: _permissions.canManageStage ? _showSeatControls : null,
+                onTap: _permissions.canManageSeatLocks ? _showSeatControls : null,
               ),
               _switchItem(
                 title: 'Private Room',
@@ -1379,7 +1524,7 @@ class _RoomSettingsScreenState extends State<RoomSettingsScreen> {
                 title: 'Banned Users',
                 count: _loadingBans ? 'Loading' : '${_bans.length}',
                 icon: Icons.gpp_bad_rounded,
-                onTap: _permissions.canManageStage ? _showBans : null,
+                onTap: _permissions.canViewBans ? _showBans : null,
               ),
               _navItem(
                 title: 'Room Reports',

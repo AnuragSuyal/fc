@@ -13,7 +13,10 @@ class ApiService {
 
   static String get baseUrl => AppConfig.baseUrl;
 
-  static Future<dynamic> get(String endpoint) async {
+  static Future<dynamic> get(
+    String endpoint, {
+    Map<String, String>? headers,
+  }) async {
     final token = await AuthService.getToken();
     final requestKey = '$endpoint::${token ?? ''}';
     final existing = _pendingGets[requestKey];
@@ -30,7 +33,7 @@ class ApiService {
         return _client
             .get(
               Uri.parse('$baseUrl$endpoint'),
-              headers: _headers(currentToken),
+              headers: _headers(currentToken, extraHeaders: headers),
             )
             .timeout(_timeout);
       },
@@ -47,7 +50,10 @@ class ApiService {
   }
 
   static Future<dynamic> post(
-      String endpoint, Map<String, dynamic> data) async {
+    String endpoint,
+    Map<String, dynamic> data, {
+    Map<String, String>? headers,
+  }) async {
     return _performRequest(
       method: 'POST',
       endpoint: endpoint,
@@ -57,7 +63,7 @@ class ApiService {
         return _client
             .post(
               Uri.parse('$baseUrl$endpoint'),
-              headers: _headers(token),
+              headers: _headers(token, extraHeaders: headers),
               body: json.encode(data),
             )
             .timeout(_timeout);
@@ -65,7 +71,11 @@ class ApiService {
     );
   }
 
-  static Future<dynamic> put(String endpoint, Map<String, dynamic> data) async {
+  static Future<dynamic> put(
+    String endpoint,
+    Map<String, dynamic> data, {
+    Map<String, String>? headers,
+  }) async {
     return _performRequest(
       method: 'PUT',
       endpoint: endpoint,
@@ -75,7 +85,7 @@ class ApiService {
         return _client
             .put(
               Uri.parse('$baseUrl$endpoint'),
-              headers: _headers(token),
+              headers: _headers(token, extraHeaders: headers),
               body: json.encode(data),
             )
             .timeout(_timeout);
@@ -84,7 +94,10 @@ class ApiService {
   }
 
   static Future<dynamic> patch(
-      String endpoint, Map<String, dynamic> data) async {
+    String endpoint,
+    Map<String, dynamic> data, {
+    Map<String, String>? headers,
+  }) async {
     return _performRequest(
       method: 'PATCH',
       endpoint: endpoint,
@@ -94,7 +107,7 @@ class ApiService {
         return _client
             .patch(
               Uri.parse('$baseUrl$endpoint'),
-              headers: _headers(token),
+              headers: _headers(token, extraHeaders: headers),
               body: json.encode(data),
             )
             .timeout(_timeout);
@@ -102,7 +115,10 @@ class ApiService {
     );
   }
 
-  static Future<dynamic> delete(String endpoint) async {
+  static Future<dynamic> delete(
+    String endpoint, {
+    Map<String, String>? headers,
+  }) async {
     return _performRequest(
       method: 'DELETE',
       endpoint: endpoint,
@@ -112,16 +128,21 @@ class ApiService {
         return _client
             .delete(
               Uri.parse('$baseUrl$endpoint'),
-              headers: _headers(token),
+              headers: _headers(token, extraHeaders: headers),
             )
             .timeout(_timeout);
       },
     );
   }
 
-  static Map<String, String> _headers(String? token) => {
+  static Map<String, String> _headers(
+    String? token, {
+    Map<String, String>? extraHeaders,
+  }) =>
+      {
         'Content-Type': 'application/json',
         if (token != null) 'Authorization': 'Bearer $token',
+        if (extraHeaders != null) ...extraHeaders,
       };
 
   static Future<dynamic> _performRequest({

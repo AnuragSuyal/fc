@@ -95,9 +95,9 @@ class GiftTransactionModel {
       type: json['type'] ?? '',
       coinsAmount: json['amount']?['coins'] ?? 0,
       gemsAmount: json['amount']?['gems'] ?? 0,
-      giftId: gift?['_id'] ?? reference?['giftId'],
+      giftId: gift?['giftId'] ?? gift?['_id'] ?? reference?['giftId'],
       giftName: gift?['name'],
-      giftIcon: gift?['icon'],
+      giftIcon: gift?['assetPath'] ?? gift?['icon'],
       recipientId: recipient?['_id'] ?? reference?['recipientId'],
       recipientName: recipient?['username'],
       recipientAvatar: recipient?['avatar'],
@@ -117,7 +117,6 @@ class GiftTransactionModel {
     );
   }
 }
-
 
 
 

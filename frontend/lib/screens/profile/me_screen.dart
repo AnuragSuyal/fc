@@ -1085,7 +1085,13 @@ class _MeScreenState extends State<MeScreen>
         onTap: () => Navigator.pushNamed(context, '/wallet'),
       ),
       _QuickAction(
-        icon: const Icon(Icons.workspace_premium_outlined),
+        icon: Image.asset(
+          'assets/images/me_vip_quick_action.png',
+          width: 30,
+          height: 30,
+          fit: BoxFit.contain,
+          filterQuality: FilterQuality.high,
+        ),
         title: 'VIP',
         subtitle: 'Perks and status',
         color: const Color(0xFF8B5CF6),

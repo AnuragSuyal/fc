@@ -4,6 +4,7 @@ import '../screens/gifts/send_gift_screen.dart';
 import '../theme/app_theme.dart';
 import '../utils/constants.dart';
 import 'currency_icon.dart';
+import 'gift_image.dart';
 
 class GiftCard extends StatelessWidget {
   final GiftModel gift;
@@ -75,9 +76,15 @@ class GiftCard extends StatelessWidget {
                 color: tierColor.withValues(alpha: 0.15),
                 shape: BoxShape.circle,
               ),
-              child: Text(
-                gift.icon,
-                style: const TextStyle(fontSize: 34),
+              child: GiftImage(
+                source: gift.artworkSource,
+                width: 44,
+                height: 44,
+                fallback: Icon(
+                  Icons.card_giftcard_rounded,
+                  color: tierColor,
+                  size: 28,
+                ),
               ),
             ),
             const SizedBox(height: 10),

@@ -7,6 +7,15 @@ const Room = require('../models/Room');
 const rankingService = require('../services/rankingService');
 const { awardRoomGiftXp } = require('../services/roomProgressionService');
 const { awardSpendXp, buildProgressPayload } = require('../services/spendXpService');
+const { findGiftByIdentifier, syncGiftCatalog } = require('../services/giftCatalogService');
+const {
+    ACTIVE_GIFT_CATALOG,
+    ACTIVE_GIFT_IDS,
+    GIFT_CATALOG_VERSION,
+    buildCategorizedGiftResponse,
+    normalizeGiftCategory,
+    serializeGift
+} = require('../utils/giftCatalog');
 const economyController = require('./economyController');
 const { canUseRoomGifts, getParticipant } = require('../utils/roomPermissions');
 
@@ -27,14 +36,66 @@ const populateRealtimeRoom = async (roomId) => Room.findById(roomId)
     .populate('participants.userId', 'username avatar level vipLevel status.isOnline')
     .populate('bans.userId', 'username avatar');
 
+const resolveSerializedGiftReference = async (giftReference, { activeOnly = false } = {}) => {
+    if (!giftReference) return null;
+
+    if (typeof giftReference === 'object') {
+        const hasGiftFields = giftReference.giftId
+            || giftReference.name
+            || giftReference.assetPath
+            || giftReference.icon;
+        if (hasGiftFields) {
+            return serializeGift(giftReference);
+        }
+    }
+
+    const identifier = typeof giftReference === 'object'
+        ? giftReference._id?.toString?.()
+            || giftReference._id
+            || giftReference.giftId
+            || giftReference.toString?.()
+            || ''
+        : giftReference;
+
+    if (!identifier) return null;
+
+    const giftDoc = await findGiftByIdentifier(String(identifier), { activeOnly });
+    return serializeGift(giftDoc);
+};
+
+const hydrateGiftReferences = async (transactions, { activeOnly = false } = {}) => Promise.all(
+    (transactions || []).map(async (transaction) => {
+        const serialized = typeof transaction?.toObject === 'function'
+            ? transaction.toObject({ virtuals: true })
+            : { ...(transaction || {}) };
+        const gift = await resolveSerializedGiftReference(
+            serialized.reference?.giftId,
+            { activeOnly }
+        );
+        return {
+            ...serialized,
+            reference: {
+                ...(serialized.reference || {}),
+                giftId: gift
+            }
+        };
+    })
+);
+
 // @desc    Get all gifts (catalog)
 exports.getGiftCatalog = async (req, res, next) => {
     try {
-        const { category, tier, minLevel, sort = 'popular' } = req.query;
-        const query = { active: true };
+        const { category, tier, minLevel, sort = 'catalog' } = req.query;
+        const query = {
+            active: true,
+            giftId: { $in: ACTIVE_GIFT_IDS }
+        };
         const redisClient = req.app.get('redis');
+        const normalizedCategory = normalizeGiftCategory(category);
 
-        const cacheKey = `cache:gifts:catalog:${category || 'all'}:${tier || 'all'}:${minLevel || 'all'}:${sort}`;
+        await syncGiftCatalog();
+
+        const cacheKey = `cache:gifts:${GIFT_CATALOG_VERSION}:catalog:${normalizedCategory || 'all'}:${tier || 'all'}:${minLevel || 'all'}:${sort}`;
         if (redisClient && redisClient.isReady) {
             const cached = await redisClient.get(cacheKey);
             if (cached) {
@@ -42,7 +103,7 @@ exports.getGiftCatalog = async (req, res, next) => {
             }
         }
 
-        if (category) query.category = category;
+        if (normalizedCategory) query.category = normalizedCategory;
         if (tier) query.tier = parseInt(tier);
         if (minLevel) query['requirements.minLevel'] = { $lte: parseInt(minLevel) };
 
@@ -64,16 +125,30 @@ exports.getGiftCatalog = async (req, res, next) => {
             case 'popular': sortOption = { 'stats.totalSent': -1 }; break;
             case 'price_low': sortOption = { 'price.coins': 1, 'price.gems': 1 }; break;
             case 'price_high': sortOption = { 'price.coins': -1, 'price.gems': -1 }; break;
-            default: sortOption = { tier: 1, 'stats.totalSent': -1 };
+            case 'catalog': sortOption = { sortOrder: 1, tier: 1 }; break;
+            default: sortOption = { sortOrder: 1, tier: 1 };
         }
 
         const gifts = await Gift.find(query).sort(sortOption);
-        const categorized = {
-            simple: gifts.filter(g => g.category === 'simple'),
-            premium: gifts.filter(g => g.category === 'premium'),
-            luxury: gifts.filter(g => g.category === 'luxury'),
-            legendary: gifts.filter(g => g.category === 'legendary')
-        };
+        const fallbackCatalog = ACTIVE_GIFT_CATALOG.filter((gift) => {
+            if (normalizedCategory && gift.category !== normalizedCategory) {
+                return false;
+            }
+
+            if (tier && gift.tier !== parseInt(tier)) {
+                return false;
+            }
+
+            if (minLevel && (gift.requirements?.minLevel || 0) > parseInt(minLevel)) {
+                return false;
+            }
+
+            return true;
+        });
+
+        const categorized = buildCategorizedGiftResponse(
+            gifts.length > 0 ? gifts : fallbackCatalog
+        );
 
         if (redisClient && redisClient.isReady) {
             await redisClient.set(cacheKey, JSON.stringify(categorized), { EX: 3600 });
@@ -86,13 +161,14 @@ exports.getGiftCatalog = async (req, res, next) => {
 
 exports.getGiftById = async (req, res, next) => {
     try {
-        const gift = await Gift.findById(req.params.id);
+        await syncGiftCatalog();
+        const gift = await findGiftByIdentifier(req.params.id, { activeOnly: true });
         if (!gift) {
             const error = new Error('Gift not found');
             error.status = 404;
             throw error;
         }
-        res.json(gift);
+        res.json(serializeGift(gift));
     } catch (error) {
         next(error);
     }
@@ -104,18 +180,27 @@ exports.sendGift = async (req, res, next) => {
         const { toUserId, giftId, roomId, message: giftNote } = req.body;
         const fromUserId = req.userId;
         const idempotencyKey = resolveIdempotencyKey(req);
+        await syncGiftCatalog();
+
         if (idempotencyKey && !req.idempotencyKey) {
             req.idempotencyKey = idempotencyKey;
         }
 
         if (idempotencyKey) {
-            const existingTxn = await Transaction.findOne({ userId: fromUserId, idempotencyKey, type: 'gift_sent' })
-                .populate('reference.giftId', 'name icon animation')
+            const existingTxn = await Transaction.findOne({
+                userId: fromUserId,
+                idempotencyKey,
+                type: 'gift_sent'
+            })
                 .select('transactionId balanceAfter reference');
             if (existingTxn) {
+                const gift = await resolveSerializedGiftReference(
+                    existingTxn.reference?.giftId,
+                    { activeOnly: true }
+                );
                 return res.json({
                     success: true,
-                    gift: existingTxn.reference?.giftId || null,
+                    gift,
                     transactionId: existingTxn.transactionId,
                     newBalance: existingTxn.balanceAfter
                 });
@@ -152,7 +237,7 @@ exports.sendGift = async (req, res, next) => {
             }
         }
 
-        const gift = await Gift.findById(giftId);
+        const gift = await findGiftByIdentifier(giftId, { activeOnly: true });
         if (!gift) throw new Error('Gift not found');
 
         const [originalSender, originalRecipient] = await Promise.all([
@@ -224,7 +309,7 @@ exports.sendGift = async (req, res, next) => {
             amount: { coins: -gift.price.coins, gems: -gift.price.gems },
             balanceBefore: balanceBeforeSender,
             balanceAfter: { coins: sender.coins, gems: sender.gems },
-            reference: { giftId, recipientId: toUserId, roomId },
+            reference: { giftId: gift._id, recipientId: toUserId, roomId },
             idempotencyKey: idempotencyKey || undefined,
             status: 'completed',
             completedAt: new Date()
@@ -236,7 +321,7 @@ exports.sendGift = async (req, res, next) => {
             amount: { coins: payoutCoins, gems: payoutGems },
             balanceBefore: balanceBeforeRecipient,
             balanceAfter: { coins: recipient.coins, gems: recipient.gems },
-            reference: { giftId, senderId: fromUserId, roomId },
+            reference: { giftId: gift._id, senderId: fromUserId, roomId },
             status: 'completed',
             completedAt: new Date()
         });
@@ -350,10 +435,12 @@ exports.sendGift = async (req, res, next) => {
         const io = req.app.get('io');
         if (io) {
             const giftData = {
-                giftId: result.gift._id,
+                giftId: result.gift.giftId || result.gift._id,
                 giftName: result.gift.name,
                 giftIcon: result.gift.icon,
                 animation: result.gift.animation,
+                giftCategory: result.gift.category,
+                giftRarity: result.gift.rarity || result.gift.category,
                 sender: {
                     userId: result.sender._id,
                     username: result.sender.username,
@@ -434,7 +521,7 @@ exports.sendGift = async (req, res, next) => {
 
         res.json({
             success: true,
-            gift: result.gift,
+            gift: serializeGift(result.gift),
             transactionId: result.senderTxn.transactionId,
             newBalance: buildProgressPayload(result.sender, {
                 xpGained: 0,
@@ -455,17 +542,19 @@ exports.getGiftHistory = async (req, res, next) => {
         else query.type = { $in: ['gift_sent', 'gift_received'] };
 
         const history = await Transaction.find(query)
-            .populate('reference.giftId', 'name icon animation')
             .populate('reference.senderId', 'username avatar')
             .populate('reference.recipientId', 'username avatar')
             .sort({ createdAt: -1 })
             .limit(parseInt(limit))
             .skip((parseInt(page) - 1) * parseInt(limit));
 
+        const hydratedHistory = await hydrateGiftReferences(history, {
+            activeOnly: false
+        });
         const total = await Transaction.countDocuments(query);
         res.json({
-            transactions: history,
-            history,
+            transactions: hydratedHistory,
+            history: hydratedHistory,
             pagination: { page: parseInt(page), limit: parseInt(limit), total, pages: Math.ceil(total / parseInt(limit)) }
         });
     } catch (error) {
@@ -507,18 +596,12 @@ exports.getGiftAchievements = async (req, res, next) => {
 
 exports.seedGifts = async (req, res, next) => {
     try {
-        // Simple seed logic
-        const count = await Gift.countDocuments();
-        if (count > 0) return res.json({ message: 'Gifts already seeded' });
-
-        const baseGifts = [
-            { name: 'Rose', icon: 'ðŸŒ¹', price: { coins: 10, gems: 0 }, tier: 1, category: 'simple', animation: 'rose_scatter' },
-            { name: 'Heart', icon: 'â¤ï¸', price: { coins: 50, gems: 0 }, tier: 1, category: 'simple', animation: 'heart_pop' },
-            { name: 'Diamond', icon: 'ðŸ’Ž', price: { coins: 0, gems: 10 }, tier: 2, category: 'premium', animation: 'diamond_sparkle' }
-        ];
-
-        await Gift.insertMany(baseGifts);
-        res.json({ success: true, message: 'Gifts seeded successfully' });
+        const result = await syncGiftCatalog({ force: true });
+        res.json({
+            success: true,
+            message: 'Gift catalog synced successfully',
+            ...result
+        });
     } catch (error) {
         next(error);
     }

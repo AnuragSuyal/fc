@@ -1,6 +1,7 @@
 // const { AccessToken, WebhookReceiver } = require('livekit-server-sdk');
 const Room = require('../models/Room');
 const User = require('../models/User');
+const { ROOM_ACTIONS, assertRoomPermission } = require('../services/roomPermissionService');
 
 const resolveRoom = async (roomIdOrName) => {
     if (!roomIdOrName) return null;
@@ -70,6 +71,12 @@ exports.generateToken = async (req, res, next) => {
             error.status = 403;
             throw error;
         }
+
+        assertRoomPermission({
+            room,
+            actorUserId: req.userId,
+            action: ROOM_ACTIONS.GET_ROOM_TOKEN
+        }, 'Join the room before requesting voice access');
 
         const user = await User.findById(req.userId).select('username avatar');
         const metadata = JSON.stringify({
@@ -156,7 +163,6 @@ exports.handleWebhook = async (req, res, next) => {
         next(error);
     }
 };
-
 
 
 

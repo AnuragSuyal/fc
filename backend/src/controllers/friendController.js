@@ -4,6 +4,23 @@ const economyController = require('./economyController');
 
 const withSession = (query, session) => (session ? query.session(session) : query);
 
+const setRealtimeNoStore = (res) => {
+    res.set({
+        'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+        Pragma: 'no-cache',
+        Expires: '0',
+        'Surrogate-Control': 'no-store'
+    });
+};
+
+const uniqueObjectIds = (values = []) => (
+    [...new Set(
+        values
+            .map((value) => value?.toString())
+            .filter(Boolean)
+    )]
+);
+
 const runWithOptionalTransaction = async (work) => {
     const session = await mongoose.startSession();
     try {
@@ -191,6 +208,7 @@ exports.removeFriend = async (req, res, next) => {
 // @desc    Get friends list
 exports.getFriends = async (req, res, next) => {
     try {
+        setRealtimeNoStore(res);
         const user = await User.findById(req.userId)
             .populate('friends', 'username avatar level status.isOnline status.lastActive vipLevel');
         if (!user) { const e = new Error('User not found'); e.status = 404; throw e; }
@@ -205,6 +223,7 @@ exports.getFriends = async (req, res, next) => {
 // @desc    Get friend requests
 exports.getFriendRequests = async (req, res, next) => {
     try {
+        setRealtimeNoStore(res);
         const user = await User.findById(req.userId)
             .populate('friendRequests.from', 'username avatar level');
         if (!user) { const e = new Error('User not found'); e.status = 404; throw e; }
@@ -215,6 +234,7 @@ exports.getFriendRequests = async (req, res, next) => {
 // @desc    Get friend request overview (incoming + outgoing)
 exports.getFriendRequestOverview = async (req, res, next) => {
     try {
+        setRealtimeNoStore(res);
         const user = await User.findById(req.userId)
             .populate('friendRequests.from', 'username avatar level status.isOnline uid');
         if (!user) { const e = new Error('User not found'); e.status = 404; throw e; }
@@ -269,13 +289,35 @@ exports.getFriendRequestOverview = async (req, res, next) => {
 // @desc    Get friend suggestions
 exports.getFriendSuggestions = async (req, res, next) => {
     try {
-        const currentUser = await User.findById(req.userId);
+        setRealtimeNoStore(res);
+        const currentUser = await User.findById(req.userId)
+            .select('friends blockedUsers friendRequests');
         if (!currentUser) { const e = new Error('User not found'); e.status = 404; throw e; }
+
+        const incomingPendingIds = (currentUser.friendRequests || [])
+            .filter((request) => request?.status === 'pending' && request?.from)
+            .map((request) => request.from);
+
+        const excludedIds = uniqueObjectIds([
+            req.userId,
+            ...currentUser.friends,
+            ...(currentUser.blockedUsers || []),
+            ...incomingPendingIds
+        ]);
+
         const suggestions = await User.find({
-            _id: { $ne: req.userId, $nin: [...currentUser.friends, ...(currentUser.blockedUsers || [])] },
-            'friendRequests.from': { $ne: req.userId }
+            _id: { $nin: excludedIds },
+            blockedUsers: { $ne: req.userId },
+            friendRequests: {
+                $not: {
+                    $elemMatch: {
+                        from: currentUser._id,
+                        status: 'pending'
+                    }
+                }
+            }
         })
-            .select('username avatar level status.isOnline')
+            .select('username avatar level status.isOnline status.lastActive vipLevel')
             .limit(20)
             .sort({ 'status.isOnline': -1, level: -1 });
         res.json(suggestions);
@@ -321,6 +363,7 @@ exports.unblockUser = async (req, res, next) => {
 // @desc    Get blocked users
 exports.getBlockedUsers = async (req, res, next) => {
     try {
+        setRealtimeNoStore(res);
         const user = await User.findById(req.userId).populate('blockedUsers', 'username avatar level');
         res.json(user?.blockedUsers || []);
     } catch (error) { next(error); }

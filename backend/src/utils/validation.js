@@ -14,7 +14,10 @@ const loginSchema = z.object({
 
 const sendGiftSchema = z.object({
     toUserId: z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid recipient ID'),
-    giftId: z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid gift ID'),
+    giftId: z.string()
+        .min(1, 'Gift ID is required')
+        .max(80, 'Invalid gift ID')
+        .regex(/^[A-Za-z0-9_-]+$/, 'Invalid gift ID'),
     roomId: z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid room ID').optional(),
     message: z.string().max(100).optional(),
     broadcast: z.boolean().optional()
@@ -32,7 +35,9 @@ const verifyOtpSchema = z.object({
 const createRoomSchema = z.object({
     name: z.string().min(3).max(50),
     description: z.string().max(200).optional(),
+    announcement: z.string().max(500).optional(),
     type: z.enum(['voice', 'music', 'video', 'chat', 'auction', 'game']).optional(),
+    mode: z.enum(['normal', 'acquaint', 'auction']).optional(),
     category: z.enum(['all', 'voice', 'music', 'video', 'chat', 'battle', 'auction']).optional(),
     tags: z.array(z.string().max(20)).max(5).optional(),
     settings: z.object({
@@ -48,6 +53,7 @@ const createRoomSchema = z.object({
         allowScreenShare: z.boolean().optional(),
         allowVideo: z.boolean().optional(),
         stageJoinsLocked: z.boolean().optional(),
+        allowAdminSeatControl: z.boolean().optional(),
         maxActiveSpeakers: z.number().int().min(1).max(8).optional(),
         requireApproval: z.boolean().optional(),
         slowMode: z.number().min(0).optional(),
@@ -132,6 +138,7 @@ const createGroupSchema = z.object({
     name: z.string().min(3).max(50),
     description: z.string().max(500).optional(),
     motto: z.string().max(100).optional(),
+    avatar: z.string().url().optional(),
     isPublic: z.boolean().optional(),
     maxMembers: z.number().min(10).max(500).optional(),
     approvalRequired: z.boolean().optional(),

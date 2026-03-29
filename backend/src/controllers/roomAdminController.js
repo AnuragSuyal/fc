@@ -6,6 +6,7 @@ const {
     getRoomAdminLimit
 } = require('../services/roomProgressionService');
 const {
+    ROOM_ACTIONS,
     canEditAnnouncement,
     canManageAdmins,
     canManageStage,
@@ -17,72 +18,112 @@ const {
     getMaxActiveSpeakers,
     getParticipant,
     idsEqual,
-    isRoomAdmin
-} = require('../utils/roomPermissions');
+    isRoomAdmin,
+    assertRoomPermission
+} = require('../services/roomPermissionService');
+const {
+    ROOM_UPDATE_EVENTS,
+    decorateRoomPayload,
+    emitRoomUpdate,
+    populateRoomById
+} = require('../services/roomSettingsService');
+const {
+    banParticipant: applyBanParticipant,
+    muteParticipant: applyMuteParticipant,
+    unbanParticipant: applyUnbanParticipant,
+} = require('../services/roomModerationService');
+const {
+    canLockSeat,
+    canUnlockSeat,
+    demoteParticipantFromSeat,
+    getLockedSeatCount,
+    getSeatStateSnapshot,
+    lockSeat: applyLockSeat,
+    moveParticipantToSeat,
+    serializeSeatState,
+    unlockSeat: applyUnlockSeat,
+    validateSeatIndexWithinStage
+} = require('../services/roomSeatService');
+const { logRoomAuditEvent } = require('../services/roomAuditService');
 const roomCacheKey = (roomId) => `cache:room:${roomId}`;
-
-const populateRoomById = async (roomId) =>
-    Room.findById(roomId)
-        .populate('hostId', 'username avatar level vipLevel')
-        .populate('coHosts', 'username avatar level vipLevel')
-        .populate('moderators', 'username avatar level vipLevel')
-        .populate('participants.userId', 'username avatar level vipLevel status.isOnline')
-        .populate('bans.userId', 'username avatar');
 
 const invalidateRoomCache = async (redis, roomId) => {
     if (!redis || !redis.isReady) return;
     await redis.del(roomCacheKey(roomId));
 };
 
-const emitLobbyUpdate = (io, room, action = 'updated') => {
-    if (!io || !room) return;
-
-    const roomId = room._id?.toString() || room.id?.toString() || room.roomId?.toString();
-    if (!roomId) return;
-
-    io.emit('room:lobby:update', {
-        roomId,
-        action,
-        name: room.name,
-        category: room.category,
-        type: room.type,
-        participantCount: room.participantCount ?? room.participants?.length ?? 0,
-        onlineCount: room.onlineCount ?? 0,
-        endedAt: room.endedAt || null,
-        updatedAt: new Date().toISOString()
-    });
-};
-
-// Lock/unlock a seat (host only)
+// Lock/unlock a seat with centralized seat-state metadata
 exports.lockSeat = async (req, res, next) => {
     try {
         const { seatIndex } = req.params;
         const room = await Room.findById(req.params.id);
         if (!room) { const e = new Error('Room not found'); e.status = 404; throw e; }
-        if (!canManageStage(room, req.userId)) { const e = new Error('Not authorized'); e.status = 403; throw e; }
-
-        if (!room.lockedSeats) room.lockedSeats = [];
-        const idx = parseInt(seatIndex);
-        if (!room.lockedSeats.includes(idx)) room.lockedSeats.push(idx);
+        const idx = validateSeatIndexWithinStage(room, parseInt(seatIndex));
+        if (!canLockSeat({ room, actorUserId: req.userId, seatIndex: idx })) {
+            const error = new Error('You do not have permission to lock this seat.');
+            error.status = 403;
+            throw error;
+        }
+        const lockedSeat = applyLockSeat({
+            room,
+            actorUserId: req.userId,
+            seatIndex: idx,
+            reason: req.body?.reason
+        });
         await room.save();
         await invalidateRoomCache(req.app.get('redis'), room._id);
 
         const populatedRoom = await populateRoomById(room._id);
+        const seatSnapshot = serializeSeatState(lockedSeat);
+        const updatedSeats = getSeatStateSnapshot(populatedRoom || room);
+        const lockedSeatCount = getLockedSeatCount(populatedRoom || room);
         const io = req.app.get('io');
         if (io) {
             io.to(`room:${room._id}`).emit('room:seat_locked', {
                 roomId: room._id.toString(),
                 seatIndex: idx,
-                lockedSeats: populatedRoom?.lockedSeats || room.lockedSeats
+                isLocked: true,
+                lockedByUserId: seatSnapshot?.lockedByUserId || req.userId,
+                lockedAt: seatSnapshot?.lockedAt,
+                lockedSeatCount,
+                updatedSeat: seatSnapshot,
+                updatedSeats
             });
-            io.to(`room:${room._id}`).emit('room:updated', populatedRoom);
-            emitLobbyUpdate(io, populatedRoom || room, 'seat_updated');
+            emitRoomUpdate(io, populatedRoom || room, {
+                updateEvent: ROOM_UPDATE_EVENTS.SEATS,
+                lobbyAction: 'seat_updated',
+                extraPayload: {
+                    seatIndex: idx,
+                    isLocked: true,
+                    lockedByUserId: seatSnapshot?.lockedByUserId || req.userId,
+                    lockedAt: seatSnapshot?.lockedAt,
+                    lockedSeatCount,
+                    updatedSeat: seatSnapshot,
+                    updatedSeats
+                }
+            });
         }
+
+        await logRoomAuditEvent({
+            roomId: room._id,
+            actorId: req.userId,
+            actorRole: 'admin',
+            action: 'room.lock_seat',
+            after: {
+                seat: seatSnapshot,
+                lockedSeatCount
+            },
+            source: 'rest',
+            success: true,
+            requestId: req.id
+        });
 
         res.json({
             success: true,
             lockedSeats: populatedRoom?.lockedSeats || room.lockedSeats,
-            room: populatedRoom
+            seat: seatSnapshot,
+            lockedSeatCount,
+            room: decorateRoomPayload(populatedRoom || room, req.userId)
         });
     } catch (error) { next(error); }
 };
@@ -92,29 +133,67 @@ exports.unlockSeat = async (req, res, next) => {
         const { seatIndex } = req.params;
         const room = await Room.findById(req.params.id);
         if (!room) { const e = new Error('Room not found'); e.status = 404; throw e; }
-        if (!canManageStage(room, req.userId)) { const e = new Error('Not authorized'); e.status = 403; throw e; }
-
-        const idx = parseInt(seatIndex);
-        room.lockedSeats = (room.lockedSeats || []).filter(s => s !== idx);
+        const idx = validateSeatIndexWithinStage(room, parseInt(seatIndex));
+        if (!canUnlockSeat({ room, actorUserId: req.userId, seatIndex: idx })) {
+            const error = new Error('You do not have permission to unlock this seat.');
+            error.status = 403;
+            throw error;
+        }
+        const unlockedSeat = applyUnlockSeat({ room, actorUserId: req.userId, seatIndex: idx });
         await room.save();
         await invalidateRoomCache(req.app.get('redis'), room._id);
 
         const populatedRoom = await populateRoomById(room._id);
+        const seatSnapshot = serializeSeatState(unlockedSeat);
+        const updatedSeats = getSeatStateSnapshot(populatedRoom || room);
+        const lockedSeatCount = getLockedSeatCount(populatedRoom || room);
         const io = req.app.get('io');
         if (io) {
             io.to(`room:${room._id}`).emit('room:seat_unlocked', {
                 roomId: room._id.toString(),
                 seatIndex: idx,
-                lockedSeats: populatedRoom?.lockedSeats || room.lockedSeats
+                isLocked: false,
+                lockedByUserId: null,
+                lockedAt: null,
+                lockedSeatCount,
+                updatedSeat: seatSnapshot,
+                updatedSeats
             });
-            io.to(`room:${room._id}`).emit('room:updated', populatedRoom);
-            emitLobbyUpdate(io, populatedRoom || room, 'seat_updated');
+            emitRoomUpdate(io, populatedRoom || room, {
+                updateEvent: ROOM_UPDATE_EVENTS.SEATS,
+                lobbyAction: 'seat_updated',
+                extraPayload: {
+                    seatIndex: idx,
+                    isLocked: false,
+                    lockedByUserId: null,
+                    lockedAt: null,
+                    lockedSeatCount,
+                    updatedSeat: seatSnapshot,
+                    updatedSeats
+                }
+            });
         }
+
+        await logRoomAuditEvent({
+            roomId: room._id,
+            actorId: req.userId,
+            actorRole: 'admin',
+            action: 'room.unlock_seat',
+            after: {
+                seat: seatSnapshot,
+                lockedSeatCount
+            },
+            source: 'rest',
+            success: true,
+            requestId: req.id
+        });
 
         res.json({
             success: true,
             lockedSeats: populatedRoom?.lockedSeats || room.lockedSeats,
-            room: populatedRoom
+            seat: seatSnapshot,
+            lockedSeatCount,
+            room: decorateRoomPayload(populatedRoom || room, req.userId)
         });
     } catch (error) { next(error); }
 };
@@ -124,48 +203,42 @@ exports.promoteParticipant = async (req, res, next) => {
     try {
         const room = await Room.findById(req.params.id);
         if (!room) { const e = new Error('Room not found'); e.status = 404; throw e; }
-        if (!canManageStage(room, req.userId)) { const e = new Error('Not authorized'); e.status = 403; throw e; }
-        if (!canManageTarget(room, req.userId, req.params.userId)) {
-            const e = new Error('You cannot approve that participant');
-            e.status = 403;
-            throw e;
-        }
-
-        const p = getParticipant(room, req.params.userId);
-        if (!p) { const e = new Error('Participant not found'); e.status = 404; throw e; }
-
-        if (p.seatIndex < 1) {
-            if (countActiveSpeakers(room) >= getMaxActiveSpeakers(room)) {
-                const e = new Error('All active speaker seats are already full');
-                e.status = 400;
-                throw e;
-            }
-
-            const seatIndex = findNextAvailableSeat(room);
-            if (seatIndex == null) {
-                const e = new Error('No open speaker seat is available right now');
-                e.status = 400;
-                throw e;
-            }
-            p.seatIndex = seatIndex;
-        }
-
-        if (p.role === 'listener') {
-            p.role = 'speaker';
-        }
-        p.raisedHand = false;
+        const participant = moveParticipantToSeat({
+            room,
+            actorUserId: req.userId,
+            targetUserId: req.params.userId,
+            seatIndex: req.body?.seatIndex
+        });
         await room.save();
         await invalidateRoomCache(req.app.get('redis'), room._id);
 
         const populatedRoom = await populateRoomById(room._id);
         const io = req.app.get('io');
         if (io) {
-            io.to(`room:${room._id}`).emit('room:updated', populatedRoom);
+            emitRoomUpdate(io, populatedRoom, {
+                updateEvent: ROOM_UPDATE_EVENTS.SEATS,
+                lobbyAction: 'roles_updated',
+                extraPayload: {
+                    userId: req.params.userId,
+                    seatIndex: participant.seatIndex
+                }
+            });
             io.to(`user:${req.params.userId}`).emit('room:promoted', { roomId: room._id });
-            emitLobbyUpdate(io, populatedRoom, 'roles_updated');
         }
 
-        res.json({ success: true, room: populatedRoom });
+        await logRoomAuditEvent({
+            roomId: room._id,
+            actorId: req.userId,
+            actorRole: 'admin',
+            targetUserId: req.params.userId,
+            action: 'room.promote_participant',
+            after: { seatIndex: participant.seatIndex, role: participant.role },
+            source: 'rest',
+            success: true,
+            requestId: req.id
+        });
+
+        res.json({ success: true, room: decorateRoomPayload(populatedRoom, req.userId) });
     } catch (error) { next(error); }
 };
 
@@ -174,32 +247,41 @@ exports.demoteParticipant = async (req, res, next) => {
     try {
         const room = await Room.findById(req.params.id);
         if (!room) { const e = new Error('Room not found'); e.status = 404; throw e; }
-        if (!canManageStage(room, req.userId)) { const e = new Error('Not authorized'); e.status = 403; throw e; }
-        if (!canManageTarget(room, req.userId, req.params.userId)) {
-            const e = new Error('You cannot move that participant to the audience');
-            e.status = 403;
-            throw e;
-        }
-
-        const p = getParticipant(room, req.params.userId);
-        if (!p) { const e = new Error('Participant not found'); e.status = 404; throw e; }
-        p.seatIndex = -1;
-        p.raisedHand = false;
-        if (p.role === 'speaker') {
-            p.role = 'listener';
-        }
+        const participant = demoteParticipantFromSeat({
+            room,
+            actorUserId: req.userId,
+            targetUserId: req.params.userId
+        });
         await room.save();
         await invalidateRoomCache(req.app.get('redis'), room._id);
 
         const populatedRoom = await populateRoomById(room._id);
         const io = req.app.get('io');
         if (io) {
-            io.to(`room:${room._id}`).emit('room:updated', populatedRoom);
+            emitRoomUpdate(io, populatedRoom, {
+                updateEvent: ROOM_UPDATE_EVENTS.SEATS,
+                lobbyAction: 'roles_updated',
+                extraPayload: {
+                    userId: req.params.userId,
+                    seatIndex: -1
+                }
+            });
             io.to(`user:${req.params.userId}`).emit('room:demoted', { roomId: room._id });
-            emitLobbyUpdate(io, populatedRoom, 'roles_updated');
         }
 
-        res.json({ success: true, room: populatedRoom });
+        await logRoomAuditEvent({
+            roomId: room._id,
+            actorId: req.userId,
+            actorRole: 'admin',
+            targetUserId: req.params.userId,
+            action: 'room.demote_participant',
+            after: { seatIndex: participant.seatIndex, role: participant.role },
+            source: 'rest',
+            success: true,
+            requestId: req.id
+        });
+
+        res.json({ success: true, room: decorateRoomPayload(populatedRoom, req.userId) });
     } catch (error) { next(error); }
 };
 
@@ -236,11 +318,26 @@ exports.assignCoHost = async (req, res, next) => {
         const populatedRoom = await populateRoomById(room._id);
         const io = req.app.get('io');
         if (io) {
-            io.to(`room:${room._id}`).emit('room:updated', populatedRoom);
-            emitLobbyUpdate(io, populatedRoom, 'roles_updated');
+            emitRoomUpdate(io, populatedRoom, {
+                updateEvent: ROOM_UPDATE_EVENTS.ROLES,
+                lobbyAction: 'roles_updated',
+                extraPayload: { userId: req.params.userId, role: 'cohost' }
+            });
         }
 
-        res.json({ success: true, room: populatedRoom });
+        await logRoomAuditEvent({
+            roomId: room._id,
+            actorId: req.userId,
+            actorRole: 'host',
+            targetUserId: req.params.userId,
+            action: 'room.assign_cohost',
+            after: { role: 'cohost' },
+            source: 'rest',
+            success: true,
+            requestId: req.id
+        });
+
+        res.json({ success: true, room: decorateRoomPayload(populatedRoom, req.userId) });
     } catch (error) { next(error); }
 };
 
@@ -266,11 +363,26 @@ exports.removeCoHost = async (req, res, next) => {
         const populatedRoom = await populateRoomById(room._id);
         const io = req.app.get('io');
         if (io) {
-            io.to(`room:${room._id}`).emit('room:updated', populatedRoom);
-            emitLobbyUpdate(io, populatedRoom, 'roles_updated');
+            emitRoomUpdate(io, populatedRoom, {
+                updateEvent: ROOM_UPDATE_EVENTS.ROLES,
+                lobbyAction: 'roles_updated',
+                extraPayload: { userId: req.params.userId, role: p?.role || 'listener' }
+            });
         }
 
-        res.json({ success: true, room: populatedRoom });
+        await logRoomAuditEvent({
+            roomId: room._id,
+            actorId: req.userId,
+            actorRole: 'host',
+            targetUserId: req.params.userId,
+            action: 'room.remove_cohost',
+            after: { role: p?.role || 'listener' },
+            source: 'rest',
+            success: true,
+            requestId: req.id
+        });
+
+        res.json({ success: true, room: decorateRoomPayload(populatedRoom, req.userId) });
     } catch (error) { next(error); }
 };
 
@@ -329,11 +441,26 @@ exports.addModerator = async (req, res, next) => {
         const populatedRoom = await populateRoomById(room._id);
         const io = req.app.get('io');
         if (io) {
-            io.to(`room:${room._id}`).emit('room:updated', populatedRoom);
-            emitLobbyUpdate(io, populatedRoom, 'roles_updated');
+            emitRoomUpdate(io, populatedRoom, {
+                updateEvent: ROOM_UPDATE_EVENTS.ROLES,
+                lobbyAction: 'roles_updated',
+                extraPayload: { userId: targetUserId, role: 'moderator' }
+            });
         }
 
-        res.json(populatedRoom);
+        await logRoomAuditEvent({
+            roomId: room._id,
+            actorId: req.userId,
+            actorRole: 'host',
+            targetUserId,
+            action: 'room.assign_admin',
+            after: { role: 'moderator' },
+            source: 'rest',
+            success: true,
+            requestId: req.id
+        });
+
+        res.json(decorateRoomPayload(populatedRoom, req.userId));
     } catch (error) { next(error); }
 };
 
@@ -357,24 +484,50 @@ exports.removeModerator = async (req, res, next) => {
         const populatedRoom = await populateRoomById(room._id);
         const io = req.app.get('io');
         if (io) {
-            io.to(`room:${room._id}`).emit('room:updated', populatedRoom);
-            emitLobbyUpdate(io, populatedRoom, 'roles_updated');
+            emitRoomUpdate(io, populatedRoom, {
+                updateEvent: ROOM_UPDATE_EVENTS.ROLES,
+                lobbyAction: 'roles_updated',
+                extraPayload: { userId: targetUserId, role: participant?.role || 'listener' }
+            });
         }
 
-        res.json(populatedRoom);
+        await logRoomAuditEvent({
+            roomId: room._id,
+            actorId: req.userId,
+            actorRole: 'host',
+            targetUserId,
+            action: 'room.remove_admin',
+            after: { role: participant?.role || 'listener' },
+            source: 'rest',
+            success: true,
+            requestId: req.id
+        });
+
+        res.json(decorateRoomPayload(populatedRoom, req.userId));
     } catch (error) { next(error); }
 };
 
 // Report room
 exports.reportRoom = async (req, res, next) => {
     try {
-        const { reason = 'spam' } = req.body;
+        const { reason = 'spam', targetUserId = null, type = targetUserId ? 'user' : 'room' } = req.body;
         const room = await Room.findById(req.params.id);
         if (!room) { const e = new Error('Room not found'); e.status = 404; throw e; }
         if (!room.reports) room.reports = [];
-        room.reports.push({ userId: req.userId, reason, createdAt: new Date() });
+        room.reports.push({ userId: req.userId, targetUserId, type, reason, createdAt: new Date() });
         await room.save();
         await invalidateRoomCache(req.app.get('redis'), room._id);
+        await logRoomAuditEvent({
+            roomId: room._id,
+            actorId: req.userId,
+            actorRole: 'member',
+            targetUserId,
+            action: 'room.report',
+            after: { type, reason },
+            source: 'rest',
+            success: true,
+            requestId: req.id
+        });
         res.json({ success: true, message: 'Room reported. Thank you for keeping the community safe.' });
     } catch (error) { next(error); }
 };
@@ -395,14 +548,16 @@ exports.followRoom = async (req, res, next) => {
         const populatedRoom = await populateRoomById(room._id);
         const io = req.app.get('io');
         if (io) {
-            io.to(`room:${room._id}`).emit('room:updated', populatedRoom);
-            emitLobbyUpdate(io, populatedRoom, 'followers_updated');
+            emitRoomUpdate(io, populatedRoom, {
+                updateEvent: ROOM_UPDATE_EVENTS.SETTINGS,
+                lobbyAction: 'followers_updated'
+            });
         }
 
         res.json({
             success: true,
             followers: populatedRoom.metrics?.followers ?? room.metrics.followers,
-            room: populatedRoom
+            room: decorateRoomPayload(populatedRoom, req.userId)
         });
     } catch (error) { next(error); }
 };
@@ -419,14 +574,16 @@ exports.unfollowRoom = async (req, res, next) => {
         const populatedRoom = await populateRoomById(room._id);
         const io = req.app.get('io');
         if (io) {
-            io.to(`room:${room._id}`).emit('room:updated', populatedRoom);
-            emitLobbyUpdate(io, populatedRoom, 'followers_updated');
+            emitRoomUpdate(io, populatedRoom, {
+                updateEvent: ROOM_UPDATE_EVENTS.SETTINGS,
+                lobbyAction: 'followers_updated'
+            });
         }
 
         res.json({
             success: true,
             followers: populatedRoom.metrics?.followers ?? room.metrics.followers,
-            room: populatedRoom
+            room: decorateRoomPayload(populatedRoom, req.userId)
         });
     } catch (error) { next(error); }
 };
@@ -435,33 +592,9 @@ exports.banParticipant = async (req, res, next) => {
     try {
         const room = await Room.findById(req.params.id);
         if (!room) { const e = new Error('Room not found'); e.status = 404; throw e; }
-        if (!canManageStage(room, req.userId)) { const e = new Error('Not authorized'); e.status = 403; throw e; }
-        if (!canManageTarget(room, req.userId, req.params.userId)) {
-            const e = new Error('You cannot ban that participant');
-            e.status = 403;
-            throw e;
-        }
-
         const targetUserId = req.params.userId;
         const { reason = 'Violation of room rules', expiresAt } = req.body || {};
-
-        room.participants = room.participants.filter(p => p.userId.toString() !== targetUserId);
-        room.coHosts = (room.coHosts || []).filter(id => !idsEqual(id, targetUserId));
-        room.moderators = (room.moderators || []).filter(id => !idsEqual(id, targetUserId));
-
-        const existingBan = (room.bans || []).find(b => b.userId.toString() === targetUserId);
-        if (existingBan) {
-            existingBan.reason = reason;
-            existingBan.bannedAt = new Date();
-            existingBan.expiresAt = expiresAt ? new Date(expiresAt) : null;
-        } else {
-            room.bans.push({
-                userId: targetUserId,
-                reason,
-                bannedAt: new Date(),
-                expiresAt: expiresAt ? new Date(expiresAt) : null
-            });
-        }
+        applyBanParticipant({ room, actorUserId: req.userId, targetUserId, reason, expiresAt });
 
         const redis = req.app.get('redis');
         await room.save();
@@ -475,10 +608,29 @@ exports.banParticipant = async (req, res, next) => {
 
         const io = req.app.get('io');
         if (io) {
-            io.to(`room:${room._id}`).emit('room:participant:left', { userId: targetUserId });
+            io.to(`room:${room._id}`).emit('room:participant:left', {
+                roomId: room._id.toString(),
+                userId: targetUserId
+            });
             io.to(`user:${targetUserId}`).emit('user:banned', { roomId: room._id, reason });
-            emitLobbyUpdate(io, room, 'moderation_updated');
+            emitRoomUpdate(io, room, {
+                updateEvent: ROOM_UPDATE_EVENTS.ROLES,
+                lobbyAction: 'moderation_updated',
+                extraPayload: { userId: targetUserId, banned: true }
+            });
         }
+
+        await logRoomAuditEvent({
+            roomId: room._id,
+            actorId: req.userId,
+            actorRole: 'admin',
+            targetUserId,
+            action: 'room.ban_participant',
+            after: { reason, expiresAt: expiresAt || null },
+            source: 'rest',
+            success: true,
+            requestId: req.id
+        });
 
         res.json({ success: true, bans: room.bans });
     } catch (error) { next(error); }
@@ -488,14 +640,29 @@ exports.unbanParticipant = async (req, res, next) => {
     try {
         const room = await Room.findById(req.params.id);
         if (!room) { const e = new Error('Room not found'); e.status = 404; throw e; }
-        if (!isRoomAdmin(room, req.userId)) { const e = new Error('Not authorized'); e.status = 403; throw e; }
-
-        room.bans = (room.bans || []).filter(b => b.userId.toString() !== req.params.userId);
+        applyUnbanParticipant({ room, actorUserId: req.userId, targetUserId: req.params.userId });
         await room.save();
         await invalidateRoomCache(req.app.get('redis'), room._id);
 
         const io = req.app.get('io');
-        if (io) emitLobbyUpdate(io, room, 'moderation_updated');
+        if (io) {
+            emitRoomUpdate(io, room, {
+                updateEvent: ROOM_UPDATE_EVENTS.ROLES,
+                lobbyAction: 'moderation_updated',
+                extraPayload: { userId: req.params.userId, banned: false }
+            });
+        }
+
+        await logRoomAuditEvent({
+            roomId: room._id,
+            actorId: req.userId,
+            actorRole: 'admin',
+            targetUserId: req.params.userId,
+            action: 'room.unban_participant',
+            source: 'rest',
+            success: true,
+            requestId: req.id
+        });
 
         res.json({ success: true, bans: room.bans });
     } catch (error) { next(error); }
@@ -505,7 +672,7 @@ exports.setAnnouncement = async (req, res, next) => {
     try {
         const room = await Room.findById(req.params.id);
         if (!room) { const e = new Error('Room not found'); e.status = 404; throw e; }
-        if (!canEditAnnouncement(room, req.userId)) { const e = new Error('Only the room owner can update the announcement'); e.status = 403; throw e; }
+        if (!canEditAnnouncement(room, req.userId)) { const e = new Error('Only room hosts and admins can update the announcement'); e.status = 403; throw e; }
 
         room.announcement = {
             text: req.body?.announcement || req.body?.text || '',
@@ -518,11 +685,24 @@ exports.setAnnouncement = async (req, res, next) => {
         const io = req.app.get('io');
         const populatedRoom = await populateRoomById(room._id);
         if (io) {
-            io.to(`room:${room._id}`).emit('room:updated', populatedRoom);
-            emitLobbyUpdate(io, populatedRoom, 'updated');
+            emitRoomUpdate(io, populatedRoom, {
+                updateEvent: ROOM_UPDATE_EVENTS.IDENTITY,
+                lobbyAction: 'updated'
+            });
         }
 
-        res.json(populatedRoom);
+        await logRoomAuditEvent({
+            roomId: room._id,
+            actorId: req.userId,
+            actorRole: isRoomAdmin(room, req.userId) ? 'admin' : 'member',
+            action: 'room.update_announcement',
+            after: { announcement: room.announcement.text },
+            source: 'rest',
+            success: true,
+            requestId: req.id
+        });
+
+        res.json(decorateRoomPayload(populatedRoom, req.userId));
     } catch (error) { next(error); }
 };
 
@@ -532,7 +712,11 @@ exports.getBans = async (req, res, next) => {
         const room = await Room.findById(req.params.id)
             .populate('bans.userId', 'username avatar');
         if (!room) { const e = new Error('Room not found'); e.status = 404; throw e; }
-        if (!isRoomAdmin(room, req.userId)) { const e = new Error('Not authorized'); e.status = 403; throw e; }
+        assertRoomPermission({
+            room,
+            actorUserId: req.userId,
+            action: ROOM_ACTIONS.VIEW_BANS
+        }, 'Not authorized');
         res.json(room.bans || []);
     } catch (error) { next(error); }
 };
@@ -540,10 +724,11 @@ exports.getBans = async (req, res, next) => {
 exports.getReports = async (req, res, next) => {
     try {
         const room = await Room.findById(req.params.id)
-            .populate('reports.userId', 'username avatar');
+            .populate('reports.userId', 'username avatar')
+            .populate('reports.targetUserId', 'username avatar');
         if (!room) { const e = new Error('Room not found'); e.status = 404; throw e; }
         if (!canViewReports(room, req.userId)) {
-            const e = new Error('Only the room owner can view reports');
+            const e = new Error('Only room hosts and admins can view reports');
             e.status = 403;
             throw e;
         }
@@ -600,10 +785,25 @@ exports.transferOwnership = async (req, res, next) => {
         const populatedRoom = await populateRoomById(room._id);
         const io = req.app.get('io');
         if (io) {
-            io.to(`room:${room._id}`).emit('room:updated', populatedRoom);
-            emitLobbyUpdate(io, populatedRoom, 'ownership_transferred');
+            emitRoomUpdate(io, populatedRoom, {
+                updateEvent: ROOM_UPDATE_EVENTS.ROLES,
+                lobbyAction: 'ownership_transferred',
+                extraPayload: { userId: targetUserId, transferred: true }
+            });
         }
 
-        res.json(populatedRoom);
+        await logRoomAuditEvent({
+            roomId: room._id,
+            actorId: req.userId,
+            actorRole: 'host',
+            targetUserId,
+            action: 'room.transfer_ownership',
+            after: { hostId: targetUserId },
+            source: 'rest',
+            success: true,
+            requestId: req.id
+        });
+
+        res.json(decorateRoomPayload(populatedRoom, req.userId));
     } catch (error) { next(error); }
 };

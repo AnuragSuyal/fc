@@ -276,7 +276,8 @@ class _UserProfileBottomSheetState extends State<UserProfileBottomSheet> {
                 children: [
                   IconButton(
                     icon: const Icon(Icons.more_vert_rounded, color: Colors.white54),
-                    onPressed: (widget.canModerate ||
+                    onPressed: (!widget.isMe ||
+                            widget.canModerate ||
                             widget.canManageRoles ||
                             widget.canManageSpeakerState)
                         ? () => _showModerationMenu(context)
@@ -808,7 +809,8 @@ class _UserProfileBottomSheetState extends State<UserProfileBottomSheet> {
   }
 
   void _showModerationMenu(BuildContext context) {
-    if (!widget.canModerate &&
+    if (widget.isMe &&
+        !widget.canModerate &&
         !widget.canManageRoles &&
         !widget.canManageSpeakerState) {
       return;
@@ -837,6 +839,41 @@ class _UserProfileBottomSheetState extends State<UserProfileBottomSheet> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            if (!widget.isMe)
+              ListTile(
+                leading: const Icon(Icons.flag_rounded, color: Colors.amber),
+                title: const Text(
+                  'Report User',
+                  style: TextStyle(color: Colors.white),
+                ),
+                onTap: () async {
+                  Navigator.pop(ctx);
+                  final messenger = ScaffoldMessenger.of(context);
+                  try {
+                    final message = await RoomService.reportRoom(
+                      widget.room.id,
+                      'Reported from room member card',
+                      targetUserId: participant.userId,
+                      type: 'user',
+                    );
+                    messenger.showSnackBar(
+                      SnackBar(
+                        content: Text(
+                          message ?? 'User report submitted successfully.',
+                        ),
+                      ),
+                    );
+                  } catch (e) {
+                    messenger.showSnackBar(
+                      SnackBar(
+                        content: Text(
+                          e.toString().replaceFirst('Exception: ', ''),
+                        ),
+                      ),
+                    );
+                  }
+                },
+              ),
             if (widget.canModerate)
               ListTile(
                 leading: Icon(

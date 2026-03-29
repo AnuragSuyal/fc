@@ -23,7 +23,7 @@ router.get('/my-rooms', auth, rc.getMyRooms);
 router.get('/followed', auth, rc.getFollowedRooms);
 
 // Room details and chat history
-router.get('/:id/messages', optionalAuth, (req, res, next) => {
+router.get('/:id/messages', auth, (req, res, next) => {
   req.params.roomId = req.params.id;
   mc.getRoomMessages(req, res, next);
 });

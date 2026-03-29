@@ -15,9 +15,9 @@ class SocketService {
   static io.Socket? get socket => _socket;
   static bool get isConnected => _socket?.connected ?? false;
 
-  static final Set<String> _joinedRoomIds = <String>{};
-  static final Set<String> _joinedGroupIds = <String>{};
-  static final Set<String> _joinedProfileIds = <String>{};
+  static final Map<String, int> _joinedRoomIds = <String, int>{};
+  static final Map<String, int> _joinedGroupIds = <String, int>{};
+  static final Map<String, int> _joinedProfileIds = <String, int>{};
 
   static bool _hasConnectedOnce = false;
   static bool _isRefreshingAuth = false;
@@ -124,38 +124,62 @@ class SocketService {
 
   static void joinRoom(String roomId) {
     if (roomId.isEmpty) return;
-    _joinedRoomIds.add(roomId);
-    _socket?.emit('join_room', roomId);
+    final nextCount = (_joinedRoomIds[roomId] ?? 0) + 1;
+    _joinedRoomIds[roomId] = nextCount;
+    if (nextCount == 1) {
+      _socket?.emit('join_room', roomId);
+    }
   }
 
   static void leaveRoom(String roomId) {
     if (roomId.isEmpty) return;
-    _joinedRoomIds.remove(roomId);
-    _socket?.emit('leave_room', roomId);
+    final currentCount = _joinedRoomIds[roomId] ?? 0;
+    if (currentCount <= 1) {
+      _joinedRoomIds.remove(roomId);
+      _socket?.emit('leave_room', roomId);
+      return;
+    }
+    _joinedRoomIds[roomId] = currentCount - 1;
   }
 
   static void joinGroup(String groupId) {
     if (groupId.isEmpty) return;
-    _joinedGroupIds.add(groupId);
-    _socket?.emit('group:join', {'groupId': groupId});
+    final nextCount = (_joinedGroupIds[groupId] ?? 0) + 1;
+    _joinedGroupIds[groupId] = nextCount;
+    if (nextCount == 1) {
+      _socket?.emit('group:join', {'groupId': groupId});
+    }
   }
 
   static void leaveGroup(String groupId) {
     if (groupId.isEmpty) return;
-    _joinedGroupIds.remove(groupId);
-    _socket?.emit('group:leave', {'groupId': groupId});
+    final currentCount = _joinedGroupIds[groupId] ?? 0;
+    if (currentCount <= 1) {
+      _joinedGroupIds.remove(groupId);
+      _socket?.emit('group:leave', {'groupId': groupId});
+      return;
+    }
+    _joinedGroupIds[groupId] = currentCount - 1;
   }
 
   static void joinProfile(String userId) {
     if (userId.isEmpty) return;
-    _joinedProfileIds.add(userId);
-    _socket?.emit('profile:join', {'userId': userId});
+    final nextCount = (_joinedProfileIds[userId] ?? 0) + 1;
+    _joinedProfileIds[userId] = nextCount;
+    if (nextCount == 1) {
+      _socket?.emit('profile:join', {'userId': userId});
+    }
   }
 
   static void leaveProfile(String userId) {
     if (userId.isEmpty) return;
-    _joinedProfileIds.remove(userId);
-    _socket?.emit('profile:leave', {'userId': userId});
+    final currentCount = _joinedProfileIds[userId] ?? 0;
+    if (currentCount <= 1) {
+      _joinedProfileIds.remove(userId);
+      _socket?.emit('profile:leave', {'userId': userId});
+      return;
+    }
+    _joinedProfileIds[userId] = currentCount - 1;
   }
 
   static void sendRoomMessage({
@@ -319,6 +343,38 @@ class SocketService {
       (data) => _add(_roomUpdate, _typed(data, 'room_updated')),
     );
     socket.on(
+      'room:update_identity',
+      (data) => _add(_roomUpdate, _typed(data, 'room_update_identity')),
+    );
+    socket.on(
+      'room:update_settings',
+      (data) => _add(_roomUpdate, _typed(data, 'room_update_settings')),
+    );
+    socket.on(
+      'room:update_permissions',
+      (data) => _add(_roomUpdate, _typed(data, 'room_update_permissions')),
+    );
+    socket.on(
+      'room:update_seats',
+      (data) => _add(_roomUpdate, _typed(data, 'room_update_seats')),
+    );
+    socket.on(
+      'room:seats_updated',
+      (data) => _add(_roomUpdate, _typed(data, 'room_seats_updated')),
+    );
+    socket.on(
+      'room:update_roles',
+      (data) => _add(_roomUpdate, _typed(data, 'room_update_roles')),
+    );
+    socket.on(
+      'room:update_mode',
+      (data) => _add(_roomUpdate, _typed(data, 'room_update_mode')),
+    );
+    socket.on(
+      'room:update_theme',
+      (data) => _add(_roomUpdate, _typed(data, 'room_update_theme')),
+    );
+    socket.on(
       'room:participant:joined',
       (data) => _add(_roomUpdate, _typed(data, 'participant_joined')),
     );
@@ -450,13 +506,13 @@ class SocketService {
   }
 
   static void _rejoinTrackedMemberships() {
-    for (final roomId in _joinedRoomIds) {
+    for (final roomId in _joinedRoomIds.keys) {
       _socket?.emit('join_room', roomId);
     }
-    for (final groupId in _joinedGroupIds) {
+    for (final groupId in _joinedGroupIds.keys) {
       _socket?.emit('group:join', {'groupId': groupId});
     }
-    for (final userId in _joinedProfileIds) {
+    for (final userId in _joinedProfileIds.keys) {
       _socket?.emit('profile:join', {'userId': userId});
     }
   }
@@ -465,8 +521,8 @@ class SocketService {
     _add(_resync, {
       'type': 'socket_resync',
       'reason': reason,
-      'rooms': _joinedRoomIds.toList(growable: false),
-      'groups': _joinedGroupIds.toList(growable: false),
+      'rooms': _joinedRoomIds.keys.toList(growable: false),
+      'groups': _joinedGroupIds.keys.toList(growable: false),
       'timestamp': DateTime.now().toIso8601String(),
     });
   }

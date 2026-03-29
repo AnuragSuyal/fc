@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'providers/auth_provider.dart';
+import 'providers/active_room_session_controller.dart';
+import 'providers/color_clash_session_controller.dart';
 import 'theme/app_theme.dart';
 import 'screens/auth/splash_screen.dart';
 import 'screens/auth/login_screen.dart';
@@ -40,9 +42,17 @@ import 'screens/posts/feed_screen.dart';
 import 'screens/auth/otp_screen.dart';
 import 'screens/auth/auth_callback_screen.dart';
 import 'screens/wedding/wedding_screen.dart';
+import 'screens/games/color_clash_home_screen.dart';
+import 'screens/games/color_clash_matchmaking_screen.dart';
+import 'screens/games/color_clash_lobby_screen.dart';
+import 'screens/games/color_clash_reconnect_screen.dart';
+import 'screens/games/color_clash_season_screen.dart';
+import 'screens/games/color_clash_table_screen.dart';
 
 import 'services/app_route_observer.dart';
+import 'services/app_navigation_service.dart';
 import 'widgets/error_boundary.dart';
+import 'widgets/rooms/floating_room_overlay.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -60,15 +70,24 @@ class MyApp extends StatelessWidget {
     return MultiProvider(
       providers: [
         ChangeNotifierProvider(create: (_) => AuthProvider()),
+        ChangeNotifierProvider(create: (_) => ActiveRoomSessionController()),
+        ChangeNotifierProvider(create: (_) => ColorClashSessionController()),
       ],
       child: ErrorBoundary(
         child: MaterialApp(
           title: 'Friend Circle',
           debugShowCheckedModeBanner: false,
+          navigatorKey: appNavigatorKey,
           navigatorObservers: [appRouteObserver],
           theme: AppTheme.light(),
           darkTheme: AppTheme.dark(),
           themeMode: ThemeMode.system,
+          builder: (context, child) => Stack(
+            children: [
+              if (child != null) child,
+              const FloatingRoomOverlay(),
+            ],
+          ),
           initialRoute: '/',
           routes: {
             '/': (context) => const SplashScreen(),
@@ -153,6 +172,38 @@ class MyApp extends StatelessWidget {
             '/rankings': (context) => const RankingsScreen(),
             '/mingle': (context) => const WeddingScreen(),
             '/wedding': (context) => const WeddingScreen(),
+            ColorClashHomeScreen.routeName: (context) =>
+                const ColorClashHomeScreen(),
+            ColorClashMatchmakingScreen.routeName: (context) {
+              final args = ModalRoute.of(context)?.settings.arguments as Map?;
+              return ColorClashMatchmakingScreen(
+                mode: args?['mode']?.toString(),
+                stakeAmount: args?['stakeAmount'] as int?,
+                themePackId: args?['themePackId']?.toString(),
+              );
+            },
+            ColorClashLobbyScreen.routeName: (context) {
+              final args = ModalRoute.of(context)?.settings.arguments as Map?;
+              return ColorClashLobbyScreen(
+                roomId: args?['roomId']?.toString(),
+              );
+            },
+            ColorClashReconnectScreen.routeName: (context) {
+              final args = ModalRoute.of(context)?.settings.arguments as Map?;
+              return ColorClashReconnectScreen(
+                matchId: args?['matchId']?.toString(),
+                roomId: args?['roomId']?.toString(),
+              );
+            },
+            ColorClashTableScreen.routeName: (context) {
+              final args = ModalRoute.of(context)?.settings.arguments as Map?;
+              return ColorClashTableScreen(
+                matchId: args?['matchId']?.toString(),
+                roomId: args?['roomId']?.toString(),
+              );
+            },
+            ColorClashSeasonScreen.routeName: (context) =>
+                const ColorClashSeasonScreen(),
           },
         ),
       ),

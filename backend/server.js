@@ -172,7 +172,15 @@ app.set('redis', redisClient);
 // ── Ranking service ─────────────────────────────────────────────────────────────
 const rankingService = require('./src/services/rankingService');
 const economyController = require('./src/controllers/economyController');
-rankingService.initialize().catch(console.error);
+const registerColorClashSocket = require('./src/socket/colorClashSocket');
+const {
+    ROOM_ACTIONS,
+    canPerformRoomAction,
+    isRoomOwner
+} = require('./src/services/roomPermissionService');
+const { findGiftByIdentifier, syncGiftCatalog } = require('./src/services/giftCatalogService');
+const { emitRoomUpdate } = require('./src/services/roomSettingsService');
+rankingService.initialize({ redisClient }).catch(console.error);
 
 // ── Security headers ────────────────────────────────────────────────────────────
 app.use(helmet());
@@ -235,6 +243,7 @@ const profileRoutes  = require('./src/routes/profileRoutes');
 const rankingRoutes  = require('./src/routes/rankingRoutes');
 const uploadRoutes   = require('./src/routes/uploadRoutes');
 const userRoutes     = require('./src/routes/userRoutes');
+const colorClashRoutes = require('./src/routes/colorClashRoutes');
 // const livekitRoutes  = require('./src/routes/livekitRoutes');
 // const webhookRoutes  = require('./src/routes/webhookRoutes');
 
@@ -255,6 +264,7 @@ app.use('/api/profile',   profileRoutes);
 app.use('/api/rankings',  rankingRoutes);
 app.use('/api/uploads',   uploadRoutes);
 app.use('/api/users',     userRoutes);
+app.use('/api/color-clash', colorClashRoutes);
 // app.use('/api/livekit',   livekitRoutes);
 // app.use('/webhooks',      webhookRoutes);
 const weddingRoutes = require('./src/routes/weddingRoutes');
@@ -357,6 +367,12 @@ io.on('connection', (socket) => {
     activeSocketsForUser.add(socket.id);
     activeSocketIdsByUserId.set(resolvedUserId, activeSocketsForUser);
 
+    registerColorClashSocket({
+        io,
+        socket,
+        redis: redisClient
+    });
+
     // Mark online
     (async () => {
         try {
@@ -374,9 +390,6 @@ io.on('connection', (socket) => {
     const joinRoom = async (data) => {
         const roomId = typeof data === 'string' ? data : data?.roomId;
         if (!roomId) return;
-        socket.join(`room:${roomId}`);
-        socket.currentRoomId = roomId;
-        socket.joinedRoomIds.add(roomId);
 
         let isParticipant = false;
         try {
@@ -392,9 +405,15 @@ io.on('connection', (socket) => {
 
         if (!isParticipant) return;
 
+        socket.join(`room:${roomId}`);
+        socket.currentRoomId = roomId;
+        socket.joinedRoomIds.add(roomId);
         socket.activePresenceRoomIds.add(roomId);
         io.to(`room:${roomId}`).emit('user_joined', {
-            userId: socket.userId, username: socket.username, avatar: socket.avatar
+            roomId,
+            userId: socket.userId,
+            username: socket.username,
+            avatar: socket.avatar
         });
         if (redisClient.isReady) {
             const key = `room:${roomId}:users`;
@@ -416,7 +435,7 @@ io.on('connection', (socket) => {
         questHeartbeatByRoom.delete(roomId);
         if (socket.currentRoomId === roomId) socket.currentRoomId = null;
         if (!hadPresence) return;
-        io.to(`room:${roomId}`).emit('user_left', { userId: socket.userId });
+        io.to(`room:${roomId}`).emit('user_left', { roomId, userId: socket.userId });
         if (redisClient.isReady) {
             const key = `room:${roomId}:users`;
             redisClient.sRem(key, socket.userId.toString())
@@ -472,7 +491,23 @@ io.on('connection', (socket) => {
         if (!isActiveRoomParticipant(roomId)) return;
         try {
             const Message = require('./src/models/Message');
-            const Room    = require('./src/models/Room');
+            const Room = require('./src/models/Room');
+            const room = await Room.findById(roomId).select('participants settings bans mode coHosts moderators hostId');
+            if (!room) return;
+            const action = type === 'image'
+                ? ROOM_ACTIONS.SEND_ROOM_IMAGE
+                : ROOM_ACTIONS.SEND_ROOM_MESSAGE;
+            if (!canPerformRoomAction({
+                room,
+                actorUserId: socket.userId,
+                action
+            })) {
+                socket.emit('room:error', {
+                    code: 'ROOM_MESSAGE_DENIED',
+                    message: 'You cannot send that message in this room right now.'
+                });
+                return;
+            }
             const message = await Message.create({
                 roomId, senderId: socket.userId, content: String(content), type
             });
@@ -598,10 +633,51 @@ io.on('connection', (socket) => {
     // ── Room invite ───────────────────────────────────────────────────────────
     socket.on('room:invite', ({ roomId, roomName, targetUserId } = {}) => {
         if (!roomId || !targetUserId) return;
-        io.to(`user:${targetUserId}`).emit('room:invite', {
-            roomId, inviterId: socket.userId, inviterName: socket.username,
-            inviterAvatar: socket.avatar, roomName: roomName || 'A Voice Room'
-        });
+        (async () => {
+            try {
+                const Room = require('./src/models/Room');
+                const User = require('./src/models/User');
+                const room = await Room.findById(roomId).select('name participants bans coHosts moderators hostId');
+                if (!room) return;
+                if (!canPerformRoomAction({
+                    room,
+                    actorUserId: socket.userId,
+                    action: ROOM_ACTIONS.INVITE_USER
+                })) {
+                    socket.emit('room:error', {
+                        code: 'ROOM_INVITE_DENIED',
+                        message: 'Only hosts and admins can invite users right now.'
+                    });
+                    return;
+                }
+                const inviter = await User.findById(socket.userId).select('friends');
+                if (!(inviter?.friends || []).some((entry) => entry?.toString() === targetUserId.toString())) {
+                    socket.emit('room:error', {
+                        code: 'ROOM_INVITE_DENIED',
+                        message: 'You can only invite your friends.'
+                    });
+                    return;
+                }
+                const isTargetBanned = room.bans?.some((ban) =>
+                    ban.userId?.toString() === targetUserId.toString() &&
+                    (!ban.expiresAt || new Date(ban.expiresAt) > new Date())
+                );
+                if (isTargetBanned) {
+                    socket.emit('room:error', {
+                        code: 'ROOM_INVITE_DENIED',
+                        message: 'That user cannot join this room right now.'
+                    });
+                    return;
+                }
+
+                io.to(`user:${targetUserId}`).emit('room:invite', {
+                    roomId, inviterId: socket.userId, inviterName: socket.username,
+                    inviterAvatar: socket.avatar, roomName: roomName || room.name || 'A Voice Room'
+                });
+            } catch (err) {
+                console.error('room:invite error:', err.message);
+            }
+        })();
     });
 
     // ── Rally fans ────────────────────────────────────────────────────────────
@@ -611,6 +687,19 @@ io.on('connection', (socket) => {
         (async () => {
             try {
                 const Room = require('./src/models/Room');
+                const roomForPermission = await Room.findById(roomId).select('participants coHosts moderators hostId settings');
+                if (!roomForPermission) return;
+                if (!canPerformRoomAction({
+                    room: roomForPermission,
+                    actorUserId: socket.userId,
+                    action: ROOM_ACTIONS.RALLY_FANS
+                })) {
+                    socket.emit('room:error', {
+                        code: 'ROOM_RALLY_DENIED',
+                        message: 'Only hosts and admins can rally the room.'
+                    });
+                    return;
+                }
                 const rallyExpiresAt = new Date(Date.now() + RALLY_DURATION_MS);
                 const room = await Room.findByIdAndUpdate(
                     roomId,
@@ -659,9 +748,20 @@ io.on('connection', (socket) => {
     socket.on('send_gift', async ({ toUserId, giftId, roomId } = {}) => {
         if (!toUserId || !giftId) return;
         try {
-            const Gift        = require('./src/models/Gift');
             const User        = require('./src/models/User');
-            const gift = await Gift.findById(giftId);
+            await syncGiftCatalog();
+            if (roomId) {
+                const Room = require('./src/models/Room');
+                const room = await Room.findById(roomId).select('participants settings bans mode coHosts moderators hostId');
+                if (!room || !canPerformRoomAction({
+                    room,
+                    actorUserId: socket.userId,
+                    action: ROOM_ACTIONS.SEND_ROOM_GIFT
+                })) {
+                    return socket.emit('gift_error', { message: 'Gifting is disabled for your role in this room' });
+                }
+            }
+            const gift = await findGiftByIdentifier(giftId, { activeOnly: true });
             if (!gift) return socket.emit('gift_error', { message: 'Gift not found' });
 
             const sender = await User.findOneAndUpdate(
@@ -678,8 +778,12 @@ io.on('connection', (socket) => {
             );
 
             const giftData = {
-                giftId: gift._id, giftName: gift.name, giftIcon: gift.icon,
+                giftId: gift.giftId || gift._id,
+                giftName: gift.name,
+                giftIcon: gift.icon,
                 animation: gift.animation, roomId,
+                giftCategory: gift.category,
+                giftRarity: gift.rarity || gift.category,
                 sender:    { userId: sender._id,    username: sender.username,    avatar: sender.avatar,    newBalance: { coins: sender.coins, gems: sender.gems } },
                 recipient: { userId: recipient?._id, username: recipient?.username, avatar: recipient?.avatar, newBalance: { coins: recipient?.coins, gems: recipient?.gems } }
             };
@@ -736,17 +840,47 @@ io.on('connection', (socket) => {
         } catch (err) { console.error('disconnect user update error:', err.message); }
 
         if (socket.currentRoomId && socket.activePresenceRoomIds.has(socket.currentRoomId)) {
-            io.to(`room:${socket.currentRoomId}`).emit('user_left', { userId: socket.userId });
+            io.to(`room:${socket.currentRoomId}`).emit('user_left', {
+                roomId: socket.currentRoomId,
+                userId: socket.userId
+            });
             try {
                 const Room = require('./src/models/Room');
                 const room = await Room.findById(socket.currentRoomId);
                 if (room) {
                     const p = room.participants.find(x => x.userId.toString() === socket.userId);
+                    const disconnectedHost = room.hostId?.toString() === socket.userId.toString();
                     if (p && p.seatIndex !== -1) {
                         p.seatIndex = -1;
                         if (p.role === 'speaker') p.role = 'listener';
-                        await room.save();
-                        io.to(`room:${room._id}`).emit('room:updated', room);
+                    }
+                    if (disconnectedHost) {
+                        if (p) {
+                            p.role = 'listener';
+                        }
+                        const nextHost = room.participants.find((entry) =>
+                            entry.userId.toString() !== socket.userId.toString() &&
+                            room.coHosts?.some((id) => id.toString() === entry.userId.toString())
+                        ) || room.participants.find((entry) =>
+                            entry.userId.toString() !== socket.userId.toString() &&
+                            room.moderators?.some((id) => id.toString() === entry.userId.toString())
+                        ) || room.participants.find((entry) => entry.userId.toString() !== socket.userId.toString());
+                        if (nextHost) {
+                            room.hostId = nextHost.userId;
+                            nextHost.role = 'host';
+                        }
+                    }
+                    await room.save();
+                    emitRoomUpdate(io, room, {
+                        updateEvent: 'room:update_roles',
+                        lobbyAction: disconnectedHost ? 'ownership_transferred' : 'seat_updated',
+                        extraPayload: { userId: socket.userId, disconnected: true }
+                    });
+                    if (disconnectedHost && room.hostId?.toString() !== socket.userId.toString()) {
+                        io.to(`room:${room._id}`).emit('host_transferred', {
+                            roomId: room._id.toString(),
+                            newHostId: room.hostId.toString()
+                        });
                     }
                 }
             } catch (err) { console.error('disconnect seat-free error:', err.message); }
