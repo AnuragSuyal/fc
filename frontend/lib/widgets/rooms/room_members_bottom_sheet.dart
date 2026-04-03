@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import '../../models/room_model.dart';
 import '../user_avatar.dart';
+import '../level_badge.dart';
+import '../vip/vip_badge.dart';
+import '../vip/vip_name_text.dart';
 
 class RoomMemberListBottomSheet extends StatefulWidget {
   final RoomModel room;
@@ -287,6 +290,9 @@ class _RoomMemberListBottomSheetState extends State<RoomMemberListBottomSheet>
                     username: member.username,
                     imageUrl: member.avatar,
                     radius: 30,
+                    shopProfile: member.user?.shopProfile,
+                    vipMembership: member.user?.vipMembership,
+                    vipLevel: member.vipLevel,
                   ),
                 ),
                 if (member.isOnline)
@@ -313,14 +319,28 @@ class _RoomMemberListBottomSheetState extends State<RoomMemberListBottomSheet>
                 children: [
                   Row(
                     children: [
-                      Text(
-                        member.username,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 18,
-                          fontWeight: FontWeight.w800,
+                      Expanded(
+                        child: VipNameText(
+                          member.username,
+                          membership: member.user?.vipMembership,
+                          fallbackVipLevel: member.vipLevel,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 18,
+                            fontWeight: FontWeight.w800,
+                          ),
                         ),
                       ),
+                      if (member.vipLevel > 0) ...[
+                        const SizedBox(width: 8),
+                        VipBadge(
+                          membership: member.user?.vipMembership,
+                          fallbackVipLevel: member.vipLevel,
+                          size: VipBadgeSize.small,
+                        ),
+                      ],
                       const SizedBox(width: 8),
                       const Icon(Icons.bolt_rounded,
                           color: Color(0xFF52A1FF), size: 18),
@@ -430,19 +450,40 @@ class _RoomMemberListBottomSheetState extends State<RoomMemberListBottomSheet>
                 username: member.username,
                 imageUrl: member.avatar,
                 radius: 22,
+                shopProfile: member.user?.shopProfile,
+                vipMembership: member.user?.vipMembership,
+                vipLevel: member.vipLevel,
               ),
               const SizedBox(width: 12),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      member.username,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 14,
-                        fontWeight: FontWeight.w700,
-                      ),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: VipNameText(
+                            member.username,
+                            membership: member.user?.vipMembership,
+                            fallbackVipLevel: member.vipLevel,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 14,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                        if (member.vipLevel > 0) ...[
+                          const SizedBox(width: 6),
+                          VipBadge(
+                            membership: member.user?.vipMembership,
+                            fallbackVipLevel: member.vipLevel,
+                            size: VipBadgeSize.small,
+                          ),
+                        ],
+                      ],
                     ),
                     const SizedBox(height: 4),
                     Text(
@@ -525,6 +566,9 @@ class _MemberTile extends StatelessWidget {
                     username: participant.username,
                     imageUrl: participant.avatar,
                     radius: 24,
+                    shopProfile: participant.user?.shopProfile,
+                    vipMembership: participant.user?.vipMembership,
+                    vipLevel: participant.vipLevel,
                   ),
                   Positioned(
                     right: 0,
@@ -552,12 +596,13 @@ class _MemberTile extends StatelessWidget {
                     Row(
                       children: [
                         Flexible(
-                          child: Text(
+                          child: VipNameText(
                             participant.username,
+                            membership: participant.user?.vipMembership,
+                            fallbackVipLevel: participant.vipLevel,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
-                              color: Colors.white,
                               fontSize: 14,
                               fontWeight: FontWeight.w700,
                             ),
@@ -565,21 +610,10 @@ class _MemberTile extends StatelessWidget {
                         ),
                         if (participant.vipLevel > 0) ...[
                           const SizedBox(width: 6),
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 6, vertical: 3),
-                            decoration: BoxDecoration(
-                              color: Colors.amber.withValues(alpha: 0.15),
-                              borderRadius: BorderRadius.circular(999),
-                            ),
-                            child: Text(
-                              'VIP ${participant.vipLevel}',
-                              style: const TextStyle(
-                                color: Colors.orange,
-                                fontSize: 10,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
+                          VipBadge(
+                            membership: participant.user?.vipMembership,
+                            fallbackVipLevel: participant.vipLevel,
+                            size: VipBadgeSize.small,
                           ),
                         ],
                       ],
@@ -600,7 +634,11 @@ class _MemberTile extends StatelessWidget {
                       spacing: 6,
                       runSpacing: 6,
                       children: [
-                        _InfoBadge('Lv ${participant.level}', Colors.amber),
+                        LevelBadge(
+                          level: participant.level,
+                          levelInfo: participant.user?.levelInfo,
+                          size: LevelBadgeSize.small,
+                        ),
                         _InfoBadge(_roleLabel(participant.role), accent),
                         _InfoBadge(seatLabel, const Color(0xFF52A1FF)),
                         if (participant.isMuted)

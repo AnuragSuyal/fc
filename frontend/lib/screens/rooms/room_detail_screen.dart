@@ -5,19 +5,29 @@ import 'package:provider/provider.dart';
 import 'package:image_picker/image_picker.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/active_room_session_controller.dart';
+import '../../providers/golden_dragon_session_controller.dart';
+import '../../providers/mini_draw_session_controller.dart';
 import '../../services/room_service.dart';
+import '../../models/golden_dragon_model.dart';
 import '../../models/room_model.dart';
+import '../../models/shop_models.dart';
 import '../../models/user_model.dart';
+import '../../models/level_progress_model.dart';
+import '../../models/vip_model.dart';
 import '../../utils/constants.dart';
 import '../../utils/haptics_util.dart';
 import '../../utils/room_permissions.dart';
 import '../../utils/room_presets.dart';
+import '../../utils/shop_appearance_resolver.dart';
 import '../../services/socket_service.dart';
 import '../../widgets/app_search_icon.dart';
 import '../../widgets/currency_icon.dart';
 import '../../widgets/gifting/gift_bottom_sheet.dart';
 import '../../widgets/gifting/gift_animation_overlay.dart';
 import '../../widgets/user_avatar.dart';
+import '../../widgets/level_badge.dart';
+import '../../widgets/vip/vip_badge.dart';
+import '../../widgets/vip/vip_name_text.dart';
 import '../../widgets/rooms/room_info_bottom_sheet.dart';
 import '../../widgets/rooms/room_members_bottom_sheet.dart';
 import 'room_settings_screen.dart';
@@ -25,6 +35,9 @@ import '../../widgets/rooms/room_control_bottom_sheet.dart';
 import '../../widgets/rooms/room_feature_bottom_sheet.dart';
 import '../../widgets/rooms/room_feature_overlay.dart';
 import '../../widgets/rooms/invite_friends_bottom_sheet.dart';
+import '../../widgets/rooms/golden_dragon_activation_sheet.dart';
+import '../../widgets/rooms/golden_dragon_overlay.dart';
+import '../../widgets/rooms/mini_draw_overlay.dart';
 import '../../widgets/rooms/room_seat_tile.dart';
 import '../../widgets/rooms/user_profile_bottom_sheet.dart';
 import 'package:flutter/services.dart';
@@ -57,6 +70,8 @@ enum _RoomExitDecision { leave, background, closeOnly }
 class _RoomDetailScreenState extends State<RoomDetailScreen>
     with WidgetsBindingObserver {
   late final ActiveRoomSessionController _activeRoomSessionController;
+  late final GoldenDragonSessionController _goldenDragonController;
+  late final MiniDrawSessionController _miniDrawController;
   late RoomModel _room;
   final bool _isLoading = false;
   bool _isJoining = false;
@@ -110,6 +125,7 @@ class _RoomDetailScreenState extends State<RoomDetailScreen>
   bool _hasAttemptedAutoJoin = false;
   bool _showYoutubePlaybackRecovery = false;
   bool _isRecoveringYoutubeError = false;
+  bool _showMiniDrawPanel = false;
   int _youtubeErrorRecoveryAttempts = 0;
   String? _youtubeErrorRecoveryVideoId;
   Timer? _youtubeErrorRecoveryTimer;
@@ -138,6 +154,7 @@ class _RoomDetailScreenState extends State<RoomDetailScreen>
   bool get _canOpenChatComposer => _canSendTextMessages || _canShareRoomImages;
   bool get _canUseRoomGifts => _permissions.canUseRoomGifts;
   bool get _canControlRoomStream => _permissions.canManageRoomMedia;
+  bool get _isRoomInactive => !_room.roomActive;
 
   // Global Keys for mapping seat positions to global overlay
   final Map<int, GlobalKey> _seatKeyMap = {
@@ -155,6 +172,14 @@ class _RoomDetailScreenState extends State<RoomDetailScreen>
     _room = _activeRoomSessionController.activeRoom?.id == widget.room.id
         ? _activeRoomSessionController.activeRoom!
         : widget.room;
+    _goldenDragonController = GoldenDragonSessionController(
+      roomId: _room.id,
+      currentUserId: _currentUserId,
+    );
+    _miniDrawController = MiniDrawSessionController(
+      initialRoom: _room,
+      currentUserId: _currentUserId,
+    );
     _syncMediaController(_room);
 
     _messageSubscription =
@@ -184,8 +209,10 @@ class _RoomDetailScreenState extends State<RoomDetailScreen>
     setState(() {
       _room = attachedRoom;
     });
+    _miniDrawController.applyRoomSnapshot(_room);
     _syncMediaController(_room);
     _initializeRoom();
+    unawaited(_goldenDragonController.ensureEventState(force: true));
     _startHeartbeat();
     await _loadInitialMessages(reset: true);
   }
@@ -1581,8 +1608,70 @@ class _RoomDetailScreenState extends State<RoomDetailScreen>
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (context) => RoomFeatureBottomSheet(roomId: _room.id),
+      builder: (context) => RoomFeatureBottomSheet(
+        roomId: _room.id,
+        canActivateGoldenDragon:
+            _permissions.canActivateDragonPacket && !_room.banRedPacket,
+        goldenDragonDisabledReason: _room.banRedPacket
+            ? 'Golden Dragon is disabled in this room.'
+            : 'Only hosts and room admins can launch Golden Dragon here.',
+        onOpenGoldenDragon: _openGoldenDragonActivationSheet,
+      ),
     );
+  }
+
+  Future<void> _openGoldenDragonActivationSheet() async {
+    final userId = _currentUserId;
+    if (!_canUseMiniDrawInRoom(_room, userId, requireVoiceRoom: false)) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Join this room before launching Golden Dragon.'),
+        ),
+      );
+      return;
+    }
+
+    final event = await showModalBottomSheet<GoldenDragonLiveEvent>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => GoldenDragonActivationSheet(
+        roomId: _room.id,
+        roomName: _room.name,
+        onActivated: _goldenDragonController.attachActivatedEvent,
+      ),
+    );
+
+    if (event != null) {
+      _goldenDragonController.attachActivatedEvent(event);
+    }
+  }
+
+  void _toggleMiniDrawPanel() {
+    final userId = _currentUserId;
+    if (!_canUseMiniDrawInRoom(_room, userId)) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Join this voice room to use Mini Draw.'),
+          ),
+        );
+      }
+      return;
+    }
+
+    _hideQuickReactionTray();
+    setState(() {
+      _showMiniDrawPanel = !_showMiniDrawPanel;
+    });
+  }
+
+  void _closeMiniDrawPanel() {
+    if (!_showMiniDrawPanel || !mounted) return;
+    setState(() {
+      _showMiniDrawPanel = false;
+    });
   }
 
   Future<void> _toggleSpeakerOutput() async {
@@ -2000,6 +2089,8 @@ class _RoomDetailScreenState extends State<RoomDetailScreen>
     _resyncSubscription?.cancel();
     _youtubeValueSubscription?.cancel();
     _youtubeVideoStateSubscription?.cancel();
+    _goldenDragonController.dispose();
+    _miniDrawController.dispose();
     _passwordController.dispose();
     _messageController.dispose();
     _queueYoutubeControllerDispose(_youtubeController);
@@ -2039,6 +2130,7 @@ class _RoomDetailScreenState extends State<RoomDetailScreen>
         _joinSocketRoom();
         unawaited(_connectToVoice());
         unawaited(_loadInitialMessages(reset: true));
+        unawaited(_goldenDragonController.ensureEventState(force: true));
 
         if (showFeedback) {
           ScaffoldMessenger.of(context).showSnackBar(
@@ -3266,10 +3358,9 @@ class _RoomDetailScreenState extends State<RoomDetailScreen>
     _isExiting = true;
     _keepRoomSessionAliveOnDispose = false;
     final user = Provider.of<AuthProvider>(context, listen: false).user;
-    final isInRoom = user != null && _isUserInRoom(user.id);
 
     try {
-      if (isInRoom) {
+      if (user != null) {
         await RoomService.leaveRoom(_room.id);
       }
     } finally {
@@ -3386,7 +3477,8 @@ class _RoomDetailScreenState extends State<RoomDetailScreen>
                         width: 42,
                         height: 42,
                         decoration: BoxDecoration(
-                          color: const Color(0xFF1B7CFF).withValues(alpha: 0.18),
+                          color:
+                              const Color(0xFF1B7CFF).withValues(alpha: 0.18),
                           borderRadius: BorderRadius.circular(14),
                         ),
                         child: const Icon(
@@ -3424,7 +3516,8 @@ class _RoomDetailScreenState extends State<RoomDetailScreen>
                         width: 42,
                         height: 42,
                         decoration: BoxDecoration(
-                          color: const Color(0xFFFF5D6C).withValues(alpha: 0.16),
+                          color:
+                              const Color(0xFFFF5D6C).withValues(alpha: 0.16),
                           borderRadius: BorderRadius.circular(14),
                         ),
                         child: const Icon(
@@ -3541,16 +3634,21 @@ class _RoomDetailScreenState extends State<RoomDetailScreen>
         previousQueueSignature != nextQueueSignature ||
         previous.musicUrl != room.musicUrl ||
         previous.musicTitle != room.musicTitle;
+    final shouldKeepMiniDrawPanel =
+        _showMiniDrawPanel && _canUseMiniDrawInRoom(room, _currentUserId);
     final shouldRebuildShell =
         rebuildPage || previous.background != room.background || mediaChanged;
     if (shouldRebuildShell && mounted) {
       setState(() {
         _room = room;
+        _showMiniDrawPanel = shouldKeepMiniDrawPanel;
       });
     } else {
       _room = room;
+      _showMiniDrawPanel = shouldKeepMiniDrawPanel;
     }
     _syncMediaController(room);
+    _miniDrawController.applyRoomSnapshot(room);
     _applySharedYoutubeSync(room);
     _announceRoomSettingChanges(previous, room);
     _activeRoomSessionController.updateRoom(_room);
@@ -3561,6 +3659,13 @@ class _RoomDetailScreenState extends State<RoomDetailScreen>
   void _announceRoomSettingChanges(RoomModel previous, RoomModel next) {
     if (previous.id != next.id) return;
 
+    if (previous.roomActive != next.roomActive) {
+      _appendSystemMessage(
+        next.roomActive
+            ? 'Room is active again. Host/admin controls are back.'
+            : 'Room inactive - waiting for host/admin.',
+      );
+    }
     if (previous.type != next.type) {
       final mode = roomModePresetFor(next.type);
       _appendSystemMessage('Room mode switched to ${mode.label}.');
@@ -3623,6 +3728,72 @@ class _RoomDetailScreenState extends State<RoomDetailScreen>
             : 'Room is public again.',
       );
     }
+  }
+
+  Widget _buildInactiveRoomBanner() {
+    return Padding(
+      key: const ValueKey('room-inactive-banner'),
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 10),
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+        decoration: BoxDecoration(
+          color: const Color(0xFF201A12).withValues(alpha: 0.94),
+          borderRadius: BorderRadius.circular(22),
+          border: Border.all(
+            color: const Color(0xFFFFC857).withValues(alpha: 0.3),
+          ),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.18),
+              blurRadius: 18,
+              offset: const Offset(0, 10),
+            ),
+          ],
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 40,
+              height: 40,
+              decoration: BoxDecoration(
+                color: const Color(0xFFFFC857).withValues(alpha: 0.14),
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: const Icon(
+                Icons.pause_circle_filled_rounded,
+                color: Color(0xFFFFC857),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Room inactive',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Waiting for host/admin. Stage actions are paused until a controller returns.',
+                    style: TextStyle(
+                      color: Colors.white.withValues(alpha: 0.72),
+                      fontSize: 12,
+                      height: 1.35,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   void _scheduleRoomRefresh({
@@ -4001,12 +4172,117 @@ class _RoomDetailScreenState extends State<RoomDetailScreen>
   }
 
   bool _isUserInRoom(String userId) {
-    return _room.participants.any((p) {
+    return _canUseMiniDrawInRoom(_room, userId, requireVoiceRoom: false);
+  }
+
+  bool _canUseMiniDrawInRoom(
+    RoomModel room,
+    String? userId, {
+    bool requireVoiceRoom = true,
+  }) {
+    if (userId == null || userId.isEmpty) return false;
+    if (requireVoiceRoom && room.type != 'voice') return false;
+
+    return room.participants.any((p) {
       if (p.user != null) {
-        return p.user!.id == userId;
+        return p.user!.id == userId && p.isPresent;
       }
-      return p.userId == userId;
+      return p.userId == userId && p.isPresent;
     });
+  }
+
+  Widget _buildMiniDrawToggleButton() {
+    final isOpen = _showMiniDrawPanel;
+    final isUnlocked = _miniDrawController.summary.isUnlocked;
+    final accent = isOpen
+        ? const Color(0xFF64D2FF)
+        : isUnlocked
+            ? const Color(0xFF7B61FF)
+            : const Color(0xFF4A4F66);
+    final background = isOpen
+        ? const [Color(0xFF64D2FF), Color(0xFF367CFF)]
+        : isUnlocked
+            ? const [Color(0xFF7B61FF), Color(0xFF3E3C94)]
+            : const [Color(0xFF252A36), Color(0xFF171B24)];
+
+    return Tooltip(
+      message: isOpen
+          ? 'Hide Mini Draw'
+          : isUnlocked
+              ? 'Open Mini Draw'
+              : 'Unlock Mini Draw for 300 coins',
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: _toggleMiniDrawPanel,
+          borderRadius: BorderRadius.circular(20),
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 220),
+            curve: Curves.easeOutCubic,
+            width: 56,
+            height: 56,
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: background,
+              ),
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(
+                color: Colors.white.withValues(alpha: isOpen ? 0.24 : 0.1),
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: accent.withValues(alpha: 0.34),
+                  blurRadius: 20,
+                  spreadRadius: -6,
+                  offset: const Offset(0, 10),
+                ),
+              ],
+            ),
+            child: Stack(
+              clipBehavior: Clip.none,
+              children: [
+                Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(10),
+                    child: Image.asset(
+                      'assets/images/mini_draw_board.png',
+                      fit: BoxFit.contain,
+                    ),
+                  ),
+                ),
+                Positioned(
+                  right: -2,
+                  top: -2,
+                  child: Container(
+                    width: 20,
+                    height: 20,
+                    decoration: BoxDecoration(
+                      color: isUnlocked
+                          ? const Color(0xFF111827)
+                          : const Color(0xFFFFD43B),
+                      shape: BoxShape.circle,
+                      border:
+                          Border.all(color: const Color(0xFF090B11), width: 2),
+                    ),
+                    child: Icon(
+                      isUnlocked
+                          ? Icons.wifi_tethering_rounded
+                          : Icons.workspace_premium_rounded,
+                      color: isUnlocked
+                          ? const Color(0xFF63E6BE)
+                          : const Color(0xFF121212),
+                      size: 11,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   @override
@@ -4094,6 +4370,15 @@ class _RoomDetailScreenState extends State<RoomDetailScreen>
                       child: _buildMinimalHeader(),
                     ),
                   ),
+                  ValueListenableBuilder<int>(
+                    valueListenable: _headerRevision,
+                    builder: (_, __, ___) => AnimatedSwitcher(
+                      duration: const Duration(milliseconds: 220),
+                      child: _isRoomInactive
+                          ? _buildInactiveRoomBanner()
+                          : const SizedBox.shrink(),
+                    ),
+                  ),
 
                   Expanded(
                     child: ValueListenableBuilder<int>(
@@ -4152,6 +4437,30 @@ class _RoomDetailScreenState extends State<RoomDetailScreen>
             ),
             Positioned.fill(
               child: RoomFeatureOverlay(roomId: _room.id),
+            ),
+            Positioned.fill(
+              child: GoldenDragonOverlay(
+                controller: _goldenDragonController,
+                visible: _goldenDragonController.hasVisibleEvent,
+                onClose: _goldenDragonController.result != null
+                    ? _goldenDragonController.dismissResult
+                    : null,
+              ),
+            ),
+            if (_canUseMiniDrawInRoom(_room, userId))
+              Positioned(
+                right: 14,
+                bottom: MediaQuery.of(context).padding.bottom +
+                    (_showQuickReactions ? 144 : 88),
+                child: _buildMiniDrawToggleButton(),
+              ),
+            Positioned.fill(
+              child: MiniDrawOverlay(
+                controller: _miniDrawController,
+                visible:
+                    _showMiniDrawPanel && _canUseMiniDrawInRoom(_room, userId),
+                onClose: _closeMiniDrawPanel,
+              ),
             ),
 
             // 4. Floating Reactions (Secondary Overlay for additional visibility)
@@ -6737,6 +7046,59 @@ class _RoomDetailScreenState extends State<RoomDetailScreen>
   }
 
   Widget _buildVoiceChatEmptyState() {
+    if (_isRoomInactive) {
+      return Container(
+        padding: const EdgeInsets.fromLTRB(12, 12, 12, 14),
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: 0.04),
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 40,
+              height: 40,
+              decoration: BoxDecoration(
+                color: Colors.white.withValues(alpha: 0.08),
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: const Icon(
+                Icons.pause_circle_outline_rounded,
+                color: Colors.white70,
+                size: 18,
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: const [
+                  Text(
+                    'Room feed paused',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  SizedBox(height: 4),
+                  Text(
+                    'The room is waiting for a host or admin to return before stage activity can continue.',
+                    style: TextStyle(
+                      color: Colors.white60,
+                      fontSize: 12,
+                      height: 1.35,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
     return Material(
       color: Colors.transparent,
       child: InkWell(
@@ -6884,7 +7246,9 @@ class _RoomDetailScreenState extends State<RoomDetailScreen>
           ),
           const SizedBox(height: 4),
           Text(
-            'Tap any open seat to join the stage. The host stays pinned at the top.',
+            _isRoomInactive
+                ? 'Room inactive - waiting for host/admin before anyone can join the stage.'
+                : 'Tap any open seat to join the stage. The host stays pinned at the top.',
             style: TextStyle(
               color: Colors.white.withValues(alpha: 0.58),
               fontSize: 11,
@@ -6929,6 +7293,7 @@ class _RoomDetailScreenState extends State<RoomDetailScreen>
     return RoomSeatTile(
       seatIndex: seatKeyIndex,
       isLocked: seatState?.isLocked ?? false,
+      isInactive: _isRoomInactive,
       hasOccupant: true,
       canManageLock: canManageSeatLocks,
       showLabel: false,
@@ -6944,6 +7309,11 @@ class _RoomDetailScreenState extends State<RoomDetailScreen>
         child: RoomAvatar(
           username: participant.username,
           avatarUrl: participant.avatar,
+          level: participant.level,
+          levelInfo: participant.user?.levelInfo,
+          shopProfile: participant.user?.shopProfile,
+          vipMembership: participant.user?.vipMembership,
+          vipLevel: participant.vipLevel,
           role: role,
           isSpeaking: participant.isSpeaking,
           isMuting: participant.isMuted,
@@ -6956,6 +7326,17 @@ class _RoomDetailScreenState extends State<RoomDetailScreen>
   }
 
   Widget _buildMainSpeaker() {
+    if (_isRoomInactive) {
+      return Column(
+        children: [
+          _buildEmptySeat(
+            0,
+            showLabel: false,
+          ),
+        ],
+      );
+    }
+
     final host = _getHostParticipant();
     if (host == null) return _buildEmptySeat(0);
 
@@ -6997,9 +7378,10 @@ class _RoomDetailScreenState extends State<RoomDetailScreen>
     final isClosedByLimit = index > _room.maxActiveSpeakers;
     final seatState = _room.seatStateFor(index);
     final isLocked = seatState?.isLocked == true;
-    final canManageSeatLocks = _canManageSeatLocks(
-      Provider.of<AuthProvider>(context, listen: false).user?.id,
-    );
+    final canManageSeatLocks = index > 0 &&
+        _canManageSeatLocks(
+          Provider.of<AuthProvider>(context, listen: false).user?.id,
+        );
 
     return Container(
       key: _seatKeyMap[index],
@@ -7007,9 +7389,10 @@ class _RoomDetailScreenState extends State<RoomDetailScreen>
         seatIndex: index,
         isLocked: isLocked,
         isClosedByLimit: isClosedByLimit,
+        isInactive: _isRoomInactive,
         canManageLock: canManageSeatLocks,
         showLabel: showLabel,
-        onTapSeat: () => _takeSeat(index),
+        onTapSeat: index > 0 ? () => _takeSeat(index) : null,
         onToggleLock: () => _toggleSeatLock(
           index,
           isLocked: isLocked,
@@ -7117,6 +7500,11 @@ class _RoomDetailScreenState extends State<RoomDetailScreen>
   }
 
   Future<void> _takeSeat(int seatIndex) async {
+    if (_isRoomInactive) {
+      _showRoomInactiveSnackBar();
+      return;
+    }
+
     if (seatIndex > _room.maxActiveSpeakers) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -7197,6 +7585,16 @@ class _RoomDetailScreenState extends State<RoomDetailScreen>
         SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
       );
     }
+  }
+
+  void _showRoomInactiveSnackBar() {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Room inactive - waiting for host/admin'),
+        backgroundColor: Colors.orange,
+      ),
+    );
   }
 
   Future<bool> _confirmSeatChange({
@@ -7753,8 +8151,14 @@ class _RoomDetailScreenState extends State<RoomDetailScreen>
             const SizedBox(width: 6),
             _buildBottomDockActionButton(
               _isMuted ? null : Icons.mic_rounded,
-              _isMuted ? const Color(0xFFFF6B6B) : Colors.white,
+              _isRoomInactive
+                  ? Colors.white38
+                  : (_isMuted ? const Color(0xFFFF6B6B) : Colors.white),
               () async {
+                if (_isRoomInactive) {
+                  _showRoomInactiveSnackBar();
+                  return;
+                }
                 if (!_isVoiceConnected) {
                   ScaffoldMessenger.of(context).showSnackBar(
                     const SnackBar(content: Text('Voice is offline')),
@@ -7781,9 +8185,11 @@ class _RoomDetailScreenState extends State<RoomDetailScreen>
               assetPath:
                   _isMuted ? 'assets/images/room_action_mic_off.png' : null,
               assetSize: 31,
-              backgroundColor: _isMuted
-                  ? const Color(0xFFFF3B30).withValues(alpha: 0.14)
-                  : Colors.white.withValues(alpha: 0.06),
+              backgroundColor: _isRoomInactive
+                  ? Colors.white.withValues(alpha: 0.03)
+                  : _isMuted
+                      ? const Color(0xFFFF3B30).withValues(alpha: 0.14)
+                      : Colors.white.withValues(alpha: 0.06),
             ),
             const SizedBox(width: 8),
             Expanded(
@@ -7866,6 +8272,51 @@ class _RoomDetailScreenState extends State<RoomDetailScreen>
   }
 
   Widget _buildVoiceRoomComposerAction() {
+    if (_isRoomInactive) {
+      return Material(
+        color: Colors.transparent,
+        child: Ink(
+          height: 48,
+          padding: const EdgeInsets.symmetric(horizontal: 14),
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: 0.05),
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 28,
+                height: 28,
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.06),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: const Icon(
+                  Icons.pause_circle_outline_rounded,
+                  color: Colors.white54,
+                  size: 16,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Room inactive - waiting for host/admin',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.8),
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
     final isPhotoOnly = !_canSendTextMessages && _canShareRoomImages;
     final isLocked = !_canOpenChatComposer;
     final accent = isLocked
@@ -8380,6 +8831,11 @@ class _YoutubeVideoOption {
 class RoomAvatar extends StatelessWidget {
   final String username;
   final String? avatarUrl;
+  final int level;
+  final LevelProgressSnapshot? levelInfo;
+  final UserShopProfile? shopProfile;
+  final VipMembershipSnapshot? vipMembership;
+  final int vipLevel;
   final String role;
   final bool isSpeaking;
   final bool isMuting;
@@ -8391,6 +8847,11 @@ class RoomAvatar extends StatelessWidget {
     super.key,
     required this.username,
     this.avatarUrl,
+    required this.level,
+    this.levelInfo,
+    this.shopProfile,
+    this.vipMembership,
+    this.vipLevel = 0,
     required this.role,
     this.isSpeaking = false,
     this.isMuting = false,
@@ -8402,6 +8863,12 @@ class RoomAvatar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isHost = role == 'host';
+    final speakingGlow = resolveSpeakingGlowColor(shopProfile);
+    final entryColors = resolveEntryEffectColors(shopProfile);
+    final displayNameColor = resolveDisplayNameColor(
+      shopProfile,
+      fallback: Colors.white.withValues(alpha: 0.9),
+    );
 
     return GestureDetector(
       onTap: onTap,
@@ -8425,10 +8892,11 @@ class RoomAvatar extends StatelessWidget {
                           end: Alignment.bottomRight,
                         )
                       : LinearGradient(
-                          colors: [
-                            Colors.white.withValues(alpha: 0.2),
-                            Colors.white.withValues(alpha: 0.05)
-                          ],
+                          colors: entryColors ??
+                              [
+                                Colors.white.withValues(alpha: 0.2),
+                                Colors.white.withValues(alpha: 0.05),
+                              ],
                         ),
                   boxShadow: [
                     if (isHost)
@@ -8439,7 +8907,8 @@ class RoomAvatar extends StatelessWidget {
                       ),
                     if (isSpeaking && !isHost)
                       BoxShadow(
-                        color: const Color(0xFF52A1FF).withValues(alpha: 0.4),
+                        color: (speakingGlow ?? const Color(0xFF52A1FF))
+                            .withValues(alpha: 0.4),
                         blurRadius: 10,
                         spreadRadius: 2,
                       ),
@@ -8458,6 +8927,9 @@ class RoomAvatar extends StatelessWidget {
                         username: username,
                         imageUrl: avatarUrl,
                         radius: size / 2,
+                        shopProfile: shopProfile,
+                        vipMembership: vipMembership,
+                        vipLevel: vipLevel,
                       ),
                     ),
                   ),
@@ -8505,38 +8977,41 @@ class RoomAvatar extends StatelessWidget {
                 Positioned(
                   bottom: -4,
                   child: Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    padding: const EdgeInsets.all(1.5),
                     decoration: BoxDecoration(
-                      gradient: const LinearGradient(
-                          colors: [Color(0xFF8C52FF), Color(0xFF52A1FF)]),
-                      borderRadius: BorderRadius.circular(6),
-                      border: Border.all(
-                          color: const Color(0xFF0F0E13), width: 1.5),
+                      color: const Color(0xFF0F0E13),
+                      borderRadius: BorderRadius.circular(999),
                     ),
-                    child: const Text(
-                      'VIP',
-                      style: TextStyle(
-                          fontSize: 7,
-                          color: Colors.white,
-                          fontWeight: FontWeight.w900,
-                          letterSpacing: 0.5),
+                    child: VipBadge(
+                      membership: vipMembership,
+                      fallbackVipLevel: vipLevel,
+                      size:
+                          size >= 76 ? VipBadgeSize.medium : VipBadgeSize.small,
                     ),
                   ),
                 ),
             ],
           ),
           const SizedBox(height: 10),
-          Text(
+          VipNameText(
             username,
+            membership: vipMembership,
+            fallbackVipLevel: vipLevel,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              color: Colors.white.withValues(alpha: 0.9),
+            fallbackColor: displayNameColor,
+            style: const TextStyle(
               fontSize: 11,
               fontWeight: FontWeight.w700,
               letterSpacing: 0.2,
             ),
+          ),
+          const SizedBox(height: 4),
+          LevelBadge(
+            level: level,
+            levelInfo: levelInfo,
+            size: size >= 76 ? LevelBadgeSize.medium : LevelBadgeSize.small,
+            includePrefix: true,
           ),
         ],
       ),

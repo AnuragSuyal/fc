@@ -55,7 +55,9 @@ class ActiveRoomSessionController extends ChangeNotifier {
   }
 
   RoomModel attachRoomScreen(RoomModel room) {
-    _activeRoom = _activeRoom?.id == room.id ? _activeRoom : room;
+    final shouldReuseTrackedRoom =
+        _activeRoom?.id == room.id && (_isBackgrounded || _isRoomScreenAttached);
+    _activeRoom = shouldReuseTrackedRoom ? _activeRoom : room;
     _isBackgrounded = false;
     _isRoomScreenAttached = true;
     _isResumingRoom = false;

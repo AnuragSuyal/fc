@@ -1,5 +1,13 @@
 const User        = require('../models/User');
 const Transaction = require('../models/Transaction');
+const {
+    awardUserXp,
+    buildProgressPayload,
+    emitLevelDrivenRealtime
+} = require('../services/levelProgressionService');
+const {
+    buildVipMembershipSnapshot
+} = require('../services/vipMembershipService');
 
 // Quest definitions (per-day refresh)
 const QUEST_TEMPLATES = [
@@ -89,20 +97,58 @@ exports.claimDailyReward = async (req, res, next) => {
         if (user.loginStreak > (user.longestStreak || 0)) user.longestStreak = user.loginStreak;
         await user.save();
 
+        const dailyXpProgress = await awardUserXp({
+            user,
+            amount: 18,
+            sourceType: 'daily_login',
+            sourceReferenceId: today.toISOString().slice(0, 10),
+            sourceReferenceType: 'calendar_day',
+            dedupeKey: `daily-login:${today.toISOString().slice(0, 10)}`,
+            redis: req.app.get('redis'),
+            metadata: {
+                loginStreak: user.loginStreak,
+                rewardCoins: totalCoins
+            }
+        });
+        const progressedUser = dailyXpProgress?.user || user;
+
         await Transaction.create({
             userId: user._id, type: 'daily_bonus', amount: { coins: totalCoins },
-            balanceBefore, balanceAfter: { coins: user.coins, gems: user.gems },
+            balanceBefore, balanceAfter: { coins: progressedUser.coins, gems: progressedUser.gems },
             description: `Daily login reward (Day ${user.loginStreak})`, status: 'completed', completedAt: new Date()
         });
 
         const io = req.app.get('io');
-        if (io) io.to(`user:${user._id}`).emit('balance_update', { coins: user.coins, gems: user.gems });
+        if (io) {
+            io.to(`user:${progressedUser._id}`).emit(
+                'balance_update',
+                buildProgressPayload(progressedUser, {
+                    xpGained: dailyXpProgress?.xpGained || 0,
+                    source: 'daily_login'
+                })
+            );
+            await emitLevelDrivenRealtime(io, progressedUser, dailyXpProgress, {
+                source: 'daily_login'
+            });
+        }
 
         // Auto-progress daily quests
         const redis = req.app.get('redis');
         exports._progressQuest(redis, req.userId, 'join_room', 0).catch(() => {});
 
-        res.json({ success: true, reward: totalCoins, coins: totalCoins, newBalance: { coins: user.coins, gems: user.gems }, streak: user.loginStreak, day: user.loginStreak, message: `Day ${user.loginStreak} reward claimed!` });
+        res.json({
+            success: true,
+            reward: totalCoins,
+            coins: totalCoins,
+            xpGained: dailyXpProgress?.xpGained || 0,
+            newBalance: buildProgressPayload(progressedUser, {
+                xpGained: dailyXpProgress?.xpGained || 0,
+                source: 'daily_login'
+            }),
+            streak: user.loginStreak,
+            day: user.loginStreak,
+            message: `Day ${user.loginStreak} reward claimed!`
+        });
     } catch (error) { next(error); }
 };
 
@@ -110,21 +156,25 @@ exports.getUserStats = async (req, res, next) => {
     try {
         const user = await User.findById(req.userId);
         if (!user) { const e = new Error('User not found'); e.status = 404; throw e; }
-        res.json({
-            coins: user.coins || 0, gems: user.gems || 0,
-            level: user.level || 1, xp: user.xp || 0,
-            vipLevel: user.vipLevel || 0,
+        res.json(buildProgressPayload(user, {
+            tickets: user.tickets || 0,
             loginStreak: user.loginStreak || 0,
             longestStreak: user.longestStreak || 0
-        });
+        }));
     } catch (error) { next(error); }
 };
 
 exports.getBalance = async (req, res, next) => {
     try {
-        const user = await User.findById(req.userId).select('coins gems tickets vipLevel');
+        const user = await User.findById(req.userId).select('coins gems tickets vipLevel vipTier vipStatus vipStartAt vipExpireAt vipAutoRenew vipPlanDuration vipPurchaseSource monthlyRewardLastClaimedAt vipLastUpdatedAt');
         if (!user) { const e = new Error('User not found'); e.status = 404; throw e; }
-        res.json({ coins: user.coins || 0, gems: user.gems || 0, tickets: user.tickets || 0, vipLevel: user.vipLevel || 0 });
+        res.json({
+            coins: user.coins || 0,
+            gems: user.gems || 0,
+            tickets: user.tickets || 0,
+            vipLevel: user.vipLevel || 0,
+            vipMembership: buildVipMembershipSnapshot(user)
+        });
     } catch (error) { next(error); }
 };
 
@@ -190,12 +240,29 @@ exports.claimQuestReward = async (req, res, next) => {
         const balanceBefore = { coins: user.coins || 0, gems: user.gems || 0 };
         user.coins = (user.coins || 0) + coins;
         user.gems  = (user.gems  || 0) + gems;
-        user.xp    = (user.xp   || 0) + xpReward;
         await user.save();
+
+        const questXpProgress = await awardUserXp({
+            user,
+            amount: xpReward,
+            sourceType: 'quest_reward',
+            sourceReferenceId: questId,
+            sourceReferenceType: quest.templateId || quest.type || 'quest',
+            dedupeKey: `quest:${questId}`,
+            redis,
+            metadata: {
+                questId,
+                templateId: quest.templateId || '',
+                questType: quest.type || '',
+                coins,
+                gems
+            }
+        });
+        const progressedUser = questXpProgress?.user || user;
 
         await Transaction.create({
             userId: user._id, type: 'quest_reward', amount: { coins, gems },
-            balanceBefore, balanceAfter: { coins: user.coins, gems: user.gems },
+            balanceBefore, balanceAfter: { coins: progressedUser.coins, gems: progressedUser.gems },
             description: `Quest reward: ${quest.title}`, status: 'completed', completedAt: new Date()
         });
 
@@ -205,9 +272,28 @@ exports.claimQuestReward = async (req, res, next) => {
         else { const idx = weekly.findIndex(q => q.questId === questId); if (idx !== -1) { weekly[idx] = quest; await saveQuests(redis, req.userId, 'weekly', weekly); } }
 
         const io = req.app.get('io');
-        if (io) io.to(`user:${user._id}`).emit('balance_update', { coins: user.coins, gems: user.gems });
+        if (io) {
+            io.to(`user:${progressedUser._id}`).emit(
+                'balance_update',
+                buildProgressPayload(progressedUser, {
+                    xpGained: questXpProgress?.xpGained || 0,
+                    source: 'quest_reward'
+                })
+            );
+            await emitLevelDrivenRealtime(io, progressedUser, questXpProgress, {
+                source: 'quest_reward'
+            });
+        }
 
-        res.json({ success: true, rewards: quest.reward, newBalance: { coins: user.coins, gems: user.gems } });
+        res.json({
+            success: true,
+            rewards: quest.reward,
+            xpGained: questXpProgress?.xpGained || 0,
+            newBalance: buildProgressPayload(progressedUser, {
+                xpGained: questXpProgress?.xpGained || 0,
+                source: 'quest_reward'
+            })
+        });
     } catch (error) { next(error); }
 };
 
@@ -274,4 +360,3 @@ exports.purchase = async (req, res, next) => {
         res.json({ newBalance: { coins: user.coins, gems: user.gems } });
     } catch (error) { next(error); }
 };
-

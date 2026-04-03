@@ -28,7 +28,7 @@ const messageSchema = new mongoose.Schema({
     },
     type: {
         type: String,
-        enum: ['text', 'image', 'voice', 'gift', 'system', 'announcement', 'emoji', 'private_image'],
+        enum: ['text', 'image', 'voice', 'gift', 'coin_transfer', 'system', 'announcement', 'emoji', 'private_image'],
         default: 'text'
     },
     metadata: {
@@ -116,7 +116,6 @@ messageSchema.index({ groupId: 1, createdAt: -1 });
 messageSchema.index({ mentions: 1 });
 
 module.exports = mongoose.model('Message', messageSchema);
-
 
 
 

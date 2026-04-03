@@ -45,6 +45,7 @@ const {
     validateSeatIndexWithinStage
 } = require('../services/roomSeatService');
 const { logRoomAuditEvent } = require('../services/roomAuditService');
+const { transferPermanentRoomOwnership } = require('../services/permanentRoomService');
 const roomCacheKey = (roomId) => `cache:room:${roomId}`;
 
 const invalidateRoomCache = async (redis, roomId) => {
@@ -779,7 +780,11 @@ exports.transferOwnership = async (req, res, next) => {
         targetParticipant.role = 'host';
         targetParticipant.raisedHand = false;
 
-        await room.save();
+        await transferPermanentRoomOwnership({
+            room,
+            nextOwnerId: targetUserId,
+            previousOwnerId: req.userId
+        });
         await invalidateRoomCache(req.app.get('redis'), room._id);
 
         const populatedRoom = await populateRoomById(room._id);

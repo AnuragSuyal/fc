@@ -36,6 +36,10 @@ const createRoomSchema = z.object({
     name: z.string().min(3).max(50),
     description: z.string().max(200).optional(),
     announcement: z.string().max(500).optional(),
+    topic: z.string().max(120).optional(),
+    language: z.string().max(16).optional(),
+    region: z.string().max(60).optional(),
+    roomRules: z.string().max(500).optional(),
     type: z.enum(['voice', 'music', 'video', 'chat', 'auction', 'game']).optional(),
     mode: z.enum(['normal', 'acquaint', 'auction']).optional(),
     category: z.enum(['all', 'voice', 'music', 'video', 'chat', 'battle', 'auction']).optional(),
@@ -134,6 +138,13 @@ const inviteRoomFriendSchema = z.object({
     targetUserId: z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid user ID')
 });
 
+const miniDrawSettingsSchema = z.object({
+    enabled: z.boolean().optional(),
+    accessPolicy: z.enum(['all_participants', 'host_admin', 'view_only']).optional()
+}).refine((data) => data.enabled !== undefined || data.accessPolicy !== undefined, {
+    message: 'Mini Draw settings payload is required'
+});
+
 const createGroupSchema = z.object({
     name: z.string().min(3).max(50),
     description: z.string().max(500).optional(),
@@ -200,8 +211,47 @@ const updateUserSchema = z.object({
     settings: updateSettingsSchema.optional()
 });
 const purchaseVipSchema = z.object({
-    level: z.number().int().min(1).max(13),
-    period: z.enum(['monthly', 'annual']).optional()
+    level: z.number().int().min(1).max(13).optional(),
+    tierId: z.enum([
+        'vip1', 'vip2', 'vip3', 'vip4', 'vip5',
+        'vip6', 'vip7', 'vip8', 'vip9', 'vip10',
+        'diamond', 'legend', 'supreme'
+    ]).optional(),
+    period: z.enum(['monthly', 'annual']).optional(),
+    planDuration: z.enum(['monthly', 'quarterly', 'yearly']).optional(),
+    autoRenew: z.boolean().optional(),
+    purchaseSource: z.enum(['coins', 'apple', 'google', 'restored']).optional()
+}).refine((data) => data.level !== undefined || data.tierId !== undefined, {
+    message: 'VIP tier is required'
+});
+
+const coinTransferUnlockPurchaseSchema = z.object({
+    purchaseSource: z.enum(['stripe', 'mock', 'restored']).optional(),
+    idempotencyKey: z.string().max(120).optional()
+});
+
+const coinTransferPreviewSchema = z.object({
+    receiverUserId: z.string().min(1).max(64),
+    chatId: z.string().min(1).max(128).optional(),
+    amount: z.number().int().positive()
+});
+
+const coinTransferSendSchema = z.object({
+    receiverUserId: z.string().min(1).max(64),
+    chatId: z.string().min(1).max(128).optional(),
+    amount: z.number().int().positive(),
+    idempotencyKey: z.string().max(120).optional()
+});
+
+const dragonPacketPurchaseSchema = z.object({
+    productSku: z.string().min(1).max(120),
+    purchaseSource: z.enum(['stripe', 'mock', 'apple', 'google', 'restored']).optional(),
+    idempotencyKey: z.string().max(120).optional()
+});
+
+const dragonEventActivateSchema = z.object({
+    purchaseInventoryId: z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid inventory item ID').optional(),
+    productSku: z.string().min(1).max(120).optional()
 });
 
 module.exports = {
@@ -217,10 +267,16 @@ module.exports = {
     sendRoomMessageSchema,
     sendGroupMessageSchema,
     inviteRoomFriendSchema,
+    miniDrawSettingsSchema,
     createGroupSchema,
     updateProfileSchema,
     updateLocationSchema,
     purchaseVipSchema,
+    coinTransferPreviewSchema,
+    coinTransferSendSchema,
+    coinTransferUnlockPurchaseSchema,
+    dragonPacketPurchaseSchema,
+    dragonEventActivateSchema,
     updateSettingsSchema,
     changePasswordSchema,
     updateUserSchema

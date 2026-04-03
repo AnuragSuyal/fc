@@ -2,6 +2,8 @@ const User = require('../models/User');
 const Post = require('../models/Post');
 const Message = require('../models/Message');
 const { applyAvatarUpdate } = require('../utils/avatarUploadLimit');
+const { buildLevelFields } = require('../services/levelingRulesService');
+const { buildVipMembershipSnapshot } = require('../services/vipMembershipService');
 
 const getResolvedUser = (identifier) => User.findByIdOrUid(identifier);
 const INTRO_MESSAGE_LIMIT = 3;
@@ -46,16 +48,17 @@ const buildRealtimeProfileUser = (user) => ({
     coverPhoto: user.coverPhoto,
     bio: user.bio,
     region: user.region || 'Global',
-    level: user.level,
-    xp: user.xp,
     coins: user.coins,
     gems: user.gems,
     vipLevel: user.vipLevel,
+    vipMembership: buildVipMembershipSnapshot(user),
+    shopProfile: user.shopProfile || {},
     status: user.status,
     lastActive: user.status?.lastActive,
     gameStats: user.gameStats,
     badges: user.badges,
-    stats: buildProfileStats(user)
+    stats: buildProfileStats(user),
+    ...buildLevelFields(user)
 });
 
 const emitProfileRealtime = (req, user, event, payload = {}) => {
@@ -176,16 +179,17 @@ const buildProfileResponse = async ({ user, viewerId, postsLimit = 20 }) => {
             coverPhoto: user.coverPhoto,
             bio: user.bio,
             region: user.region || 'Global',
-            level: user.level,
-            xp: user.xp,
             coins: user.coins,
             gems: user.gems,
             vipLevel: user.vipLevel,
+            vipMembership: buildVipMembershipSnapshot(user),
+            shopProfile: user.shopProfile || {},
             status: user.status,
             lastActive: user.status?.lastActive,
             gameStats: user.gameStats,
             badges: user.badges,
-            stats: buildProfileStats(user)
+            stats: buildProfileStats(user),
+            ...buildLevelFields(user)
         },
         relationship: await buildRelationship({ viewer, targetUser: user }),
         posts
@@ -196,7 +200,7 @@ const buildProfileResponse = async ({ user, viewerId, postsLimit = 20 }) => {
 exports.getMyProfile = async (req, res, next) => {
     try {
         const user = await User.findById(req.userId)
-            .select('uid username avatar coverPhoto bio region level xp coins gems vipLevel status lastActive gameStats badges profileVisitors friends followers following stats friendRequests blockedUsers settings')
+            .select('uid username avatar coverPhoto bio region level xp coins gems vipLevel vipTier vipStatus vipStartAt vipExpireAt vipAutoRenew vipPlanDuration vipPurchaseSource monthlyRewardLastClaimedAt vipLastUpdatedAt vipExpiry vipPurchasedAt shopProfile status lastActive gameStats badges profileVisitors friends followers following stats friendRequests blockedUsers settings lastLevelUpdatedAt levelMilestoneTier xpStats')
             .populate('badges');
 
         if (!user) {
@@ -216,7 +220,7 @@ exports.getProfile = async (req, res, next) => {
     try {
         const { userId } = req.params;
         const user = await getResolvedUser(userId)
-            .select('uid username avatar coverPhoto bio region level xp coins gems vipLevel status lastActive gameStats badges profileVisitors friends followers following stats friendRequests blockedUsers settings')
+            .select('uid username avatar coverPhoto bio region level xp coins gems vipLevel vipTier vipStatus vipStartAt vipExpireAt vipAutoRenew vipPlanDuration vipPurchaseSource monthlyRewardLastClaimedAt vipLastUpdatedAt vipExpiry vipPurchasedAt shopProfile status lastActive gameStats badges profileVisitors friends followers following stats friendRequests blockedUsers settings lastLevelUpdatedAt levelMilestoneTier xpStats')
             .populate('badges');
 
         if (!user) {

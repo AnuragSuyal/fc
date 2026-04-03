@@ -7,6 +7,7 @@ const Room = require('../models/Room');
 const rankingService = require('../services/rankingService');
 const { awardRoomGiftXp } = require('../services/roomProgressionService');
 const { awardSpendXp, buildProgressPayload } = require('../services/spendXpService');
+const { emitLevelDrivenRealtime } = require('../services/levelProgressionService');
 const { findGiftByIdentifier, syncGiftCatalog } = require('../services/giftCatalogService');
 const {
     ACTIVE_GIFT_CATALOG,
@@ -30,10 +31,10 @@ const resolveIdempotencyKey = (req) => {
 };
 
 const populateRealtimeRoom = async (roomId) => Room.findById(roomId)
-    .populate('hostId', 'username avatar level vipLevel')
-    .populate('coHosts', 'username avatar level vipLevel')
-    .populate('moderators', 'username avatar level vipLevel')
-    .populate('participants.userId', 'username avatar level vipLevel status.isOnline')
+    .populate('hostId', 'username avatar level vipLevel shopProfile')
+    .populate('coHosts', 'username avatar level vipLevel shopProfile')
+    .populate('moderators', 'username avatar level vipLevel shopProfile')
+    .populate('participants.userId', 'username avatar level vipLevel shopProfile status.isOnline')
     .populate('bans.userId', 'username avatar');
 
 const resolveSerializedGiftReference = async (giftReference, { activeOnly = false } = {}) => {
@@ -381,7 +382,18 @@ exports.sendGift = async (req, res, next) => {
             user: recipient,
             coins: gift.price.coins,
             gems: gift.price.gems,
-            baseXp: gift.effects?.recipient?.xp || gift.effects?.sender?.xp
+            baseXp: gift.effects?.recipient?.xp || gift.effects?.sender?.xp,
+            sourceType: 'gift_received',
+            sourceReferenceId: gift._id.toString(),
+            sourceReferenceType: 'gift',
+            dedupeKey: `gift-received:${recipientTxn.transactionId}`,
+            metadata: {
+                giftId: gift._id.toString(),
+                giftName: gift.name,
+                roomId: roomId || '',
+                senderId: fromUserId
+            },
+            redis: req.app.get('redis')
         });
         const progressedRecipient = recipientProgress?.user || recipient;
 
@@ -474,14 +486,9 @@ exports.sendGift = async (req, res, next) => {
             };
             io.to(`user:${fromUserId}`).emit('balance_update', giftData.sender.newBalance);
             io.to(`user:${toUserId}`).emit('balance_update', giftData.recipient.newBalance);
-            if (recipientProgress?.leveledUp) {
-                io.to(`user:${toUserId}`).emit('level_up', {
-                    newLevel: result.recipient.level,
-                    xp: result.recipient.xp,
-                    xpGained: recipientProgress.xpGained,
-                    source: 'gift_received'
-                });
-            }
+            await emitLevelDrivenRealtime(io, result.recipient, recipientProgress, {
+                source: 'gift_received'
+            });
             if (result.roomId) {
                 io.to(`room:${result.roomId}`).emit('receive_gift', giftData);
                 if (populatedRoom) {

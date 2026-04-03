@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { recalculateRoomPresenceState } = require('../services/roomPresenceService');
 
 const colorClashStakeSchema = new mongoose.Schema({
     currency: {
@@ -197,6 +198,142 @@ const roomSeatStateSchema = new mongoose.Schema({
     }
 }, { _id: false });
 
+const miniDrawPointSchema = new mongoose.Schema({
+    x: {
+        type: Number,
+        required: true,
+        min: 0,
+        max: 1
+    },
+    y: {
+        type: Number,
+        required: true,
+        min: 0,
+        max: 1
+    }
+}, { _id: false });
+
+const miniDrawStrokeSchema = new mongoose.Schema({
+    strokeId: {
+        type: String,
+        required: true
+    },
+    toolType: {
+        type: String,
+        enum: ['pen', 'eraser'],
+        default: 'pen'
+    },
+    colorValue: {
+        type: Number,
+        default: 0xFFFFFFFF
+    },
+    thickness: {
+        type: Number,
+        default: 3,
+        min: 1,
+        max: 24
+    },
+    points: {
+        type: [miniDrawPointSchema],
+        default: () => []
+    },
+    createdByUserId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        default: null
+    },
+    createdAt: {
+        type: Date,
+        default: Date.now
+    },
+    updatedAt: {
+        type: Date,
+        default: Date.now
+    },
+    version: {
+        type: Number,
+        default: 0
+    },
+    isVisible: {
+        type: Boolean,
+        default: true
+    }
+}, { _id: false });
+
+const miniDrawRedoStackSchema = new mongoose.Schema({
+    userId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        required: true
+    },
+    strokeIds: {
+        type: [String],
+        default: () => []
+    },
+    updatedAt: {
+        type: Date,
+        default: Date.now
+    }
+}, { _id: false });
+
+const miniDrawStateSchema = new mongoose.Schema({
+    sessionId: {
+        type: String,
+        default: ''
+    },
+    isUnlocked: {
+        type: Boolean,
+        default: false
+    },
+    unlockCostCoins: {
+        type: Number,
+        default: 300
+    },
+    unlockedByUserId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        default: null
+    },
+    unlockedAt: {
+        type: Date,
+        default: null
+    },
+    enabled: {
+        type: Boolean,
+        default: true
+    },
+    accessPolicy: {
+        type: String,
+        enum: ['all_participants', 'host_admin', 'view_only'],
+        default: 'all_participants'
+    },
+    version: {
+        type: Number,
+        default: 0
+    },
+    strokes: {
+        type: [miniDrawStrokeSchema],
+        default: () => []
+    },
+    redoStacks: {
+        type: [miniDrawRedoStackSchema],
+        default: () => []
+    },
+    lastClearedByUserId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        default: null
+    },
+    lastClearedAt: {
+        type: Date,
+        default: null
+    },
+    updatedAt: {
+        type: Date,
+        default: Date.now
+    }
+}, { _id: false });
+
 const normalizeSeatStatesForRoom = (room) => {
     const existingSeatStates = Array.isArray(room.seatStates)
         ? room.seatStates
@@ -274,6 +411,16 @@ const roomSchema = new mongoose.Schema({
         type: String,
         required: true
     }, // Display ID like "1698332" - auto-generated
+    ownerId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        index: true
+    },
+    isPermanent: {
+        type: Boolean,
+        default: false
+    },
+    archivedAt: Date,
     groupId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'Group',
@@ -304,6 +451,23 @@ const roomSchema = new mongoose.Schema({
         type: String,
         maxlength: 20
     }],
+    topic: {
+        type: String,
+        trim: true,
+        maxlength: 120,
+        default: ''
+    },
+    language: {
+        type: String,
+        trim: true,
+        maxlength: 16,
+        default: 'en'
+    },
+    roomRules: {
+        type: String,
+        maxlength: 500,
+        default: ''
+    },
 
     // Hosting
     hostId: {
@@ -518,6 +682,11 @@ const roomSchema = new mongoose.Schema({
         default: null
     },
 
+    miniDraw: {
+        type: miniDrawStateSchema,
+        default: () => ({})
+    },
+
     // Current State
     participants: [{
         userId: {
@@ -540,6 +709,10 @@ const roomSchema = new mongoose.Schema({
         lastActive: {
             type: Date,
             default: Date.now
+        },
+        isPresent: {
+            type: Boolean,
+            default: true
         },
         isMuted: {
             type: Boolean,
@@ -601,6 +774,26 @@ const roomSchema = new mongoose.Schema({
     onlineCount: {
         type: Number,
         default: 0
+    },
+    hostPresent: {
+        type: Boolean,
+        default: false
+    },
+    adminCount: {
+        type: Number,
+        default: 0
+    },
+    activeControllersCount: {
+        type: Number,
+        default: 0
+    },
+    roomActive: {
+        type: Boolean,
+        default: false
+    },
+    inactiveSince: {
+        type: Date,
+        default: null
     },
 
     // Voice Stream (for LiveKit integration later)
@@ -701,10 +894,9 @@ roomSchema.pre('save', async function () {
     if (this.rallyActive && this.rallyExpiresAt && this.rallyExpiresAt <= new Date()) {
         this.rallyActive = false;
     }
-    this.participantCount = this.participants.length;
-    this.onlineCount = this.participants.filter(p =>
-        p.lastActive > new Date(Date.now() - 5 * 60 * 1000) // Active in last 5 minutes
-    ).length;
+    this.participantCount = this.participants.filter((participant) => participant.isPresent !== false).length;
+    recalculateRoomPresenceState(this);
+    this.onlineCount = this.participants.filter((participant) => participant.isPresent !== false).length;
     normalizeSeatStatesForRoom(this);
 });
 
@@ -718,6 +910,16 @@ roomSchema.index({ featured: -1 });
 roomSchema.index({ rallyActive: -1, rallyExpiresAt: -1 });
 roomSchema.index({ onlineCount: -1 });
 roomSchema.index({ roomId: 1 }, { unique: true });
+roomSchema.index(
+    { ownerId: 1, isPermanent: 1 },
+    {
+        unique: true,
+        partialFilterExpression: {
+            ownerId: { $exists: true },
+            isPermanent: true
+        }
+    }
+);
 roomSchema.index({ groupId: 1, endedAt: 1 });
 roomSchema.index({ type: 1, 'gameConfig.gameId': 1, 'gameConfig.tableMode': 1, endedAt: 1, showInExplore: 1 });
 roomSchema.index({ 'gameConfig.activeMatchId': 1 });

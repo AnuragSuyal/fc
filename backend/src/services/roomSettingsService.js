@@ -1,12 +1,14 @@
 const Room = require('../models/Room');
 const {
     MAX_STAGE_SEATS,
+    getUserMiniDrawCapabilities,
     ROOM_MODES,
     getEffectiveRoomPermissions,
     getParticipant,
     getRoomMode,
     getUserRoomCapabilities
 } = require('./roomPermissionService');
+const { buildMiniDrawSummary } = require('./miniDrawService');
 const {
     getLockedSeatCount,
     getSeatStateSnapshot
@@ -23,10 +25,11 @@ const ROOM_UPDATE_EVENTS = Object.freeze({
 });
 
 const populateRoomById = async (roomId) => Room.findById(roomId)
-    .populate('hostId', 'username avatar level vipLevel')
-    .populate('coHosts', 'username avatar level vipLevel')
-    .populate('moderators', 'username avatar level vipLevel')
-    .populate('participants.userId', 'username avatar level vipLevel status.isOnline')
+    .populate('ownerId', 'username avatar level vipLevel shopProfile')
+    .populate('hostId', 'username avatar level vipLevel shopProfile')
+    .populate('coHosts', 'username avatar level vipLevel shopProfile')
+    .populate('moderators', 'username avatar level vipLevel shopProfile')
+    .populate('participants.userId', 'username avatar level vipLevel shopProfile status.isOnline')
     .populate('bans.userId', 'username avatar')
     .populate('reports.userId', 'username avatar');
 
@@ -73,11 +76,13 @@ const buildRoomSettingsSnapshot = (room, viewerUserId = null) => {
         identity: {
             title: room?.name || '',
             announcement: resolveAnnouncementText(room),
-            coverImage: room?.theme?.coverImage || ''
+            coverImage: room?.theme?.coverImage || '',
+            topic: room?.topic || ''
         },
         permissions: {
             banTextChat: effectivePermissions.banTextChat,
             banPhotoChat: effectivePermissions.banPhotoChat,
+            banRedPacket: effectivePermissions.banRedPacket,
             highQualityMode: effectivePermissions.highQualityMode,
             allowGifting: effectivePermissions.allowGifting,
             lockStageJoins: effectivePermissions.lockStageJoins,
@@ -87,12 +92,29 @@ const buildRoomSettingsSnapshot = (room, viewerUserId = null) => {
         roomConfig: {
             isPrivate: effectivePermissions.isPrivate,
             category: room?.category || 'all',
-            roomMode: getRoomMode(room)
+            roomMode: getRoomMode(room),
+            language: room?.language || 'en',
+            region: room?.region || 'Global',
+            roomRules: room?.roomRules || '',
+            isPermanent: room?.isPermanent === true
         },
         moderation: buildModerationSnapshot(room, viewerUserId, capabilities),
+        controllerState: {
+            hostPresent: room?.hostPresent === true,
+            adminCount: Number(room?.adminCount || 0),
+            activeControllersCount: Number(room?.activeControllersCount || 0),
+            roomActive: room?.roomActive !== false,
+            inactiveSince: room?.inactiveSince
+                ? new Date(room.inactiveSince).toISOString()
+                : null
+        },
         seats: buildSeatSnapshot(room),
         atmosphere: {
             backgroundTheme: room?.theme?.background || 'default'
+        },
+        miniDraw: {
+            ...buildMiniDrawSummary(room, viewerUserId),
+            permissions: getUserMiniDrawCapabilities(room, viewerUserId)
         }
     };
 };
@@ -112,6 +134,13 @@ const decorateRoomPayload = (room, viewerUserId = null, options = {}) => {
 
     source.mode = getRoomMode(room);
     source.announcement = resolveAnnouncementText(room);
+    source.ownerId = room?.ownerId?._id?.toString?.() || room?.ownerId?.toString?.() || source.ownerId;
+    source.isPermanent = room?.isPermanent === true;
+    source.hostPresent = room?.hostPresent === true;
+    source.adminCount = Number(room?.adminCount || 0);
+    source.activeControllersCount = Number(room?.activeControllersCount || 0);
+    source.roomActive = room?.roomActive !== false;
+    source.inactiveSince = room?.inactiveSince || null;
     source.theme = {
         ...(source.theme || {}),
         background: roomSettings.atmosphere.backgroundTheme,
@@ -122,6 +151,7 @@ const decorateRoomPayload = (room, viewerUserId = null, options = {}) => {
         hdVoice: roomSettings.permissions.highQualityMode,
         banTextChat: roomSettings.permissions.banTextChat,
         banPhotoChat: roomSettings.permissions.banPhotoChat,
+        banRedPacket: roomSettings.permissions.banRedPacket,
         allowGifts: roomSettings.permissions.allowGifting,
         stageJoinsLocked: roomSettings.permissions.lockStageJoins,
         allowAdminSeatControl: roomSettings.permissions.allowAdminSeatControl,
@@ -133,6 +163,7 @@ const decorateRoomPayload = (room, viewerUserId = null, options = {}) => {
     source.lockedSeats = roomSettings.seats.lockedSeats;
     source.seatStates = roomSettings.seats.items;
     source.roomSettings = roomSettings;
+    source.miniDraw = roomSettings.miniDraw;
 
     if (includeCapabilities) {
         source.capabilities = capabilities;
@@ -196,6 +227,8 @@ const emitRoomUpdate = (io, room, {
         coverImage: publicPayload.theme?.coverImage || publicPayload.coverImage || '',
         participantCount: publicPayload.participantCount ?? publicPayload.participants?.length ?? 0,
         onlineCount: publicPayload.onlineCount ?? 0,
+        roomActive: publicPayload.roomActive !== false,
+        activeControllersCount: publicPayload.activeControllersCount ?? 0,
         endedAt: publicPayload.endedAt || null,
         updatedAt: new Date().toISOString()
     });

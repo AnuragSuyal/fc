@@ -13,7 +13,10 @@ import '../../services/profile_service.dart';
 import '../../services/room_service.dart';
 import '../../services/socket_service.dart';
 import '../../utils/constants.dart';
+import '../level_badge.dart';
 import '../user_avatar.dart';
+import '../vip/vip_badge.dart';
+import '../vip/vip_name_text.dart';
 
 class UserProfileBottomSheet extends StatefulWidget {
   final Participant participant;
@@ -145,7 +148,8 @@ class _UserProfileBottomSheetState extends State<UserProfileBottomSheet> {
     final currentUserId = context.read<AuthProvider>().user?.id;
     final messageJson = data['message'];
     if (currentUserId == null || messageJson is! Map) return;
-    final message = MessageModel.fromJson(Map<String, dynamic>.from(messageJson));
+    final message =
+        MessageModel.fromJson(Map<String, dynamic>.from(messageJson));
     final ids = <String>{
       message.senderId,
       if (message.recipientId != null) message.recipientId!,
@@ -174,7 +178,8 @@ class _UserProfileBottomSheetState extends State<UserProfileBottomSheet> {
     final messenger = ScaffoldMessenger.of(context);
     try {
       if (_hasIncomingRequest) {
-        final success = await FriendService.acceptFriendRequest(participant.userId);
+        final success =
+            await FriendService.acceptFriendRequest(participant.userId);
         if (success) {
           setState(() {
             _relationship = {
@@ -188,13 +193,15 @@ class _UserProfileBottomSheetState extends State<UserProfileBottomSheet> {
           });
           messenger.showSnackBar(
             SnackBar(
-              content: Text('You are now friends with ${participant.username}.'),
+              content:
+                  Text('You are now friends with ${participant.username}.'),
               backgroundColor: AppColors.successGreen,
             ),
           );
         }
       } else if (_canSendFriendRequest) {
-        final success = await FriendService.sendFriendRequest(participant.userId);
+        final success =
+            await FriendService.sendFriendRequest(participant.userId);
         if (success) {
           setState(() {
             _relationship = {
@@ -275,7 +282,8 @@ class _UserProfileBottomSheetState extends State<UserProfileBottomSheet> {
               Row(
                 children: [
                   IconButton(
-                    icon: const Icon(Icons.more_vert_rounded, color: Colors.white54),
+                    icon: const Icon(Icons.more_vert_rounded,
+                        color: Colors.white54),
                     onPressed: (!widget.isMe ||
                             widget.canModerate ||
                             widget.canManageRoles ||
@@ -297,10 +305,12 @@ class _UserProfileBottomSheetState extends State<UserProfileBottomSheet> {
               Center(child: _buildAvatar(user)),
               const SizedBox(height: 16),
               Center(
-                child: Text(
+                child: VipNameText(
                   user?.username ?? participant.username,
+                  membership:
+                      user?.vipMembership ?? participant.user?.vipMembership,
+                  fallbackVipLevel: user?.vipLevel ?? participant.vipLevel,
                   style: const TextStyle(
-                    color: Colors.white,
                     fontSize: 24,
                     fontWeight: FontWeight.w800,
                   ),
@@ -336,7 +346,9 @@ class _UserProfileBottomSheetState extends State<UserProfileBottomSheet> {
                     const Color(0xFFFFB083),
                   ),
                   _pill(
-                    (user?.isOnline ?? participant.isOnline) ? 'ONLINE' : 'OFFLINE',
+                    (user?.isOnline ?? participant.isOnline)
+                        ? 'ONLINE'
+                        : 'OFFLINE',
                     ((user?.isOnline ?? participant.isOnline)
                             ? AppColors.successGreen
                             : Colors.white24)
@@ -346,10 +358,11 @@ class _UserProfileBottomSheetState extends State<UserProfileBottomSheet> {
                         : Colors.white70,
                   ),
                   if ((user?.vipLevel ?? participant.vipLevel) > 0)
-                    _pill(
-                      'VIP ${user?.vipLevel ?? participant.vipLevel}',
-                      const Color(0xFFFFD24D).withValues(alpha: 0.16),
-                      const Color(0xFFFFD24D),
+                    VipBadge(
+                      membership:
+                          user?.vipMembership ?? participant.user?.vipMembership,
+                      fallbackVipLevel: user?.vipLevel ?? participant.vipLevel,
+                      size: VipBadgeSize.medium,
                     ),
                   if (_isFriend)
                     _pill(
@@ -413,7 +426,8 @@ class _UserProfileBottomSheetState extends State<UserProfileBottomSheet> {
                         '${stats['giftsReceived'] ?? 0}',
                       ),
                       const SizedBox(height: 12),
-                      _infoRow('Last Active', _lastActiveLabel(user?.lastActive)),
+                      _infoRow(
+                          'Last Active', _lastActiveLabel(user?.lastActive)),
                     ],
                   ),
                 ),
@@ -517,7 +531,9 @@ class _UserProfileBottomSheetState extends State<UserProfileBottomSheet> {
                   const SizedBox(width: 12),
                   Expanded(
                     child: ElevatedButton(
-                      onPressed: widget.isMe || _hasIncomingRequest || _canSendFriendRequest
+                      onPressed: widget.isMe ||
+                              _hasIncomingRequest ||
+                              _canSendFriendRequest
                           ? _handlePrimaryAction
                           : null,
                       style: ElevatedButton.styleFrom(
@@ -589,6 +605,11 @@ class _UserProfileBottomSheetState extends State<UserProfileBottomSheet> {
                       ? user!.avatar
                       : participant.avatar,
                   radius: 50,
+                  shopProfile:
+                      user?.shopProfile ?? participant.user?.shopProfile,
+                  vipMembership:
+                      user?.vipMembership ?? participant.user?.vipMembership,
+                  vipLevel: user?.vipLevel ?? participant.vipLevel,
                 ),
               ),
             ),
@@ -597,21 +618,10 @@ class _UserProfileBottomSheetState extends State<UserProfileBottomSheet> {
         Positioned(
           bottom: -10,
           right: 0,
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-            decoration: BoxDecoration(
-              color: const Color(0xFF52A1FF),
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: const Color(0xFF111115), width: 2),
-            ),
-            child: Text(
-              'Lv.${user?.level ?? participant.level}',
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 11,
-                fontWeight: FontWeight.w900,
-              ),
-            ),
+          child: LevelBadge(
+            level: user?.level ?? participant.level,
+            levelInfo: user?.levelInfo ?? participant.user?.levelInfo,
+            size: LevelBadgeSize.medium,
           ),
         ),
       ],
@@ -719,9 +729,8 @@ class _UserProfileBottomSheetState extends State<UserProfileBottomSheet> {
             height: 8,
             margin: const EdgeInsets.only(top: 6),
             decoration: BoxDecoration(
-              color: isFromMe
-                  ? const Color(0xFFFFB347)
-                  : const Color(0xFF52A1FF),
+              color:
+                  isFromMe ? const Color(0xFFFFB347) : const Color(0xFF52A1FF),
               shape: BoxShape.circle,
             ),
           ),
@@ -733,7 +742,9 @@ class _UserProfileBottomSheetState extends State<UserProfileBottomSheet> {
                 Text(
                   isFromMe
                       ? 'You'
-                      : (message.senderName.isEmpty ? 'Friend' : message.senderName),
+                      : (message.senderName.isEmpty
+                          ? 'Friend'
+                          : message.senderName),
                   style: const TextStyle(
                     color: Colors.white70,
                     fontSize: 11,
@@ -1016,8 +1027,7 @@ class _UserProfileBottomSheetState extends State<UserProfileBottomSheet> {
               ),
             if (widget.canModerate)
               ListTile(
-                leading:
-                    const Icon(Icons.person_off, color: Colors.redAccent),
+                leading: const Icon(Icons.person_off, color: Colors.redAccent),
                 title: const Text(
                   'Kick From Room',
                   style: TextStyle(color: Colors.white),

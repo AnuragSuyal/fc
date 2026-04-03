@@ -17,17 +17,18 @@ class RoomPermissions {
 
   Participant? get selfParticipant => _participantFor(userId);
   String? get selfRole => selfParticipant?.role.toLowerCase();
+  String get _effectiveOwnerId =>
+      room.ownerId.isNotEmpty ? room.ownerId : room.hostId;
 
-  bool get isOwner =>
-      _capability(
+  bool get isOwner => _capability(
         'isOwner',
-        userId != null && (userId == room.hostId || selfRole == 'host'),
+        userId != null && userId == _effectiveOwnerId,
       );
-  bool get isAdmin =>
-      _capability(
+  bool get isAdmin => _capability(
         'isAdmin',
         userId != null &&
             (isOwner ||
+                userId == room.hostId ||
                 room.coHostIds.contains(userId) ||
                 room.moderatorIds.contains(userId) ||
                 selfRole == 'cohost' ||
@@ -45,26 +46,29 @@ class RoomPermissions {
         participant.role == 'host';
   }
 
-  bool get canOpenRoomSettings =>
-      _capability('canOpenRoomSettings', isAdmin);
+  bool get canOpenRoomSettings => _capability('canOpenRoomSettings', isAdmin);
   bool get canManageRoom => _capability('canManageRoom', isAdmin);
-  bool get canManageStage => _capability('canManageStage', isAdmin);
-  bool get canManageSeatLocks =>
-      _capability('canManageSeatLocks', isOwner || (isAdmin && room.allowAdminSeatControl));
-  bool get canManageSafety => _capability('canManageSafety', isAdmin);
-  bool get canManageRoomMedia => _capability('canManageRoomMedia', isAdmin);
+  bool get canManageStage =>
+      _capability('canManageStage', room.roomActive && isAdmin);
+  bool get canManageSeatLocks => _capability(
+        'canManageSeatLocks',
+        room.roomActive && (isOwner || (isAdmin && room.allowAdminSeatControl)),
+      );
+  bool get canManageSafety =>
+      _capability('canManageSafety', room.roomActive && isAdmin);
+  bool get canManageRoomMedia =>
+      _capability('canManageRoomMedia', room.roomActive && isAdmin);
   bool get canManageRoomIdentity =>
       _capability('canManageRoomIdentity', isOwner);
-  bool get canManageRoomAccess =>
-      _capability('canManageRoomAccess', isOwner);
+  bool get canManageRoomAccess => _capability('canManageRoomAccess', isOwner);
   bool get canManageAdmins => _capability('canManageAdmins', isOwner);
   bool get canManageGifting =>
       _capability('canManageGifting', isOwner || isAdmin);
-  bool get canEditAnnouncement =>
-      _capability('canEditAnnouncement', isOwner);
+  bool get canActivateDragonPacket =>
+      _capability('canActivateDragonPacket', room.roomActive && isAdmin);
+  bool get canEditAnnouncement => _capability('canEditAnnouncement', isOwner);
   bool get canEndRoom => _capability('canEndRoom', isOwner);
-  bool get canTransferOwnership =>
-      _capability('canTransferOwnership', isOwner);
+  bool get canTransferOwnership => _capability('canTransferOwnership', isOwner);
   bool get canViewReports => _capability('canViewReports', isOwner);
   bool get canViewBans => _capability('canViewBans', isAdmin);
   bool get canInviteUsers => _capability('canInviteUsers', isAdmin);
@@ -75,15 +79,32 @@ class RoomPermissions {
       _capability('canSendRoomImages', !room.banPhotoChat || isAdmin);
   bool get canUseRoomGifts =>
       _capability('canSendRoomGifts', room.allowGifts || isOwner);
-  bool get canJoinStageDirectly =>
-      _capability(
-        'canJoinStageDirectly',
-        isAdmin || (!room.stageJoinsLocked && !room.requireApproval),
+  bool get canUnlockMiniDraw =>
+      _capability('canUnlockMiniDraw', room.miniDraw.permissions.canUnlock);
+  bool get canManageMiniDraw =>
+      _capability('canManageMiniDraw', room.miniDraw.permissions.canManage);
+  bool get canViewMiniDraw =>
+      _capability('canViewMiniDraw', room.miniDraw.permissions.canView);
+  bool get canDrawOnMiniDraw =>
+      _capability('canDrawOnMiniDraw', room.miniDraw.permissions.canDraw);
+  bool get canClearMiniDraw =>
+      _capability('canClearMiniDraw', room.miniDraw.permissions.canClear);
+  bool get canUndoRedoMiniDraw => _capability(
+        'canUndoRedoMiniDraw',
+        room.miniDraw.permissions.canUndoRedo,
       );
-  bool get canRequestMic =>
-      _capability(
+  bool get canJoinStageDirectly => _capability(
+        'canJoinStageDirectly',
+        room.roomActive &&
+            (isAdmin || (!room.stageJoinsLocked && !room.requireApproval)),
+      );
+  bool get canRequestMic => _capability(
         'canRequestMic',
-        userId != null && !isAdmin && !isSpeaker && !room.isLockedSeat(1),
+        room.roomActive &&
+            userId != null &&
+            !isAdmin &&
+            !isSpeaker &&
+            !room.isLockedSeat(1),
       );
 
   int get authorityLevel {
@@ -104,12 +125,12 @@ class RoomPermissions {
 
   bool canManageAdminRole(Participant participant) =>
       canManageAdmins &&
-      participant.userId != room.hostId &&
+      participant.userId != _effectiveOwnerId &&
       participant.userId != userId;
 
   bool canTransferOwnershipTo(Participant participant) =>
       canTransferOwnership &&
-      participant.userId != room.hostId &&
+      participant.userId != _effectiveOwnerId &&
       participant.userId != userId;
 
   Participant? _participantFor(String? targetUserId) {
@@ -123,8 +144,11 @@ class RoomPermissions {
   }
 
   int _authorityLevelForParticipant(Participant participant) {
-    if (participant.userId == room.hostId || participant.role == 'host') {
+    if (participant.userId == _effectiveOwnerId) {
       return 4;
+    }
+    if (participant.userId == room.hostId || participant.role == 'host') {
+      return 3;
     }
     if (room.coHostIds.contains(participant.userId) ||
         room.moderatorIds.contains(participant.userId) ||

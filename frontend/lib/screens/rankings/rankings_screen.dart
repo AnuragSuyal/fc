@@ -6,6 +6,8 @@ import '../../services/ranking_service.dart';
 import '../../utils/constants.dart';
 import '../../widgets/rounded_scaffold.dart';
 import '../../widgets/user_avatar.dart';
+import '../../widgets/vip/vip_badge.dart';
+import '../../widgets/vip/vip_name_text.dart';
 
 class RankingsScreen extends StatefulWidget {
   const RankingsScreen({super.key});
@@ -70,6 +72,12 @@ class _RankingsScreenState extends State<RankingsScreen>
     _mainTabController.dispose();
     _periodTabController.dispose();
     super.dispose();
+  }
+
+  int _intValue(dynamic value) {
+    if (value is int) return value;
+    if (value is num) return value.toInt();
+    return int.tryParse(value?.toString() ?? '') ?? 0;
   }
 
   void _onMainTabChanged() {
@@ -518,6 +526,7 @@ class _RankingsScreenState extends State<RankingsScreen>
                       imageUrl: rank['avatar']?.toString(),
                       username: rank['username']?.toString() ?? '',
                       radius: 20,
+                      vipLevel: _intValue(rank['vipLevel']),
                     ),
                     const SizedBox(width: 12),
                     Expanded(
@@ -527,8 +536,10 @@ class _RankingsScreenState extends State<RankingsScreen>
                           Row(
                             children: [
                               Flexible(
-                                child: Text(
+                                child: VipNameText(
                                   rank['username']?.toString() ?? 'Unknown',
+                                  fallbackVipLevel: _intValue(rank['vipLevel']),
+                                  fallbackColor: AppColors.textPrimary,
                                   overflow: TextOverflow.ellipsis,
                                   style: const TextStyle(
                                     fontWeight: FontWeight.bold,
@@ -537,10 +548,9 @@ class _RankingsScreenState extends State<RankingsScreen>
                               ),
                               if ((rank['vipLevel'] ?? 0) > 0) ...[
                                 const SizedBox(width: 4),
-                                const Icon(
-                                  Icons.workspace_premium,
-                                  size: 14,
-                                  color: Colors.amber,
+                                VipBadge(
+                                  fallbackVipLevel: _intValue(rank['vipLevel']),
+                                  size: VipBadgeSize.small,
                                 ),
                               ],
                             ],

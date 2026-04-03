@@ -9,7 +9,7 @@ import '../../theme/app_theme.dart';
 import '../../utils/constants.dart';
 import '../../widgets/app_search_icon.dart';
 import '../../widgets/room_card.dart';
-import 'create_room_screen.dart';
+import 'my_room_entry_screen.dart';
 
 class RoomsScreen extends StatefulWidget {
   const RoomsScreen({super.key});
@@ -329,7 +329,7 @@ class _RoomsScreenState extends State<RoomsScreen> {
             children: [
               Expanded(child: _heroMetric('Live rooms', '${_rooms.length}')),
               const SizedBox(width: 10),
-              Expanded(child: _heroMetric('My rooms', '${_myRooms.length}')),
+              Expanded(child: _heroMetric('My room', '${_myRooms.length}')),
             ],
           ),
         ],
@@ -392,7 +392,7 @@ class _RoomsScreenState extends State<RoomsScreen> {
         const SizedBox(width: 10),
         Expanded(
           child: _buildInfoChip(
-            label: 'My rooms',
+            label: 'My room',
             value: '${_myRooms.length}',
             icon: Icons.favorite_rounded,
             color: AppColors.secondaryBlue,
@@ -524,7 +524,7 @@ class _RoomsScreenState extends State<RoomsScreen> {
           Text('No rooms found', style: theme.textTheme.headlineSmall),
           const SizedBox(height: 8),
           Text(
-            'Try another search, or make the first move and create a room.',
+            'Try another search, or open your permanent room and customize it for your audience.',
             style: theme.textTheme.bodyMedium?.copyWith(
               color: AppColors.textSecondary,
             ),
@@ -532,7 +532,7 @@ class _RoomsScreenState extends State<RoomsScreen> {
           const SizedBox(height: 16),
           FilledButton(
             onPressed: _openCreateRoom,
-            child: const Text('Create a room'),
+            child: const Text('Open my room'),
           ),
         ],
       ),
@@ -540,11 +540,8 @@ class _RoomsScreenState extends State<RoomsScreen> {
   }
 
   void _openCreateRoom() {
-    Navigator.push(
-      context,
-      MaterialPageRoute(builder: (context) => const CreateRoomScreen()),
-    ).then((created) {
-      if (created == true) _refreshRooms();
+    MyRoomEntryScreen.open(context).then((_) {
+      _refreshRooms();
     });
   }
 }

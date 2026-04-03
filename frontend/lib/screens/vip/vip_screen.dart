@@ -1,5 +1,6 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
-import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 
 import '../../models/vip_model.dart';
@@ -8,6 +9,13 @@ import '../../services/vip_service.dart';
 import '../../utils/constants.dart';
 import '../../widgets/currency_icon.dart';
 import '../../widgets/rounded_scaffold.dart';
+import '../../widgets/vip/membership_faq_section.dart';
+import '../../widgets/vip/membership_hero_card.dart';
+import '../../widgets/vip/membership_purchase_panel.dart';
+import '../../widgets/vip/vip_benefit_list.dart';
+import '../../widgets/vip/vip_comparison_table.dart';
+import '../../widgets/vip/vip_identity_preview.dart';
+import '../../widgets/vip/vip_tier_card.dart';
 
 class VipScreen extends StatefulWidget {
   const VipScreen({super.key});
@@ -17,11 +25,36 @@ class VipScreen extends StatefulWidget {
 }
 
 class _VipScreenState extends State<VipScreen> {
-  List<VipLevelModel> _levels = [];
+  VipCatalogModel _catalog = const VipCatalogModel(
+    tiers: <VipTierModel>[],
+    comparisonRows: <VipComparisonRow>[],
+    planDefinitions: <VipPlanOption>[],
+  );
   VipStatusModel? _status;
   bool _loading = true;
   bool _busy = false;
   String? _error;
+  String _selectedTierId = '';
+  String _selectedPlanDuration = 'monthly';
+
+  VipTierModel? get _selectedTier {
+    final match = _catalog.tiers.where((tier) => tier.tierId == _selectedTierId);
+    if (match.isNotEmpty) {
+      return match.first;
+    }
+    return _catalog.tiers.isNotEmpty ? _catalog.tiers.first : null;
+  }
+
+  VipPlanOption? get _selectedPlan {
+    final tier = _selectedTier;
+    if (tier == null) return null;
+    final exact = tier.planOptions
+        .where((plan) => plan.planDuration == _selectedPlanDuration);
+    if (exact.isNotEmpty) {
+      return exact.first;
+    }
+    return tier.planOptions.isNotEmpty ? tier.planOptions.first : null;
+  }
 
   @override
   void initState() {
@@ -39,514 +72,386 @@ class _VipScreenState extends State<VipScreen> {
 
     try {
       final results = await Future.wait<dynamic>([
-        VipService.getVipLevels(),
+        VipService.getVipCatalog(selectedTierId: _selectedTierId),
         VipService.getVipStatus(),
       ]);
       if (!mounted) return;
 
-      final levels = (results[0] as List)
-          .map((e) =>
-              VipLevelModel.fromJson(Map<String, dynamic>.from(e as Map)))
-          .toList();
-      final statusMap = results[1] as Map<String, dynamic>?;
+      final catalog = results[0] as VipCatalogModel;
+      final status = results[1] as VipStatusModel?;
+      final membership = status?.membership;
+      final defaultTierId = _selectedTierId.isNotEmpty
+          ? _selectedTierId
+          : (membership?.activeTierId.isNotEmpty == true
+              ? membership!.activeTierId
+              : membership?.currentTierId.isNotEmpty == true &&
+                      membership!.currentTierId != 'free'
+                  ? membership.currentTierId
+                  : (catalog.tiers.isNotEmpty ? catalog.tiers.first.tierId : ''));
+      final defaultTier = catalog.tiers
+          .where((tier) => tier.tierId == defaultTierId)
+          .cast<VipTierModel?>()
+          .firstOrNull;
+      final defaultPlan = defaultTier?.planOptions.isNotEmpty == true
+          ? defaultTier!.planOptions.first.planDuration
+          : 'monthly';
 
       setState(() {
-        _levels = levels;
-        _status = statusMap != null
-            ? VipStatusModel.fromJson(statusMap)
-            : _freeStatus();
+        _catalog = catalog;
+        _status = status;
+        _selectedTierId = defaultTierId;
+        _selectedPlanDuration = _selectedPlanDuration.isNotEmpty
+            ? _selectedPlanDuration
+            : defaultPlan;
         _loading = false;
       });
-    } catch (e) {
+    } catch (error) {
       if (!mounted) return;
       setState(() {
-        _status ??= _freeStatus();
-        _error = e.toString();
         _loading = false;
+        _error = error.toString();
       });
     }
   }
 
-  Future<void> _purchase(VipLevelModel level, String period) async {
-    if (_busy) return;
+  Future<void> _purchaseSelectedTier() async {
+    final tier = _selectedTier;
+    final plan = _selectedPlan;
+    if (tier == null || plan == null || _busy) return;
+
     setState(() => _busy = true);
     try {
-      final result =
-          await VipService.purchaseVip(level: level.level, period: period);
+      final result = await VipService.purchaseVip(
+        tierId: tier.tierId,
+        planDuration: plan.planDuration,
+      );
       if (!mounted) return;
-      if (result['newBalance'] != null) {
-        context.read<AuthProvider>().updateProfile(
-              coins: result['newBalance']['coins'],
-              gems: result['newBalance']['gems'],
-              xp: result['newBalance']['xp'],
-              level: result['newBalance']['level'],
-              vipLevel: result['newBalance']['vipLevel'],
-            );
-      }
-      await context.read<AuthProvider>().refreshBalance();
+
+      final newBalance = result['newBalance'] is Map
+          ? Map<String, dynamic>.from(result['newBalance'] as Map)
+          : const <String, dynamic>{};
+      final membershipMap = result['membership'] is Map
+          ? Map<String, dynamic>.from(result['membership'] as Map)
+          : (newBalance['vipMembership'] is Map
+              ? Map<String, dynamic>.from(newBalance['vipMembership'] as Map)
+              : const <String, dynamic>{});
+
+      context.read<AuthProvider>().mergeProfilePatch({
+        'coins': newBalance['coins'],
+        'gems': newBalance['gems'],
+        'xp': newBalance['xp'],
+        'level': newBalance['level'],
+        'vipLevel': newBalance['vipLevel'],
+        if (membershipMap.isNotEmpty) 'vipMembership': membershipMap,
+      });
+
       await _load(silent: true);
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content:
-              Text(result['message']?.toString() ?? '${level.name} activated.'),
+          content: Text(
+            result['message']?.toString() ??
+                '${tier.displayName} activated successfully.',
+          ),
           backgroundColor: AppColors.successGreen,
         ),
       );
-    } catch (e) {
+    } catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('VIP purchase failed: $e'),
+          content: Text(error.toString().replaceFirst('Exception: ', '')),
           backgroundColor: AppColors.errorRed,
         ),
       );
     } finally {
-      if (mounted) setState(() => _busy = false);
+      if (mounted) {
+        setState(() => _busy = false);
+      }
     }
   }
 
-  Future<void> _choosePlan(VipLevelModel level) async {
-    final period = await showModalBottomSheet<String>(
-      context: context,
-      showDragHandle: true,
-      builder: (context) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(level.name,
-                  style: Theme.of(context)
-                      .textTheme
-                      .titleLarge
-                      ?.copyWith(fontWeight: FontWeight.w800)),
-              const SizedBox(height: 8),
-              const Text('Choose a renewal cycle for immediate activation.'),
-              const SizedBox(height: 16),
-              ListTile(
-                leading: const Icon(Icons.calendar_month_rounded),
-                title: const Text('Monthly'),
-                subtitle: Text('${level.price} coins every 30 days'),
-                onTap: () => Navigator.pop(context, 'monthly'),
-              ),
-              ListTile(
-                leading: const Icon(Icons.event_repeat_rounded),
-                title: const Text('Annual'),
-                subtitle: Text('${level.annualPrice} coins every 365 days'),
-                onTap: () => Navigator.pop(context, 'annual'),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-
-    if (period != null) {
-      await _purchase(level, period);
-    }
-  }
-
-  Future<void> _claimDaily() async {
+  Future<void> _restoreMembership() async {
     if (_busy) return;
     setState(() => _busy = true);
     try {
-      final result = await VipService.claimDailyBonus();
+      final result = await VipService.restoreVip();
       if (!mounted) return;
-
-      if (result == null) {
-        throw Exception('Daily bonus is unavailable.');
+      final membershipMap = result['membership'] is Map
+          ? Map<String, dynamic>.from(result['membership'] as Map)
+          : const <String, dynamic>{};
+      context.read<AuthProvider>().mergeProfilePatch({
+        if (membershipMap.isNotEmpty) 'vipMembership': membershipMap,
+        'vipLevel': membershipMap['vipLevel'],
+      });
+      await _load(silent: true);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            result['message']?.toString() ?? 'Membership restored.',
+          ),
+          backgroundColor: AppColors.successGreen,
+        ),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(error.toString().replaceFirst('Exception: ', '')),
+          backgroundColor: AppColors.errorRed,
+        ),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _busy = false);
       }
+    }
+  }
+
+  Future<void> _claimMonthlyReward() async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    try {
+      final result = await VipService.claimMonthlyReward();
+      if (!mounted) return;
 
       final newBalance = result['newBalance'] is Map
           ? Map<String, dynamic>.from(result['newBalance'] as Map)
-          : <String, dynamic>{};
-      context.read<AuthProvider>().updateBalance(
-            coins: _toInt(newBalance['coins']),
-            gems: _toInt(newBalance['gems']),
-          );
+          : const <String, dynamic>{};
+      final membershipMap = result['membership'] is Map
+          ? Map<String, dynamic>.from(result['membership'] as Map)
+          : const <String, dynamic>{};
+
+      context.read<AuthProvider>().mergeProfilePatch({
+        'coins': newBalance['coins'],
+        'gems': newBalance['gems'],
+        if (membershipMap.isNotEmpty) 'vipMembership': membershipMap,
+        'vipLevel': membershipMap['vipLevel'],
+      });
+
       await _load(silent: true);
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
             result['alreadyClaimed'] == true
-                ? 'Today\'s VIP bonus is already claimed.'
-                : 'Claimed ${result['dailyCoins'] ?? 0} VIP coins.',
+                ? 'This cycle is already claimed.'
+                : 'Claimed ${result['monthlyCoins'] ?? 0} coins.',
           ),
           backgroundColor: AppColors.successGreen,
         ),
       );
-    } catch (e) {
+    } catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('$e'),
+          content: Text(error.toString().replaceFirst('Exception: ', '')),
           backgroundColor: AppColors.errorRed,
         ),
       );
     } finally {
-      if (mounted) setState(() => _busy = false);
+      if (mounted) {
+        setState(() => _busy = false);
+      }
     }
   }
 
-  Future<void> _cancelRenew() async {
-    final ok = await VipService.cancelVip();
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content:
-            Text(ok ? 'Auto-renew cancelled.' : 'Could not cancel auto-renew.'),
-        backgroundColor: ok ? AppColors.successGreen : AppColors.errorRed,
-      ),
-    );
+  Future<void> _cancelAutoRenew() async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    try {
+      final result = await VipService.cancelVip();
+      if (!mounted) return;
+      final membershipMap = result['membership'] is Map
+          ? Map<String, dynamic>.from(result['membership'] as Map)
+          : const <String, dynamic>{};
+      context.read<AuthProvider>().mergeProfilePatch({
+        if (membershipMap.isNotEmpty) 'vipMembership': membershipMap,
+        'vipLevel': membershipMap['vipLevel'],
+      });
+      await _load(silent: true);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            result['message']?.toString() ?? 'Auto-renew updated.',
+          ),
+          backgroundColor: AppColors.successGreen,
+        ),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(error.toString().replaceFirst('Exception: ', '')),
+          backgroundColor: AppColors.errorRed,
+        ),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _busy = false);
+      }
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final colorScheme = theme.colorScheme;
     final user = context.watch<AuthProvider>().user;
-    final status = _status ?? _freeStatus();
-    final current = _color(status.currentLevel.color);
-    final featured = status.nextLevel ??
-        (_levels.isNotEmpty ? _levels.first : status.currentLevel);
+    final status = _status;
+    final selectedTier = _selectedTier;
 
     return RoundedScaffold(
-      title: 'VIP Membership',
+      title: 'Membership',
       actions: [
         Container(
           margin: const EdgeInsets.only(right: 16),
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
           decoration: BoxDecoration(
-            color: colorScheme.surface,
+            color: Theme.of(context).colorScheme.surface,
             borderRadius: BorderRadius.circular(999),
-            border:
-                Border.all(color: colorScheme.outline.withValues(alpha: 0.14)),
+            border: Border.all(
+              color: Theme.of(context).colorScheme.outline.withValues(alpha: 0.14),
+            ),
           ),
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
               const CurrencyIcon.coins(size: 16),
               const SizedBox(width: 4),
-              Text('${user?.coins ?? 0}', style: theme.textTheme.labelLarge),
-              const SizedBox(width: 10),
-              const CurrencyIcon.gems(size: 16),
-              const SizedBox(width: 4),
-              Text('${user?.gems ?? 0}', style: theme.textTheme.labelLarge),
+              Text('${user?.coins ?? 0}',
+                  style: Theme.of(context).textTheme.labelLarge),
             ],
           ),
         ),
       ],
       body: _loading
           ? const Center(child: CircularProgressIndicator())
-          : RefreshIndicator(
-              onRefresh: () => _load(silent: true),
-              child: ListView(
-                padding: const EdgeInsets.fromLTRB(20, 20, 20, 28),
-                children: [
-                  Container(
-                    padding: const EdgeInsets.all(22),
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(28),
-                      gradient: LinearGradient(
-                        colors: [
-                          current,
-                          AppColors.accentBerry,
-                          AppColors.textPrimary,
-                        ],
+          : selectedTier == null || status == null
+              ? _buildErrorState()
+              : RefreshIndicator(
+                  onRefresh: () => _load(silent: true),
+                  child: ListView(
+                    padding: const EdgeInsets.fromLTRB(20, 20, 20, 28),
+                    children: [
+                      MembershipHeroCard(
+                        membership: status.membership,
+                        onPrimaryTap: _purchaseSelectedTier,
+                        onRestoreTap: _restoreMembership,
+                        onClaimTap: _claimMonthlyReward,
+                        busy: _busy,
                       ),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                            status.isActive
-                                ? status.currentLevel.name
-                                : 'Unlock VIP benefits',
-                            style: theme.textTheme.headlineSmall?.copyWith(
-                                color: Colors.white,
-                                fontWeight: FontWeight.w800)),
-                        const SizedBox(height: 8),
-                        Text(
-                          status.isActive
-                              ? 'Benefits active until ${DateFormat('dd MMM yyyy').format(status.expiry!)}.'
-                              : 'Choose a plan to unlock premium rooms, bonus coins, and profile perks.',
-                          style: theme.textTheme.bodyMedium?.copyWith(
-                              color: Colors.white.withValues(alpha: 0.82)),
-                        ),
-                        const SizedBox(height: 18),
-                        Row(
-                          children: [
-                            Expanded(
-                                child: _badge(
-                                    'Current',
-                                    status.currentLevel.level > 0
-                                        ? 'VIP ${status.currentLevel.level}'
-                                        : 'Free')),
-                            const SizedBox(width: 10),
-                            Expanded(
-                                child: _badge('Next',
-                                    status.nextLevel?.name ?? featured.name)),
-                            const SizedBox(width: 10),
-                            Expanded(
-                                child: _badge('Bonus',
-                                    '${status.currentLevel.coinBonus}%')),
-                          ],
-                        ),
-                        const SizedBox(height: 18),
-                        Row(
-                          children: [
-                            Expanded(
-                              child: FilledButton(
-                                onPressed: _busy
-                                    ? null
-                                    : () => _choosePlan(status.isActive
-                                        ? status.currentLevel
-                                        : featured),
-                                style: FilledButton.styleFrom(
-                                    backgroundColor: Colors.white,
-                                    foregroundColor: current),
-                                child: Text(status.isActive
-                                    ? 'Renew'
-                                    : 'Choose ${featured.name}'),
-                              ),
-                            ),
-                            const SizedBox(width: 12),
-                            Expanded(
-                              child: OutlinedButton(
-                                onPressed: _busy
-                                    ? null
-                                    : (status.nextLevel != null
-                                        ? () => _choosePlan(status.nextLevel!)
-                                        : status.isActive
-                                            ? _claimDaily
-                                            : null),
-                                style: OutlinedButton.styleFrom(
-                                    foregroundColor: Colors.white,
-                                    side: BorderSide(
-                                        color: Colors.white
-                                            .withValues(alpha: 0.30))),
-                                child: Text(status.nextLevel != null
-                                    ? 'Upgrade'
-                                    : status.isActive
-                                        ? 'Claim daily'
-                                        : 'Plans below'),
-                              ),
-                            ),
-                          ],
-                        ),
-                        if (status.isActive) ...[
-                          const SizedBox(height: 8),
-                          Wrap(
-                            spacing: 4,
-                            children: [
-                              TextButton(
-                                  onPressed: _busy ? null : _claimDaily,
-                                  child: const Text('Claim daily coins',
-                                      style: TextStyle(color: Colors.white))),
-                              TextButton(
-                                  onPressed: _busy ? null : _cancelRenew,
-                                  child: const Text('Cancel auto-renew',
-                                      style: TextStyle(color: Colors.white))),
-                            ],
-                          ),
-                        ],
-                      ],
-                    ),
-                  ),
-                  if (_error != null) ...[
-                    const SizedBox(height: 12),
-                    Card(
-                        child: ListTile(
+                      if (_error != null) ...[
+                        const SizedBox(height: 12),
+                        Card(
+                          child: ListTile(
                             leading: const Icon(Icons.info_outline_rounded),
-                            title: const Text('VIP loaded with warnings'),
-                            subtitle: Text(_error!))),
-                  ],
-                  const SizedBox(height: 20),
-                  Text('Progress',
-                      style: theme.textTheme.titleMedium
-                          ?.copyWith(fontWeight: FontWeight.w800)),
-                  const SizedBox(height: 12),
-                  Card(
-                    child: Padding(
-                      padding: const EdgeInsets.all(18),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(children: [
-                            Text(
-                                status.nextLevel != null
-                                    ? 'On the way to ${status.nextLevel!.name}'
-                                    : 'Membership status',
-                                style: theme.textTheme.titleSmall
-                                    ?.copyWith(fontWeight: FontWeight.w800)),
-                            const Spacer(),
-                            Text('${(status.progressRatio * 100).round()}%')
-                          ]),
-                          const SizedBox(height: 12),
-                          LinearProgressIndicator(
-                              value: status.progressRatio,
-                              minHeight: 10,
-                              backgroundColor: current.withValues(alpha: 0.12),
-                              valueColor:
-                                  AlwaysStoppedAnimation<Color>(current)),
-                          const SizedBox(height: 12),
-                          Text(status.isActive
-                              ? '${status.daysRemaining} days remaining on your current membership.'
-                              : 'Your next plan will activate instantly after purchase.'),
-                        ],
+                            title: const Text('Membership loaded with warnings'),
+                            subtitle: Text(_error!),
+                          ),
+                        ),
+                      ],
+                      const SizedBox(height: 22),
+                      Text(
+                        'Choose Your Tier',
+                        style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                              fontWeight: FontWeight.w900,
+                            ),
                       ),
-                    ),
+                      const SizedBox(height: 12),
+                      SizedBox(
+                        height: 280,
+                        child: ListView.separated(
+                          scrollDirection: Axis.horizontal,
+                          itemCount: _catalog.tiers.length,
+                          separatorBuilder: (_, __) => const SizedBox(width: 14),
+                          itemBuilder: (context, index) {
+                            final tier = _catalog.tiers[index];
+                            return VipTierCard(
+                              tier: tier,
+                              selected: tier.tierId == selectedTier.tierId,
+                              onTap: () {
+                                setState(() {
+                                  _selectedTierId = tier.tierId;
+                                  _selectedPlanDuration = tier.planOptions.isNotEmpty
+                                      ? tier.planOptions.first.planDuration
+                                      : 'monthly';
+                                });
+                              },
+                            );
+                          },
+                        ),
+                      ),
+                      const SizedBox(height: 22),
+                      VipIdentityPreview(
+                        tier: selectedTier,
+                        username: user?.username ?? 'FriendCircle User',
+                        level: user?.level ?? 27,
+                      ),
+                      const SizedBox(height: 22),
+                      VipBenefitList(tier: selectedTier),
+                      const SizedBox(height: 22),
+                      MembershipPurchasePanel(
+                        targetTier: selectedTier,
+                        currentTier: status.membership.activeTier ??
+                            (status.membership.currentTierId != 'free'
+                                ? status.membership.currentTier
+                                : null),
+                        selectedPlan: _selectedPlan,
+                        onPlanSelected: (plan) {
+                          setState(() => _selectedPlanDuration = plan.planDuration);
+                        },
+                        onPurchase: _purchaseSelectedTier,
+                        onCancelAutoRenew:
+                            status.membership.isActive ? _cancelAutoRenew : null,
+                        busy: _busy,
+                        autoRenew: status.membership.autoRenew,
+                        activeCurrentTier: status.membership.isActive,
+                      ),
+                      const SizedBox(height: 22),
+                      VipComparisonTable(
+                        rows: _catalog.comparisonRows,
+                        tiers: _catalog.tiers,
+                        highlightedTierId: selectedTier.tierId,
+                      ),
+                      const SizedBox(height: 22),
+                      const MembershipFaqSection(),
+                    ],
                   ),
-                  const SizedBox(height: 20),
-                  Text('VIP Levels',
-                      style: theme.textTheme.titleMedium
-                          ?.copyWith(fontWeight: FontWeight.w800)),
-                  const SizedBox(height: 12),
-                  for (final level in _levels.where((level) => level.level > 0))
-                    _tierCard(context, level, status),
-                ],
-              ),
-            ),
+                ),
     );
   }
 
-  Widget _tierCard(
-      BuildContext context, VipLevelModel level, VipStatusModel status) {
-    final tone = _color(level.color);
-    final current = status.currentLevel.level == level.level;
-    return Card(
-      margin: const EdgeInsets.only(bottom: 14),
+  Widget _buildErrorState() {
+    return Center(
       child: Padding(
-        padding: const EdgeInsets.all(18),
+        padding: const EdgeInsets.all(24),
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
           children: [
-            Row(
-              children: [
-                CircleAvatar(
-                    backgroundColor: tone.withValues(alpha: 0.14),
-                    child: Icon(Icons.workspace_premium_rounded, color: tone)),
-                const SizedBox(width: 12),
-                Expanded(
-                    child: Text(level.name,
-                        style: Theme.of(context)
-                            .textTheme
-                            .titleMedium
-                            ?.copyWith(fontWeight: FontWeight.w800))),
-                if (current) Chip(label: const Text('Current')),
-              ],
-            ),
-            const SizedBox(height: 10),
-            Text(level.description.isNotEmpty
-                ? level.description
-                : 'Premium member access'),
-            const SizedBox(height: 10),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                Chip(label: Text('${level.price} / month')),
-                Chip(label: Text('${level.annualPrice} / year')),
-                Chip(label: Text('${level.coinBonus}% coin bonus')),
-              ],
+            const Icon(
+              Icons.workspace_premium_outlined,
+              size: 46,
+              color: AppColors.textSecondary,
             ),
             const SizedBox(height: 12),
-            ...level.benefits.take(4).map((benefit) => Padding(
-                  padding: const EdgeInsets.only(bottom: 8),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Icon(Icons.check_circle_rounded, size: 18, color: tone),
-                      const SizedBox(width: 8),
-                      Expanded(
-                          child: Text(benefit.description.isNotEmpty
-                              ? '${benefit.name}: ${benefit.description}'
-                              : benefit.name)),
-                    ],
-                  ),
-                )),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Expanded(
-                  child: OutlinedButton(
-                    onPressed: _busy ? null : () => _purchase(level, 'monthly'),
-                    child: Text(current ? 'Renew monthly' : 'Monthly'),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: FilledButton(
-                    onPressed: _busy ? null : () => _purchase(level, 'annual'),
-                    style: FilledButton.styleFrom(backgroundColor: tone),
-                    child: Text(current ? 'Renew annual' : 'Annual'),
-                  ),
-                ),
-              ],
+            Text(
+              _error?.replaceFirst('Exception: ', '') ??
+                  'Membership is unavailable right now.',
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 12),
+            FilledButton(
+              onPressed: _load,
+              child: const Text('Try again'),
             ),
           ],
         ),
       ),
     );
   }
+}
 
-  Widget _badge(String label, String value) {
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-          color: Colors.white.withValues(alpha: 0.10),
-          borderRadius: BorderRadius.circular(18)),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(value,
-              style: const TextStyle(
-                  color: Colors.white,
-                  fontWeight: FontWeight.w800,
-                  fontSize: 16)),
-          const SizedBox(height: 4),
-          Text(label,
-              style: TextStyle(color: Colors.white.withValues(alpha: 0.78))),
-        ],
-      ),
-    );
-  }
-
-  VipStatusModel _freeStatus() {
-    return VipStatusModel(
-      currentLevel: VipLevelModel(
-        level: 0,
-        name: 'Free',
-        description: 'Upgrade to unlock premium rooms and daily bonuses.',
-        benefits: const [],
-        minSpend: 0,
-        price: 0,
-        annualPrice: 0,
-        color: '#64748B',
-        icon: 'VIP',
-        coinBonus: 0,
-      ),
-      progress: 0,
-      totalSpent: 0,
-    );
-  }
-
-  Color _color(String hex) {
-    try {
-      return Color(
-          int.parse(hex.replaceFirst('#', ''), radix: 16) + 0xFF000000);
-    } catch (_) {
-      return AppColors.primaryBlue;
-    }
-  }
-
-  static int? _toInt(dynamic value) {
-    if (value == null) return null;
-    if (value is int) return value;
-    if (value is num) return value.toInt();
-    return int.tryParse(value.toString());
-  }
+extension<T> on Iterable<T> {
+  T? get firstOrNull => isEmpty ? null : first;
 }

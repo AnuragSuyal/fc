@@ -1,5 +1,7 @@
 const User = require('../models/User');
 const { applyAvatarUpdate } = require('../utils/avatarUploadLimit');
+const { buildLevelFields } = require('../services/levelingRulesService');
+const { buildVipMembershipSnapshot } = require('../services/vipMembershipService');
 
 const cacheKeyForUser = (userId) => `cache:user:${userId}`;
 const escapeRegex = (value = '') => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -10,12 +12,13 @@ const buildUserPayload = (user) => ({
     username: user.username,
     avatar: user.avatar,
     bio: user.bio,
-    level: user.level,
-    xp: user.xp,
     vipLevel: user.vipLevel,
+    vipMembership: buildVipMembershipSnapshot(user),
+    shopProfile: user.shopProfile || {},
     stats: user.stats || {},
     badges: user.badges || [],
-    status: user.status || {}
+    status: user.status || {},
+    ...buildLevelFields(user)
 });
 
 const invalidateUserCache = async (redis, userId) => {
@@ -38,7 +41,7 @@ exports.getUserById = async (req, res, next) => {
         }
 
         const user = await User.findByIdOrUid(id)
-            .select('uid username avatar bio level xp vipLevel stats badges status blockedUsers');
+            .select('uid username avatar bio level xp vipLevel vipTier vipStatus vipStartAt vipExpireAt vipAutoRenew vipPlanDuration vipPurchaseSource monthlyRewardLastClaimedAt vipLastUpdatedAt vipExpiry vipPurchasedAt shopProfile stats badges status blockedUsers lastLevelUpdatedAt levelMilestoneTier xpStats');
 
         if (!user) {
             const error = new Error('User not found');
@@ -157,7 +160,7 @@ exports.searchUsers = async (req, res, next) => {
         };
 
         let users = await User.find(query)
-            .select('uid username avatar level vipLevel stats badges status')
+            .select('uid username avatar level xp vipLevel vipTier vipStatus vipStartAt vipExpireAt vipAutoRenew vipPlanDuration vipPurchaseSource monthlyRewardLastClaimedAt vipLastUpdatedAt vipExpiry vipPurchasedAt shopProfile stats badges status lastLevelUpdatedAt levelMilestoneTier xpStats')
             .limit(parsedLimit + 1)
             .skip((parsedPage - 1) * parsedLimit);
 
@@ -165,7 +168,7 @@ exports.searchUsers = async (req, res, next) => {
             const exactUidMatch = await User.findOne({
                 uid: queryText,
                 _id: { $ne: req.userId, $nin: blockedIds }
-            }).select('uid username avatar level vipLevel stats badges status');
+            }).select('uid username avatar level xp vipLevel vipTier vipStatus vipStartAt vipExpireAt vipAutoRenew vipPlanDuration vipPurchaseSource monthlyRewardLastClaimedAt vipLastUpdatedAt vipExpiry vipPurchasedAt shopProfile stats badges status lastLevelUpdatedAt levelMilestoneTier xpStats');
 
             if (exactUidMatch) {
                 users = [
@@ -190,6 +193,3 @@ exports.searchUsers = async (req, res, next) => {
 };
 
 exports.invalidateUserCache = invalidateUserCache;
-
-
-

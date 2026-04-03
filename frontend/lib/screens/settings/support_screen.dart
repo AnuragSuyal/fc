@@ -26,9 +26,9 @@ class SupportScreen extends StatelessWidget {
           ),
 
           _buildFaqTile(
-            question: 'How do I create a room?',
+            question: 'How do I set up my room?',
             answer:
-                'Go to the Rooms tab and tap the + button. Fill in the room details and tap Create.',
+                'Open My Room from the Rooms tab or your profile. On first use we allocate your permanent room, and after that you can keep editing the same room anytime.',
           ),
           _buildFaqTile(
             question: 'How do I send gifts?',
@@ -191,7 +191,3 @@ class SupportScreen extends StatelessWidget {
     );
   }
 }
-
-
-
-

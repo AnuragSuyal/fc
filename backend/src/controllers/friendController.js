@@ -1,6 +1,15 @@
 const User     = require('../models/User');
 const mongoose = require('mongoose');
 const economyController = require('./economyController');
+const {
+    awardUserXp,
+    buildProgressPayload,
+    emitLevelDrivenRealtime
+} = require('../services/levelProgressionService');
+const {
+    removeFriendConnection,
+    upsertFriendConnection
+} = require('../services/friendConnectionService');
 
 const withSession = (query, session) => (session ? query.session(session) : query);
 
@@ -128,6 +137,12 @@ exports.acceptFriendRequest = async (req, res, next) => {
                 currentUser.save(session ? { session } : undefined),
                 requestingUser.save(session ? { session } : undefined)
             ]);
+            await upsertFriendConnection({
+                leftUserId: currentUser._id,
+                rightUserId: requestingUser._id,
+                connectedAt: new Date(),
+                session
+            });
             return { currentUser, requestingUser };
         });
 
@@ -142,6 +157,61 @@ exports.acceptFriendRequest = async (req, res, next) => {
         }
 
         const redis = req.app.get('redis');
+        const friendshipKey = [
+            'friend-connection',
+            ...[req.userId.toString(), userId.toString()].sort()
+        ].join(':');
+        const [currentUserXp, requestingUserXp] = await Promise.all([
+            awardUserXp({
+                user: result.currentUser,
+                sourceType: 'friend_connection',
+                sourceReferenceId: result.requestingUser._id.toString(),
+                sourceReferenceType: 'user',
+                dedupeKey: friendshipKey,
+                redis,
+                metadata: {
+                    peerUserId: result.requestingUser._id.toString()
+                }
+            }),
+            awardUserXp({
+                user: result.requestingUser,
+                sourceType: 'friend_connection',
+                sourceReferenceId: result.currentUser._id.toString(),
+                sourceReferenceType: 'user',
+                dedupeKey: friendshipKey,
+                redis,
+                metadata: {
+                    peerUserId: result.currentUser._id.toString()
+                }
+            })
+        ]);
+
+        if (io) {
+            const progressedCurrentUser = currentUserXp?.user || result.currentUser;
+            const progressedRequestingUser = requestingUserXp?.user || result.requestingUser;
+
+            io.to(`user:${req.userId}`).emit(
+                'balance_update',
+                buildProgressPayload(progressedCurrentUser, {
+                    xpGained: currentUserXp?.xpGained || 0,
+                    source: 'friend_connection'
+                })
+            );
+            io.to(`user:${userId}`).emit(
+                'balance_update',
+                buildProgressPayload(progressedRequestingUser, {
+                    xpGained: requestingUserXp?.xpGained || 0,
+                    source: 'friend_connection'
+                })
+            );
+            await emitLevelDrivenRealtime(io, progressedCurrentUser, currentUserXp, {
+                source: 'friend_connection'
+            });
+            await emitLevelDrivenRealtime(io, progressedRequestingUser, requestingUserXp, {
+                source: 'friend_connection'
+            });
+        }
+
         economyController._progressQuest(redis, req.userId, 'add_friend', 1).catch(() => {});
         res.json({ success: true, message: 'Friend request accepted' });
     } catch (error) { next(error); }
@@ -188,6 +258,11 @@ exports.removeFriend = async (req, res, next) => {
                 currentUser.save(session ? { session } : undefined),
                 friendUser.save(session ? { session } : undefined)
             ]);
+            await removeFriendConnection({
+                leftUserId: currentUser._id,
+                rightUserId: friendUser._id,
+                session
+            });
             return { currentUser, friendUser };
         });
         const io = req.app.get('io');
@@ -339,6 +414,11 @@ exports.blockUser = async (req, res, next) => {
                 if (blockedUser) {
                     blockedUser.friends = blockedUser.friends.filter(id => id.toString() !== req.userId);
                     await blockedUser.save(session ? { session } : undefined);
+                    await removeFriendConnection({
+                        leftUserId: currentUser._id,
+                        rightUserId: blockedUser._id,
+                        session
+                    });
                 }
             }
             currentUser.friendRequests = currentUser.friendRequests.filter(r => r.from.toString() !== userId);

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'package:image_picker/image_picker.dart';
 
+import '../../models/room_model.dart';
 import '../../services/room_service.dart';
 import '../../services/upload_service.dart';
 import '../../utils/constants.dart';
@@ -20,6 +21,10 @@ class _CreateRoomScreenState extends State<CreateRoomScreen> {
   final _nameController = TextEditingController();
   final _descriptionController = TextEditingController();
   final _announcementController = TextEditingController();
+  final _topicController = TextEditingController();
+  final _languageController = TextEditingController();
+  final _regionController = TextEditingController();
+  final _roomRulesController = TextEditingController();
   final _passwordController = TextEditingController();
 
   String _selectedType = 'voice';
@@ -30,8 +35,11 @@ class _CreateRoomScreenState extends State<CreateRoomScreen> {
   bool _hdVoice = true;
   bool _requireApproval = false;
   bool _isLoading = false;
+  bool _isBootstrapping = true;
+  bool _isInitialSetup = false;
   String? _submitError;
   String? _coverImageUrl;
+  RoomModel? _managedRoom;
 
   static const List<_RoomOption> _roomTypes = [
     _RoomOption('voice', 'Stage', 'Live voice room', Icons.mic_rounded,
@@ -69,19 +77,106 @@ class _CreateRoomScreenState extends State<CreateRoomScreen> {
       _roomTypes.firstWhere((item) => item.value == _selectedType);
   _RoomOption get _selectedCategoryOption =>
       _categories.firstWhere((item) => item.value == _selectedCategory);
+  String get _screenTitle =>
+      _isInitialSetup ? 'Create Your Room' : 'Manage Room';
+  String get _primaryActionLabel =>
+      _isInitialSetup ? 'Save My Room' : 'Update My Room';
+  String get _bottomHint => _isInitialSetup
+      ? 'Your permanent room keeps the same ID forever. Set it up once, then keep customizing it anytime.'
+      : 'You are editing the same permanent room your profile and invites always point to.';
+
+  @override
+  void initState() {
+    super.initState();
+    _bootstrapMyRoom();
+  }
 
   @override
   void dispose() {
     _nameController.dispose();
     _descriptionController.dispose();
     _announcementController.dispose();
+    _topicController.dispose();
+    _languageController.dispose();
+    _regionController.dispose();
+    _roomRulesController.dispose();
     _passwordController.dispose();
     super.dispose();
   }
 
-  Future<void> _handleCreate() async {
+  Future<void> _bootstrapMyRoom() async {
+    setState(() {
+      _isBootstrapping = true;
+      _submitError = null;
+    });
+
+    try {
+      final existingRoom = await RoomService.getMyRoom();
+      final resolution = existingRoom == null
+          ? await RoomService.ensureMyRoom()
+          : MyRoomResolution(
+              room: existingRoom,
+              created: false,
+              migrated: false,
+              archivedLegacyRoomCount: 0,
+            );
+
+      if (!mounted || resolution == null) return;
+
+      _applyRoomToForm(
+        resolution.room,
+        isInitialSetup: resolution.created || existingRoom == null,
+      );
+
+      if ((resolution.migrated || resolution.archivedLegacyRoomCount > 0) &&
+          mounted) {
+        final archivedCount = resolution.archivedLegacyRoomCount;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              archivedCount > 0
+                  ? 'Your main room was linked as your permanent room. $archivedCount older room${archivedCount == 1 ? '' : 's'} were archived.'
+                  : 'Your main room is now linked as your permanent room.',
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _submitError = e.toString().replaceFirst('Exception: ', '');
+      });
+    } finally {
+      if (mounted) {
+        setState(() => _isBootstrapping = false);
+      }
+    }
+  }
+
+  void _applyRoomToForm(RoomModel room, {required bool isInitialSetup}) {
+    _managedRoom = room;
+    _isInitialSetup = isInitialSetup;
+    _nameController.text = room.name;
+    _descriptionController.text = room.description;
+    _announcementController.text = room.announcement;
+    _topicController.text = room.topic;
+    _languageController.text = room.language;
+    _regionController.text = room.region;
+    _roomRulesController.text = room.roomRules;
+    _selectedType = room.type;
+    _selectedCategory = room.category;
+    _maxParticipants = room.maxParticipants;
+    _entryFee = room.entryFee;
+    _isPrivate = room.isPrivate;
+    _hdVoice = room.hdVoice;
+    _requireApproval = room.requireApproval;
+    _coverImageUrl = room.coverImage;
+  }
+
+  Future<void> _handleSave() async {
     FocusScope.of(context).unfocus();
     if (!_formKey.currentState!.validate()) return;
+    if (_managedRoom == null) return;
 
     setState(() {
       _isLoading = true;
@@ -91,46 +186,63 @@ class _CreateRoomScreenState extends State<CreateRoomScreen> {
     try {
       final password = _passwordController.text.trim();
       final announcement = _announcementController.text.trim();
-      final room = await RoomService.createRoom(
-        name: _nameController.text.trim(),
-        description: _descriptionController.text.trim(),
-        announcement: announcement.isEmpty ? null : announcement,
-        type: _selectedType,
-        category: _selectedCategory,
-        settings: {
-          'isPrivate': _isPrivate,
-          if (_isPrivate && password.isNotEmpty) 'password': password,
-          'maxParticipants': _maxParticipants,
-          'entryFee': _entryFee,
-          'hdVoice': _hdVoice,
-          'requireApproval': _requireApproval,
-          'allowVideo': _selectedType == 'video',
-          'allowScreenShare': _selectedType == 'video',
-        },
-        theme: {
-          'background': _selectedType == 'video'
-              ? 'cinema'
-              : _selectedType == 'music'
-                  ? 'pulse'
-                  : _selectedType == 'game'
-                      ? 'arcade'
-                      : 'midnight',
-          if (_coverImageUrl != null && _coverImageUrl!.isNotEmpty)
-            'coverImage': _coverImageUrl,
+      final room = await RoomService.updateRoom(
+        _managedRoom!.id,
+        {
+          'name': _nameController.text.trim(),
+          'description': _descriptionController.text.trim(),
+          'announcement': announcement.isEmpty ? null : announcement,
+          'topic': _topicController.text.trim(),
+          'language': _languageController.text.trim().isEmpty
+              ? 'en'
+              : _languageController.text.trim(),
+          'region': _regionController.text.trim().isEmpty
+              ? 'Global'
+              : _regionController.text.trim(),
+          'roomRules': _roomRulesController.text.trim(),
+          'type': _selectedType,
+          'category': _selectedCategory,
+          'settings': {
+            'isPrivate': _isPrivate,
+            if (_isPrivate && password.isNotEmpty) 'password': password,
+            'maxParticipants': _maxParticipants,
+            'entryFee': _entryFee,
+            'hdVoice': _hdVoice,
+            'requireApproval': _requireApproval,
+            'allowVideo': _selectedType == 'video',
+            'allowScreenShare': _selectedType == 'video',
+          },
+          'theme': {
+            'background': _selectedType == 'video'
+                ? 'cinema'
+                : _selectedType == 'music'
+                    ? 'pulse'
+                    : _selectedType == 'game'
+                        ? 'arcade'
+                        : 'midnight',
+            if (_coverImageUrl != null && _coverImageUrl!.isNotEmpty)
+              'coverImage': _coverImageUrl,
+          },
         },
       );
 
       if (!mounted || room == null) return;
+      _managedRoom = room;
 
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Room created and synced live.'),
+        SnackBar(
+          content: Text(
+            _isInitialSetup
+                ? 'Your permanent room is ready.'
+                : 'Your room changes are live now.',
+          ),
           backgroundColor: AppColors.successGreen,
         ),
       );
 
       Navigator.of(context).pushReplacement(
         MaterialPageRoute(builder: (_) => RoomDetailScreen(room: room)),
+        result: true,
       );
     } catch (e) {
       if (!mounted) return;
@@ -207,14 +319,11 @@ class _CreateRoomScreenState extends State<CreateRoomScreen> {
         foregroundColor: Colors.white,
         leading: IconButton(
           onPressed: () => Navigator.maybePop(context),
-          icon: const Icon(
-            Icons.arrow_back_ios_new_rounded,
-            color: Colors.black,
-          ),
+          icon: const Icon(Icons.arrow_back_ios_new_rounded),
         ),
-        title: const Text(
-          'Create Room',
-          style: TextStyle(fontWeight: FontWeight.w700),
+        title: Text(
+          _screenTitle,
+          style: const TextStyle(fontWeight: FontWeight.w700),
         ),
       ),
       bottomNavigationBar: _buildBottomBar(),
@@ -228,277 +337,352 @@ class _CreateRoomScreenState extends State<CreateRoomScreen> {
         ),
         child: SafeArea(
           top: false,
-          child: Form(
-            key: _formKey,
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.fromLTRB(16, 8, 16, 140),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  _buildHeroCard(selectedType),
-                  const SizedBox(height: 18),
-                  if (_submitError != null) ...[
-                    _buildErrorCard(),
-                    const SizedBox(height: 18),
-                  ],
-                  _buildSectionCard(
-                    title: 'Room details',
-                    subtitle: 'Set the basics people will see before joining.',
+          child: _isBootstrapping
+              ? const Center(child: CircularProgressIndicator())
+              : Form(
+                  key: _formKey,
+                  child: SingleChildScrollView(
+                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 140),
                     child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        _buildLabel('Room name'),
-                        const SizedBox(height: 10),
-                        _buildTextField(
-                          controller: _nameController,
-                          hintText: 'Late Night Hangout',
-                          validator: (value) {
-                            final name = value?.trim() ?? '';
-                            if (name.isEmpty) return 'Room name is required';
-                            if (name.length < 3) {
-                              return 'Name must be at least 3 characters';
-                            }
-                            return null;
-                          },
-                        ),
+                        _buildHeroCard(selectedType),
                         const SizedBox(height: 18),
-                        _buildLabel('Description'),
-                        const SizedBox(height: 10),
-                        _buildTextField(
-                          controller: _descriptionController,
-                          hintText: 'What is happening in this room tonight?',
-                          maxLines: 4,
-                          validator: (value) {
-                            if ((value?.trim().length ?? 0) > 200) {
-                              return 'Description must be under 200 characters';
-                            }
-                            return null;
-                          },
-                        ),
-                        const SizedBox(height: 18),
-                        _buildLabel('Announcement'),
-                        const SizedBox(height: 10),
-                        _buildTextField(
-                          controller: _announcementController,
-                          hintText: 'Pin a short note for everyone joining live',
-                          maxLines: 3,
-                          validator: (value) {
-                            if ((value?.trim().length ?? 0) > 500) {
-                              return 'Announcement must be under 500 characters';
-                            }
-                            return null;
-                          },
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  _buildSectionCard(
-                    title: 'Room photo',
-                    subtitle:
-                        'Upload a local image for room info and previews.',
-                    child: GestureDetector(
-                      onTap: _pickRoomCover,
-                      child: Container(
-                        height: 170,
-                        width: double.infinity,
-                        decoration: BoxDecoration(
-                          borderRadius: BorderRadius.circular(22),
-                          gradient:
-                              _coverImageUrl == null || _coverImageUrl!.isEmpty
-                                  ? const LinearGradient(
-                                      colors: [
-                                        Color(0xFF1F2937),
-                                        Color(0xFF4F46E5),
-                                        Color(0xFF0EA5E9),
-                                      ],
-                                      begin: Alignment.topLeft,
-                                      end: Alignment.bottomRight,
-                                    )
-                                  : null,
-                          image: _coverImageUrl != null &&
-                                  _coverImageUrl!.isNotEmpty
-                              ? DecorationImage(
-                                  image: NetworkImage(_coverImageUrl!),
-                                  fit: BoxFit.cover,
-                                )
-                              : null,
-                        ),
-                        child: Container(
-                          padding: const EdgeInsets.all(18),
-                          decoration: BoxDecoration(
-                            borderRadius: BorderRadius.circular(22),
-                            color: Colors.black.withValues(alpha: 0.18),
-                          ),
+                        if (_submitError != null) ...[
+                          _buildErrorCard(),
+                          const SizedBox(height: 18),
+                        ],
+                        _buildSectionCard(
+                          title: 'Room details',
+                          subtitle:
+                              'This is your permanent room identity. Update it anytime without changing the room ID.',
                           child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              FilledButton.tonalIcon(
-                                onPressed: _pickRoomCover,
-                                icon: const Icon(Icons.photo_library_outlined),
-                                label: Text(_coverImageUrl == null
-                                    ? 'Choose photo'
-                                    : 'Change photo'),
+                              _buildLabel('Room name'),
+                              const SizedBox(height: 10),
+                              _buildTextField(
+                                controller: _nameController,
+                                hintText: 'Late Night Hangout',
+                                validator: (value) {
+                                  final name = value?.trim() ?? '';
+                                  if (name.isEmpty) {
+                                    return 'Room name is required';
+                                  }
+                                  if (name.length < 3) {
+                                    return 'Name must be at least 3 characters';
+                                  }
+                                  return null;
+                                },
                               ),
-                              const Spacer(),
-                              Text(
-                                _coverImageUrl == null
-                                    ? 'Tap to add a room cover from your device'
-                                    : 'Room cover ready for live preview',
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 15,
-                                  fontWeight: FontWeight.w700,
+                              const SizedBox(height: 18),
+                              _buildLabel('Topic'),
+                              const SizedBox(height: 10),
+                              _buildTextField(
+                                controller: _topicController,
+                                hintText:
+                                    'Tonight we are swapping stories and songs',
+                                validator: (value) {
+                                  if ((value?.trim().length ?? 0) > 120) {
+                                    return 'Topic must be under 120 characters';
+                                  }
+                                  return null;
+                                },
+                              ),
+                              const SizedBox(height: 18),
+                              _buildLabel('Description'),
+                              const SizedBox(height: 10),
+                              _buildTextField(
+                                controller: _descriptionController,
+                                hintText:
+                                    'What is happening in this room tonight?',
+                                maxLines: 4,
+                                validator: (value) {
+                                  if ((value?.trim().length ?? 0) > 200) {
+                                    return 'Description must be under 200 characters';
+                                  }
+                                  return null;
+                                },
+                              ),
+                              const SizedBox(height: 18),
+                              _buildLabel('Announcement'),
+                              const SizedBox(height: 10),
+                              _buildTextField(
+                                controller: _announcementController,
+                                hintText:
+                                    'Pin a short note for everyone joining live',
+                                maxLines: 3,
+                                validator: (value) {
+                                  if ((value?.trim().length ?? 0) > 500) {
+                                    return 'Announcement must be under 500 characters';
+                                  }
+                                  return null;
+                                },
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        _buildSectionCard(
+                          title: 'Profile fit',
+                          subtitle:
+                              'Make your personal room feel anchored to your audience and region.',
+                          child: Column(
+                            children: [
+                              _buildLabel('Language'),
+                              const SizedBox(height: 10),
+                              _buildTextField(
+                                controller: _languageController,
+                                hintText: 'en',
+                                validator: (value) {
+                                  if ((value?.trim().length ?? 0) > 16) {
+                                    return 'Language must be under 16 characters';
+                                  }
+                                  return null;
+                                },
+                              ),
+                              const SizedBox(height: 18),
+                              _buildLabel('Region'),
+                              const SizedBox(height: 10),
+                              _buildTextField(
+                                controller: _regionController,
+                                hintText: 'Global',
+                                validator: (value) {
+                                  if ((value?.trim().length ?? 0) > 60) {
+                                    return 'Region must be under 60 characters';
+                                  }
+                                  return null;
+                                },
+                              ),
+                              const SizedBox(height: 18),
+                              _buildLabel('Room rules'),
+                              const SizedBox(height: 10),
+                              _buildTextField(
+                                controller: _roomRulesController,
+                                hintText:
+                                    'Be kind, take turns on mic, and keep the vibe welcoming.',
+                                maxLines: 4,
+                                validator: (value) {
+                                  if ((value?.trim().length ?? 0) > 500) {
+                                    return 'Room rules must be under 500 characters';
+                                  }
+                                  return null;
+                                },
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        _buildSectionCard(
+                          title: 'Room photo',
+                          subtitle:
+                              'Upload a local image for room info and previews.',
+                          child: GestureDetector(
+                            onTap: _pickRoomCover,
+                            child: Container(
+                              height: 170,
+                              width: double.infinity,
+                              decoration: BoxDecoration(
+                                borderRadius: BorderRadius.circular(22),
+                                gradient: _coverImageUrl == null ||
+                                        _coverImageUrl!.isEmpty
+                                    ? const LinearGradient(
+                                        colors: [
+                                          Color(0xFF1F2937),
+                                          Color(0xFF4F46E5),
+                                          Color(0xFF0EA5E9),
+                                        ],
+                                        begin: Alignment.topLeft,
+                                        end: Alignment.bottomRight,
+                                      )
+                                    : null,
+                                image: _coverImageUrl != null &&
+                                        _coverImageUrl!.isNotEmpty
+                                    ? DecorationImage(
+                                        image: NetworkImage(_coverImageUrl!),
+                                        fit: BoxFit.cover,
+                                      )
+                                    : null,
+                              ),
+                              child: Container(
+                                padding: const EdgeInsets.all(18),
+                                decoration: BoxDecoration(
+                                  borderRadius: BorderRadius.circular(22),
+                                  color: Colors.black.withValues(alpha: 0.18),
+                                ),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    FilledButton.tonalIcon(
+                                      onPressed: _pickRoomCover,
+                                      icon: const Icon(
+                                          Icons.photo_library_outlined),
+                                      label: Text(_coverImageUrl == null
+                                          ? 'Choose photo'
+                                          : 'Change photo'),
+                                    ),
+                                    const Spacer(),
+                                    Text(
+                                      _coverImageUrl == null
+                                          ? 'Tap to add a room cover from your device'
+                                          : 'Room cover ready for live preview',
+                                      style: const TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 15,
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        _buildSectionCard(
+                          title: 'Room style',
+                          subtitle:
+                              'Simple names, cleaner branding, same live features.',
+                          child: _buildOptionGrid(
+                            options: _roomTypes,
+                            selectedValue: _selectedType,
+                            onSelected: _selectType,
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        _buildSectionCard(
+                          title: 'Discovery',
+                          subtitle:
+                              'Pick where this room should show up in the live lobby.',
+                          child: _buildOptionGrid(
+                            options: _categories,
+                            selectedValue: _selectedCategory,
+                            onSelected: (value) {
+                              setState(() => _selectedCategory = value);
+                            },
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        _buildSectionCard(
+                          title: 'Capacity and entry',
+                          subtitle:
+                              'Tune size and coin entry before the room goes live.',
+                          child: Column(
+                            children: [
+                              _buildSliderRow(
+                                label: 'Max participants',
+                                valueText: '$_maxParticipants',
+                                helper:
+                                    'Good for ${_maxParticipants <= 12 ? 'small circles' : _maxParticipants <= 40 ? 'active hangouts' : 'big public rooms'}',
+                                icon: Icon(
+                                  Icons.groups_rounded,
+                                  color: selectedType.color,
+                                  size: 18,
+                                ),
+                                slider: Slider(
+                                  value: _maxParticipants.toDouble(),
+                                  min: 2,
+                                  max: 100,
+                                  divisions: 98,
+                                  activeColor: selectedType.color,
+                                  label: '$_maxParticipants',
+                                  onChanged: (value) {
+                                    setState(
+                                        () => _maxParticipants = value.round());
+                                  },
+                                ),
+                              ),
+                              const SizedBox(height: 12),
+                              _buildSliderRow(
+                                label: 'Entry fee',
+                                valueText: '$_entryFee',
+                                helper: _entryFee == 0
+                                    ? 'Open room for everyone'
+                                    : 'Coins required to join',
+                                icon: const CurrencyIcon.coins(size: 18),
+                                slider: Slider(
+                                  value: _entryFee.toDouble(),
+                                  min: 0,
+                                  max: 1000,
+                                  divisions: 100,
+                                  activeColor: Colors.amber,
+                                  label: '$_entryFee',
+                                  onChanged: (value) {
+                                    setState(() => _entryFee = value.round());
+                                  },
                                 ),
                               ),
                             ],
                           ),
                         ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  _buildSectionCard(
-                    title: 'Room style',
-                    subtitle:
-                        'Simple names, cleaner branding, same live features.',
-                    child: _buildOptionGrid(
-                      options: _roomTypes,
-                      selectedValue: _selectedType,
-                      onSelected: _selectType,
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  _buildSectionCard(
-                    title: 'Discovery',
-                    subtitle:
-                        'Pick where this room should show up in the live lobby.',
-                    child: _buildOptionGrid(
-                      options: _categories,
-                      selectedValue: _selectedCategory,
-                      onSelected: (value) {
-                        setState(() => _selectedCategory = value);
-                      },
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  _buildSectionCard(
-                    title: 'Capacity and entry',
-                    subtitle:
-                        'Tune size and coin entry before the room goes live.',
-                    child: Column(
-                      children: [
-                        _buildSliderRow(
-                          label: 'Max participants',
-                          valueText: '$_maxParticipants',
-                          helper:
-                              'Good for ${_maxParticipants <= 12 ? 'small circles' : _maxParticipants <= 40 ? 'active hangouts' : 'big public rooms'}',
-                          icon: Icon(
-                            Icons.groups_rounded,
-                            color: selectedType.color,
-                            size: 18,
-                          ),
-                          slider: Slider(
-                            value: _maxParticipants.toDouble(),
-                            min: 2,
-                            max: 100,
-                            divisions: 98,
-                            activeColor: selectedType.color,
-                            label: '$_maxParticipants',
-                            onChanged: (value) {
-                              setState(() => _maxParticipants = value.round());
-                            },
-                          ),
-                        ),
-                        const SizedBox(height: 12),
-                        _buildSliderRow(
-                          label: 'Entry fee',
-                          valueText: '$_entryFee',
-                          helper: _entryFee == 0
-                              ? 'Open room for everyone'
-                              : 'Coins required to join',
-                          icon: const CurrencyIcon.coins(size: 18),
-                          slider: Slider(
-                            value: _entryFee.toDouble(),
-                            min: 0,
-                            max: 1000,
-                            divisions: 100,
-                            activeColor: Colors.amber,
-                            label: '$_entryFee',
-                            onChanged: (value) {
-                              setState(() => _entryFee = value.round());
-                            },
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  _buildSectionCard(
-                    title: 'Privacy and access',
-                    subtitle:
-                        'Choose how people enter and whether hosts approve the room.',
-                    child: Column(
-                      children: [
-                        _buildToggleTile(
-                          title: 'Private room',
-                          subtitle: 'Require a password before anyone joins',
-                          value: _isPrivate,
-                          activeColor: selectedType.color,
-                          icon: Icons.lock_rounded,
-                          onChanged: (value) {
-                            setState(() {
-                              _isPrivate = value;
-                              if (!value) {
-                                _passwordController.clear();
-                              }
-                            });
-                          },
-                        ),
-                        if (_isPrivate) ...[
-                          const SizedBox(height: 14),
-                          _buildTextField(
-                            controller: _passwordController,
-                            hintText: 'Create a room password',
-                            obscureText: true,
-                            validator: (value) {
-                              if (_isPrivate &&
-                                  (value?.trim().isEmpty ?? true)) {
-                                return 'Password is required for private rooms';
-                              }
-                              return null;
-                            },
-                          ),
-                        ],
-                        const SizedBox(height: 10),
-                        _buildToggleTile(
-                          title: 'Speaker approval',
-                          subtitle: 'Approve people before they take the mic',
-                          value: _requireApproval,
-                          activeColor: selectedType.color,
-                          icon: Icons.verified_user_rounded,
-                          onChanged: (value) {
-                            setState(() => _requireApproval = value);
-                          },
-                        ),
-                        const SizedBox(height: 10),
-                        _buildToggleTile(
-                          title: 'Clear audio',
+                        const SizedBox(height: 16),
+                        _buildSectionCard(
+                          title: 'Privacy and access',
                           subtitle:
-                              'Prefer higher voice quality for live rooms',
-                          value: _hdVoice,
-                          activeColor: selectedType.color,
-                          icon: Icons.graphic_eq_rounded,
-                          onChanged: (value) {
-                            setState(() => _hdVoice = value);
-                          },
+                              'Choose how people enter and whether hosts approve the room.',
+                          child: Column(
+                            children: [
+                              _buildToggleTile(
+                                title: 'Private room',
+                                subtitle:
+                                    'Require a password before anyone joins',
+                                value: _isPrivate,
+                                activeColor: selectedType.color,
+                                icon: Icons.lock_rounded,
+                                onChanged: (value) {
+                                  setState(() {
+                                    _isPrivate = value;
+                                    if (!value) {
+                                      _passwordController.clear();
+                                    }
+                                  });
+                                },
+                              ),
+                              if (_isPrivate) ...[
+                                const SizedBox(height: 14),
+                                _buildTextField(
+                                  controller: _passwordController,
+                                  hintText: 'Create a room password',
+                                  obscureText: true,
+                                  validator: (value) {
+                                    if (_isPrivate &&
+                                        (value?.trim().isEmpty ?? true)) {
+                                      return 'Password is required for private rooms';
+                                    }
+                                    return null;
+                                  },
+                                ),
+                              ],
+                              const SizedBox(height: 10),
+                              _buildToggleTile(
+                                title: 'Speaker approval',
+                                subtitle:
+                                    'Approve people before they take the mic',
+                                value: _requireApproval,
+                                activeColor: selectedType.color,
+                                icon: Icons.verified_user_rounded,
+                                onChanged: (value) {
+                                  setState(() => _requireApproval = value);
+                                },
+                              ),
+                              const SizedBox(height: 10),
+                              _buildToggleTile(
+                                title: 'Clear audio',
+                                subtitle:
+                                    'Prefer higher voice quality for live rooms',
+                                value: _hdVoice,
+                                activeColor: selectedType.color,
+                                icon: Icons.graphic_eq_rounded,
+                                onChanged: (value) {
+                                  setState(() => _hdVoice = value);
+                                },
+                              ),
+                            ],
+                          ),
                         ),
                       ],
                     ),
                   ),
-                ],
-              ),
-            ),
-          ),
+                ),
         ),
       ),
     );
@@ -980,15 +1164,15 @@ class _CreateRoomScreenState extends State<CreateRoomScreen> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text(
-              'Rooms appear live in the lobby right after creation.',
-              style: TextStyle(color: Colors.white54, fontSize: 12),
+            Text(
+              _bottomHint,
+              style: const TextStyle(color: Colors.white54, fontSize: 12),
             ),
             const SizedBox(height: 12),
             SizedBox(
               width: double.infinity,
               child: ElevatedButton(
-                onPressed: _isLoading ? null : _handleCreate,
+                onPressed: _isLoading || _isBootstrapping ? null : _handleSave,
                 style: ElevatedButton.styleFrom(
                   backgroundColor: _selectedTypeOption.color,
                   foregroundColor: Colors.white,
@@ -1007,9 +1191,9 @@ class _CreateRoomScreenState extends State<CreateRoomScreen> {
                               AlwaysStoppedAnimation<Color>(Colors.white),
                         ),
                       )
-                    : const Text(
-                        'Create Room',
-                        style: TextStyle(
+                    : Text(
+                        _primaryActionLabel,
+                        style: const TextStyle(
                           fontSize: 15,
                           fontWeight: FontWeight.w700,
                         ),

@@ -629,3 +629,349 @@ test('room feed starts at the participant latest join and emits one welcome syst
     );
     assert.equal(duplicateWelcomeEvents.length, 1);
 });
+
+test('permanent room allocation creates exactly one owned room and reuses it on repeat requests', async () => {
+    const owner = await createUser({ username: makeUsername() });
+
+    const firstResponse = await apiRequest({
+        method: 'POST',
+        path: '/api/rooms/my-room',
+        user: owner,
+        body: {
+            name: 'Owner Hub',
+            topic: 'Always on',
+            type: 'voice',
+            category: 'voice'
+        }
+    });
+
+    assert.equal(firstResponse.status, 201);
+    assert.equal(firstResponse.body.created, true);
+    assert.equal(firstResponse.body.room.isPermanent, true);
+    assert.equal(firstResponse.body.room.ownerId, owner._id.toString());
+
+    const secondResponse = await apiRequest({
+        method: 'POST',
+        path: '/api/rooms/my-room',
+        user: owner,
+        body: {}
+    });
+
+    assert.equal(secondResponse.status, 200);
+    assert.equal(secondResponse.body.created, false);
+    assert.equal(secondResponse.body.room._id, firstResponse.body.room._id);
+
+    const permanentRooms = await Room.find({
+        ownerId: owner._id,
+        isPermanent: true
+    });
+    assert.equal(permanentRooms.length, 1);
+
+    const persistedUser = await User.findById(owner._id).lean();
+    assert.equal(
+        persistedUser.permanentRoomId.toString(),
+        firstResponse.body.room._id
+    );
+    assert.equal(persistedUser.hasPermanentRoom, true);
+});
+
+test('my-room allocate flow creates one permanent room named New Room for first-time users', async () => {
+    const owner = await createUser({ username: makeUsername() });
+
+    const firstResponse = await apiRequest({
+        method: 'GET',
+        path: '/api/rooms/my-room?allocate=true',
+        user: owner
+    });
+
+    assert.equal(firstResponse.status, 200);
+    assert.equal(firstResponse.body.created, true);
+    assert.equal(firstResponse.body.room.name, 'New Room');
+    assert.equal(firstResponse.body.room.isPermanent, true);
+    assert.equal(firstResponse.body.room.ownerId, owner._id.toString());
+    assert.equal(firstResponse.body.room.hostId._id, owner._id.toString());
+    assert.equal(firstResponse.body.room.hostPresent, true);
+    assert.equal(firstResponse.body.room.roomActive, true);
+    assert.equal(firstResponse.body.room.activeControllersCount, 1);
+    assert.equal(firstResponse.body.room.capabilities.isOwner, true);
+    assert.equal(firstResponse.body.room.capabilities.isAdmin, true);
+    assert.equal(firstResponse.body.room.capabilities.canManageRoom, true);
+    assert.equal(firstResponse.body.room.capabilities.canManageStage, true);
+    assert.equal(firstResponse.body.room.capabilities.canSendRoomMessages, true);
+
+    const secondResponse = await apiRequest({
+        method: 'GET',
+        path: '/api/rooms/my-room?allocate=true',
+        user: owner
+    });
+
+    assert.equal(secondResponse.status, 200);
+    assert.equal(secondResponse.body.room._id, firstResponse.body.room._id);
+
+    const permanentRooms = await Room.find({
+        ownerId: owner._id,
+        isPermanent: true
+    });
+    assert.equal(permanentRooms.length, 1);
+});
+
+test('legacy host rooms migrate into one permanent room and archive extra owned rooms', async () => {
+    const owner = await createUser({ username: makeUsername() });
+    const primaryRoom = await Room.create({
+        name: 'Primary Legacy Room',
+        description: 'Keep me',
+        hostId: owner._id,
+        type: 'voice',
+        category: 'voice',
+        updatedAt: new Date('2026-03-29T10:00:00.000Z'),
+        participants: [
+            {
+                userId: owner._id,
+                role: 'host',
+                seatIndex: 1,
+                joinedAt: new Date(),
+                lastActive: new Date()
+            }
+        ]
+    });
+    const secondaryRoom = await Room.create({
+        name: 'Secondary Legacy Room',
+        description: 'Archive me',
+        hostId: owner._id,
+        type: 'music',
+        category: 'music',
+        updatedAt: new Date('2026-03-29T09:00:00.000Z'),
+        participants: [
+            {
+                userId: owner._id,
+                role: 'host',
+                seatIndex: -1,
+                joinedAt: new Date(),
+                lastActive: new Date()
+            }
+        ]
+    });
+    await Room.findByIdAndUpdate(primaryRoom._id, {
+        $set: { updatedAt: new Date('2026-03-29T11:00:00.000Z') }
+    });
+    await Room.findByIdAndUpdate(secondaryRoom._id, {
+        $set: { updatedAt: new Date('2026-03-29T09:00:00.000Z') }
+    });
+
+    const response = await apiRequest({
+        method: 'GET',
+        path: '/api/rooms/my-room',
+        user: owner
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(response.body.migrated, true);
+    assert.equal(response.body.room._id, primaryRoom._id.toString());
+    assert.equal(response.body.room.isPermanent, true);
+    assert.equal(response.body.archivedLegacyRoomCount, 1);
+
+    const migratedPrimary = await Room.findById(primaryRoom._id).lean();
+    const archivedSecondary = await Room.findById(secondaryRoom._id).lean();
+    const persistedUser = await User.findById(owner._id).lean();
+
+    assert.equal(migratedPrimary.isPermanent, true);
+    assert.equal(migratedPrimary.ownerId.toString(), owner._id.toString());
+    assert.equal(migratedPrimary.endedAt, null);
+    assert.equal(archivedSecondary.isPermanent, false);
+    assert.ok(archivedSecondary.endedAt);
+    assert.equal(archivedSecondary.showInExplore, false);
+    assert.equal(
+        persistedUser.permanentRoomId.toString(),
+        primaryRoom._id.toString()
+    );
+});
+
+test('owners cannot delete their permanent room', async () => {
+    const owner = await createUser({ username: makeUsername() });
+
+    const allocation = await apiRequest({
+        method: 'POST',
+        path: '/api/rooms/my-room',
+        user: owner,
+        body: {
+            name: 'Keep Forever',
+            type: 'voice'
+        }
+    });
+
+    assert.equal(allocation.status, 201);
+
+    const deleteResponse = await apiRequest({
+        method: 'DELETE',
+        path: `/api/rooms/${allocation.body.room._id}`,
+        user: owner
+    });
+
+    assert.equal(deleteResponse.status, 403);
+    const persistedRoom = await Room.findById(allocation.body.room._id).lean();
+    assert.ok(persistedRoom);
+    assert.equal(persistedRoom.isPermanent, true);
+    assert.equal(persistedRoom.endedAt, null);
+});
+
+test('room stays active with an admin present and becomes inactive with seats cleared after the last controller leaves', async () => {
+    const { room, host, admin, listener } = await createRoomFixture();
+    await Room.findByIdAndUpdate(room._id, {
+        $set: {
+            'participants.2.role': 'speaker',
+            'participants.2.seatIndex': 2,
+            'participants.2.isSpeaking': true
+        }
+    });
+
+    const hostLeave = await apiRequest({
+        method: 'POST',
+        path: `/api/rooms/${room._id}/leave`,
+        user: host,
+        body: {}
+    });
+    assert.equal(hostLeave.status, 200);
+
+    let persistedRoom = await Room.findById(room._id).lean();
+    assert.equal(persistedRoom.roomActive, true);
+    assert.equal(persistedRoom.activeControllersCount, 1);
+    const speakerAfterHostLeave = persistedRoom.participants.find(
+        (participant) => participant.userId.toString() === listener._id.toString()
+    );
+    assert.equal(speakerAfterHostLeave.seatIndex, 2);
+
+    const adminLeave = await apiRequest({
+        method: 'POST',
+        path: `/api/rooms/${room._id}/leave`,
+        user: admin,
+        body: {}
+    });
+    assert.equal(adminLeave.status, 200);
+
+    persistedRoom = await Room.findById(room._id).lean();
+    assert.equal(persistedRoom.roomActive, false);
+    assert.equal(persistedRoom.activeControllersCount, 0);
+    const audienceListener = persistedRoom.participants.find(
+        (participant) => participant.userId.toString() === listener._id.toString()
+    );
+    assert.equal(audienceListener.seatIndex, -1);
+    assert.equal(audienceListener.role, 'listener');
+    assert.equal(audienceListener.isSpeaking, false);
+
+    const deniedSeatJoin = await apiRequest({
+        method: 'POST',
+        path: `/api/rooms/${room._id}/seat`,
+        user: listener,
+        body: { seatIndex: 2 }
+    });
+    assert.equal(deniedSeatJoin.status, 403);
+});
+
+test('discover excludes inactive rooms while followed rooms keep active rooms first and offline rooms below', async () => {
+    const follower = await createUser({ username: makeUsername() });
+    const host = await createUser({ username: makeUsername() });
+    const admin = await createUser({ username: makeUsername() });
+
+    const activeRoom = await Room.create({
+        name: 'Active Followed Room',
+        description: 'Live now',
+        hostId: host._id,
+        type: 'voice',
+        category: 'voice',
+        followers: [follower._id],
+        participants: [
+            { userId: host._id, role: 'host', seatIndex: 1, joinedAt: new Date(), lastActive: new Date(), isPresent: true },
+            { userId: follower._id, role: 'listener', seatIndex: -1, joinedAt: new Date(), lastActive: new Date(), isPresent: true }
+        ]
+    });
+    const inactiveRoom = await Room.create({
+        name: 'Inactive Followed Room',
+        description: 'Waiting for controller',
+        hostId: admin._id,
+        type: 'voice',
+        category: 'voice',
+        followers: [follower._id],
+        participants: [
+            { userId: admin._id, role: 'host', seatIndex: -1, joinedAt: new Date(), lastActive: new Date(0), isPresent: false },
+            { userId: follower._id, role: 'listener', seatIndex: -1, joinedAt: new Date(), lastActive: new Date(), isPresent: true }
+        ]
+    });
+
+    const trendingResponse = await apiRequest({
+        method: 'GET',
+        path: '/api/rooms/trending'
+    });
+    assert.equal(trendingResponse.status, 200);
+    const trendingIds = trendingResponse.body.map((entry) => entry._id);
+    assert.ok(trendingIds.includes(activeRoom._id.toString()));
+    assert.ok(!trendingIds.includes(inactiveRoom._id.toString()));
+
+    const followedResponse = await apiRequest({
+        method: 'GET',
+        path: '/api/rooms/followed',
+        user: follower
+    });
+    assert.equal(followedResponse.status, 200);
+    assert.equal(followedResponse.body.length, 2);
+    assert.equal(followedResponse.body[0]._id, activeRoom._id.toString());
+    assert.equal(followedResponse.body[0].roomActive, true);
+    assert.equal(followedResponse.body[1]._id, inactiveRoom._id.toString());
+    assert.equal(followedResponse.body[1].roomActive, false);
+});
+
+test('recent rooms keep the latest 10 unique visits in most-recent-first order', async () => {
+    const visitor = await createUser({ username: makeUsername() });
+    const host = await createUser({ username: makeUsername() });
+    const rooms = [];
+
+    for (let index = 0; index < 11; index += 1) {
+        const room = await Room.create({
+            name: `Recent Room ${index + 1}`,
+            description: 'Recent visit test',
+            hostId: host._id,
+            type: 'voice',
+            category: 'voice',
+            participants: [
+                {
+                    userId: host._id,
+                    role: 'host',
+                    seatIndex: 1,
+                    joinedAt: new Date(),
+                    lastActive: new Date(),
+                    isPresent: true
+                }
+            ]
+        });
+        rooms.push(room);
+
+        const joinResponse = await apiRequest({
+            method: 'POST',
+            path: `/api/rooms/${room._id}/join`,
+            user: visitor,
+            body: {}
+        });
+        assert.equal(joinResponse.status, 200);
+    }
+
+    const revisitResponse = await apiRequest({
+        method: 'POST',
+        path: `/api/rooms/${rooms[2]._id}/join`,
+        user: visitor,
+        body: {}
+    });
+    assert.equal(revisitResponse.status, 200);
+
+    const recentResponse = await apiRequest({
+        method: 'GET',
+        path: '/api/rooms/recent',
+        user: visitor
+    });
+    assert.equal(recentResponse.status, 200);
+    assert.equal(recentResponse.body.rooms.length, 10);
+    assert.equal(recentResponse.body.rooms[0]._id, rooms[2]._id.toString());
+    assert.ok(
+        !recentResponse.body.rooms.some(
+            (room) => room._id === rooms[0]._id.toString()
+        )
+    );
+});

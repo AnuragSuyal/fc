@@ -1,5 +1,6 @@
 const User = require('../models/User');
 const { applyAvatarUpdate, getAvatarUploadStats } = require('../utils/avatarUploadLimit');
+const { buildRealtimeIdentityPayload } = require('../services/levelProgressionService');
 
 const emitProfileUpdated = (req, user) => {
     const io = req.app.get('io');
@@ -9,21 +10,7 @@ const emitProfileUpdated = (req, user) => {
     const payload = {
         userId,
         timestamp: new Date().toISOString(),
-        user: {
-            id: user._id,
-            uid: user.uid,
-            username: user.username,
-            avatar: user.avatar,
-            coverPhoto: user.coverPhoto,
-            bio: user.bio,
-            region: user.region || 'Global',
-            level: user.level,
-            xp: user.xp,
-            coins: user.coins,
-            gems: user.gems,
-            vipLevel: user.vipLevel,
-            status: user.status
-        }
+        user: buildRealtimeIdentityPayload(user)
     };
 
     io.to(`user:${userId}`).emit('profile:updated', payload);
@@ -280,6 +267,12 @@ exports.deleteAccount = async (req, res, next) => {
         user.email = `del_${Date.now()}@deleted.com`;
         user.phone = undefined;
         user.isDeleted = true;
+        user.accountState = {
+            ...(user.accountState || {}),
+            status: 'deleted',
+            reason: 'user_requested_delete',
+            updatedAt: new Date()
+        };
 
         const suffix = Math.floor(Math.random() * 100000);
         const newUsername = `del_${user._id.toString().substring(0, 5)}_${suffix}`;
@@ -291,5 +284,3 @@ exports.deleteAccount = async (req, res, next) => {
         next(error);
     }
 };
-
-

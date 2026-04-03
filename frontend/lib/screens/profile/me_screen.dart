@@ -8,6 +8,7 @@ import '../../models/post_model.dart';
 import '../../models/room_model.dart';
 import '../../models/stats_model.dart';
 import '../../models/user_model.dart';
+import '../../models/vip_model.dart';
 import '../../providers/auth_provider.dart';
 import '../../services/api_service.dart';
 import '../../services/economy_service.dart';
@@ -20,6 +21,9 @@ import '../../services/wedding_service.dart';
 import '../../utils/constants.dart';
 import '../../widgets/currency_icon.dart';
 import '../../widgets/user_avatar.dart';
+import '../../widgets/vip/vip_badge.dart';
+import '../../widgets/vip/vip_name_text.dart';
+import '../rooms/my_room_entry_screen.dart';
 import '../rooms/room_detail_screen.dart';
 
 class MeScreen extends StatefulWidget {
@@ -517,6 +521,8 @@ class _MeScreenState extends State<MeScreen>
             level: level,
             xp: xp,
             vipLevel: vipLevel,
+            vipMembership:
+                authUser?.vipMembership ?? profileUser.vipMembership,
             xpProgress: xpProgress,
           ),
           if (_error != null) ...[
@@ -549,8 +555,8 @@ class _MeScreenState extends State<MeScreen>
           _buildQuickActions(pendingRequests),
           const SizedBox(height: 18),
           _buildSectionHeader(
-            title: 'My Rooms',
-            actionLabel: 'Create',
+            title: 'My Room',
+            actionLabel: 'Manage',
             onAction: () {
               Navigator.pushNamed(context, '/rooms/create');
             },
@@ -588,6 +594,7 @@ class _MeScreenState extends State<MeScreen>
     required int level,
     required int xp,
     required int vipLevel,
+    required VipMembershipSnapshot vipMembership,
     required double xpProgress,
   }) {
     return Container(
@@ -711,6 +718,8 @@ class _MeScreenState extends State<MeScreen>
                             username: username,
                             radius: 38,
                             fontSize: 28,
+                            vipMembership: vipMembership,
+                            vipLevel: vipLevel,
                           ),
                         ),
                         Positioned(
@@ -736,12 +745,13 @@ class _MeScreenState extends State<MeScreen>
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text(
+                          VipNameText(
                             username,
+                            membership: vipMembership,
+                            fallbackVipLevel: vipLevel,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
-                              color: Colors.white,
                               fontSize: 24,
                               fontWeight: FontWeight.w800,
                               letterSpacing: -0.4,
@@ -784,9 +794,20 @@ class _MeScreenState extends State<MeScreen>
                                 onTap: _selectRegion,
                               ),
                               if (vipLevel > 0)
-                                _HeroChip(
-                                  icon: Icons.workspace_premium_rounded,
-                                  label: 'VIP $vipLevel',
+                                Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    VipBadge(
+                                      membership: vipMembership,
+                                      fallbackVipLevel: vipLevel,
+                                      size: VipBadgeSize.medium,
+                                    ),
+                                    const SizedBox(width: 6),
+                                    _HeroChip(
+                                      icon: Icons.workspace_premium_rounded,
+                                      label: vipMembership.currentTier.displayName,
+                                    ),
+                                  ],
                                 ),
                             ],
                           ),
@@ -1210,10 +1231,10 @@ class _MeScreenState extends State<MeScreen>
         icon: Icons.add_home_work_outlined,
         title: 'No rooms yet',
         subtitle:
-            'Create your first room and it will start updating here live.',
-        actionLabel: 'Create room',
+            'Set up your permanent room once and it will keep updating here live.',
+        actionLabel: 'Set up my room',
         onAction: () {
-          Navigator.pushNamed(context, '/rooms/create');
+          MyRoomEntryScreen.open(context);
         },
       );
     }

@@ -73,5 +73,13 @@ flutter:
     - assets/images/
     - assets/animations/
     - assets/gifts/
-
-
+    - assets/shop_catalog/boosters/
+    - assets/shop_catalog/bundles/
+    - assets/shop_catalog/chat_bubbles/
+    - assets/shop_catalog/collectibles/
+    - assets/shop_catalog/entry_effects/
+    - assets/shop_catalog/frames/
+    - assets/shop_catalog/mic_auras/
+    - assets/shop_catalog/nameplates/
+    - assets/shop_catalog/ui/
+    - assets/vip_badges/

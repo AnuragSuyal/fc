@@ -8,7 +8,8 @@ import '../../services/socket_service.dart';
 import '../../theme/app_theme.dart';
 import '../../utils/constants.dart';
 import '../../widgets/room_card.dart';
-import '../rooms/create_room_screen.dart';
+import '../rooms/my_room_entry_screen.dart';
+import '../rooms/room_detail_screen.dart';
 import '../rooms/rooms_screen.dart';
 import '../vip/vip_screen.dart';
 import '../wallet/wallet_screen.dart';
@@ -22,6 +23,7 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   List<RoomModel> _trendingRooms = [];
+  List<RoomModel> _recentRooms = [];
   bool _isLoading = true;
   bool _isDisposed = false;
   Timer? _realtimeDebounce;
@@ -86,11 +88,17 @@ class _HomeScreenState extends State<HomeScreen> {
     }
 
     try {
-      final trendingRooms = await RoomService.getTrendingRooms();
+      final results = await Future.wait([
+        RoomService.getTrendingRooms(),
+        RoomService.getRecentRooms(),
+      ]);
+      final trendingRooms = results[0];
+      final recentRooms = results[1];
 
       if (!mounted) return;
       setState(() {
         _trendingRooms = trendingRooms;
+        _recentRooms = recentRooms;
         _isLoading = false;
       });
       _scheduleRallyRefresh(trendingRooms);
@@ -170,13 +178,20 @@ class _HomeScreenState extends State<HomeScreen> {
                 title: 'Quiet for a moment',
                 message:
                     'New rooms will pop here as soon as people start hanging out.',
-                cta: 'Create a room',
+                cta: 'Open my room',
                 onTap: _openCreateRoom,
               )
             else
               ..._trendingRooms.take(4).map(
                     (room) => RoomCard(room: room),
                   ),
+            const SizedBox(height: 22),
+            _buildSectionHeader(
+              'Recently visited',
+              'Jump back into the last 10 rooms you opened.',
+            ),
+            const SizedBox(height: 12),
+            _buildRecentRoomsSection(),
           ],
         ),
       ),
@@ -224,28 +239,28 @@ class _HomeScreenState extends State<HomeScreen> {
         'Drop into live spaces',
         'assets/images/home_rooms.png',
         AppColors.primaryBlue,
-        const RoomsScreen(),
+        target: const RoomsScreen(),
       ),
       _ActionItem(
-        'Create',
-        'Start a vibe fast',
+        'My Room',
+        'Open your permanent room',
         'assets/images/home_create.png',
         AppColors.secondaryBlue,
-        const CreateRoomScreen(),
+        onTap: () => MyRoomEntryScreen.open(context),
       ),
       _ActionItem(
         'Wallet',
         'Coins and gems',
         'assets/images/home_wallet.png',
         const Color(0xFF39424D),
-        const WalletScreen(),
+        target: const WalletScreen(),
       ),
       _ActionItem(
         'VIP',
         'Extra sparkle perks',
         'assets/images/home_vip.png',
         AppColors.accentBerry,
-        const VipScreen(),
+        target: const VipScreen(),
       ),
     ];
 
@@ -272,7 +287,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final theme = Theme.of(context);
 
     return InkWell(
-      onTap: () => _open(item.target),
+      onTap: item.onTap ?? () => _open(item.target!),
       borderRadius: BorderRadius.circular(28),
       child: Ink(
         padding: const EdgeInsets.all(18),
@@ -369,6 +384,189 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  Widget _buildRecentRoomsSection() {
+    if (_recentRooms.isEmpty) {
+      return _buildEmptyPanel(
+        icon: Icons.history_rounded,
+        title: 'No recent rooms yet',
+        message:
+            'The rooms you visit will show up here so you can hop back in faster.',
+        cta: 'Explore rooms',
+        onTap: () => _open(const RoomsScreen()),
+      );
+    }
+
+    return SizedBox(
+      height: 194,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        itemCount: _recentRooms.length,
+        separatorBuilder: (_, __) => const SizedBox(width: 14),
+        itemBuilder: (context, index) {
+          final room = _recentRooms[index];
+          return _buildRecentRoomCard(room);
+        },
+      ),
+    );
+  }
+
+  Widget _buildRecentRoomCard(RoomModel room) {
+    final theme = Theme.of(context);
+    final mood = context.mood;
+    final isLive = room.roomActive;
+    final accent = isLive ? AppColors.successGreen : AppColors.textSecondary;
+    final previewUrl = _normalizeImageUrl(room.coverImage) ??
+        _normalizeImageUrl(room.hostAvatar);
+
+    return InkWell(
+      onTap: () => _openRoom(room),
+      borderRadius: BorderRadius.circular(28),
+      child: Ink(
+        width: 178,
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: isLive ? 1 : 0.92),
+          borderRadius: BorderRadius.circular(28),
+          border: Border.all(
+            color: isLive
+                ? AppColors.successGreen.withValues(alpha: 0.24)
+                : mood.outlineSoft,
+          ),
+          boxShadow: isLive
+              ? [
+                  BoxShadow(
+                    color: AppColors.successGreen.withValues(alpha: 0.08),
+                    blurRadius: 18,
+                    offset: const Offset(0, 10),
+                  ),
+                ]
+              : null,
+        ),
+        child: Opacity(
+          opacity: isLive ? 1 : 0.78,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  _statusPill(
+                    isLive ? 'LIVE' : 'Offline',
+                    background: isLive
+                        ? AppColors.successGreen.withValues(alpha: 0.14)
+                        : Colors.black.withValues(alpha: 0.06),
+                    foreground:
+                        isLive ? AppColors.successGreen : AppColors.textSecondary,
+                  ),
+                  const Spacer(),
+                  Icon(
+                    isLive
+                        ? Icons.radio_button_checked_rounded
+                        : Icons.history_toggle_off_rounded,
+                    color: accent,
+                    size: 16,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(18),
+                child: Container(
+                  height: 64,
+                  width: double.infinity,
+                  color: AppColors.primaryBlue.withValues(alpha: 0.08),
+                  child: previewUrl == null
+                      ? Icon(
+                          Icons.graphic_eq_rounded,
+                          color: AppColors.primaryBlue,
+                          size: 28,
+                        )
+                      : Image.network(
+                          previewUrl,
+                          fit: BoxFit.cover,
+                          errorBuilder: (_, __, ___) => Icon(
+                            Icons.graphic_eq_rounded,
+                            color: AppColors.primaryBlue,
+                            size: 28,
+                          ),
+                        ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              Text(
+                room.name,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.titleMedium?.copyWith(
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                room.hostName,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: AppColors.textSecondary,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const Spacer(),
+              Row(
+                children: [
+                  Icon(Icons.groups_rounded, color: accent, size: 15),
+                  const SizedBox(width: 4),
+                  Text(
+                    isLive ? '${room.onlineCount} online' : 'Waiting for host',
+                    style: theme.textTheme.labelMedium?.copyWith(
+                      color: accent,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _statusPill(
+    String label, {
+    required Color background,
+    required Color foreground,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: background,
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        label,
+        style: Theme.of(context).textTheme.labelMedium?.copyWith(
+              color: foreground,
+              fontWeight: FontWeight.w800,
+            ),
+      ),
+    );
+  }
+
+  String? _normalizeImageUrl(String? imageUrl) {
+    final rawUrl = imageUrl?.trim();
+    if (rawUrl == null || rawUrl.isEmpty || rawUrl == 'null') {
+      return null;
+    }
+
+    final normalized = AppConfig.normalizeBackendUrl(rawUrl);
+    final uri = Uri.tryParse(normalized);
+    if (uri == null || !uri.hasAuthority) {
+      return null;
+    }
+
+    return normalized;
+  }
+
   void _open(Widget page) {
     Navigator.push(
       context,
@@ -376,11 +574,15 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  void _openCreateRoom() {
+  void _openRoom(RoomModel room) {
     Navigator.push(
       context,
-      MaterialPageRoute(builder: (_) => const CreateRoomScreen()),
+      MaterialPageRoute(builder: (_) => RoomDetailScreen(room: room)),
     );
+  }
+
+  void _openCreateRoom() {
+    MyRoomEntryScreen.open(context);
   }
 }
 
@@ -390,12 +592,12 @@ class _ActionItem {
     this.subtitle,
     this.assetPath,
     this.color,
-    this.target,
-  );
+    {this.target, this.onTap});
 
   final String title;
   final String subtitle;
   final String assetPath;
   final Color color;
-  final Widget target;
+  final Widget? target;
+  final VoidCallback? onTap;
 }

@@ -41,3 +41,88 @@
 {"level":"error","message":"Only empty seats can be locked. - POST /api/rooms/69c938600864d7c72521bc7b/seat/2/lock - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T14:34:08.089Z"}
 {"level":"error","message":"You are banned from this room - POST /api/rooms/69c938600864d7c72521bcf3/join - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T14:34:08.201Z"}
 {"level":"error","message":"You cannot send room chat right now - POST /api/messages/room - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T14:34:08.268Z"}
+{"level":"error","message":"Only the room owner and admins can update this room - PUT /api/rooms/69c93fbb7c2b24afef6a141c - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:05:31.673Z"}
+{"level":"error","message":"This seat is locked by room management. - POST /api/rooms/69c93fbb7c2b24afef6a1462/seat - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:05:31.830Z"}
+{"level":"error","message":"You do not have permission to lock this seat. - POST /api/rooms/69c93fbb7c2b24afef6a14c2/seat/5/lock - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:05:31.960Z"}
+{"level":"error","message":"You do not have permission to lock this seat. - POST /api/rooms/69c93fbb7c2b24afef6a14c2/seat/6/lock - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:05:31.987Z"}
+{"level":"error","message":"This seat is locked by room management. - POST /api/rooms/69c93fbc7c2b24afef6a14ff/promote/69c93fbc7c2b24afef6a14fb - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:05:32.054Z"}
+{"level":"error","message":"Only empty seats can be locked. - POST /api/rooms/69c93fbc7c2b24afef6a1547/seat/2/lock - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:05:32.171Z"}
+{"level":"error","message":"You are banned from this room - POST /api/rooms/69c93fbc7c2b24afef6a15bf/join - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:05:32.267Z"}
+{"level":"error","message":"You cannot send room chat right now - POST /api/messages/room - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:05:32.331Z"}
+{"level":"error","message":"Permanent rooms cannot be deleted. You can keep editing the same room instead. - DELETE /api/rooms/69c93fbc7c2b24afef6a169b - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:05:32.561Z"}
+{"level":"error","message":"Only the room owner and admins can update this room - PUT /api/rooms/69c94005285639d51ec775d0 - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:06:45.759Z"}
+{"level":"error","message":"This seat is locked by room management. - POST /api/rooms/69c94005285639d51ec7761e/seat - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:06:45.915Z"}
+{"level":"error","message":"You do not have permission to lock this seat. - POST /api/rooms/69c94006285639d51ec7767e/seat/5/lock - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:06:46.040Z"}
+{"level":"error","message":"You do not have permission to lock this seat. - POST /api/rooms/69c94006285639d51ec7767e/seat/6/lock - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:06:46.063Z"}
+{"level":"error","message":"This seat is locked by room management. - POST /api/rooms/69c94006285639d51ec776bb/promote/69c94006285639d51ec776b7 - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:06:46.122Z"}
+{"level":"error","message":"Only empty seats can be locked. - POST /api/rooms/69c94006285639d51ec77703/seat/2/lock - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:06:46.226Z"}
+{"level":"error","message":"You are banned from this room - POST /api/rooms/69c94006285639d51ec7777b/join - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:06:46.317Z"}
+{"level":"error","message":"You cannot send room chat right now - POST /api/messages/room - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:06:46.382Z"}
+{"level":"error","message":"Permanent rooms cannot be deleted. You can keep editing the same room instead. - DELETE /api/rooms/69c94006285639d51ec7785e - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:06:46.587Z"}
+{"level":"error","message":"Only the room owner and admins can update this room - PUT /api/rooms/69c9401eb2d1f4c43fa950b7 - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:07:10.602Z"}
+{"level":"error","message":"This seat is locked by room management. - POST /api/rooms/69c9401eb2d1f4c43fa95100/seat - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:07:10.821Z"}
+{"level":"error","message":"You do not have permission to lock this seat. - POST /api/rooms/69c9401eb2d1f4c43fa95160/seat/5/lock - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:07:10.964Z"}
+{"level":"error","message":"You do not have permission to lock this seat. - POST /api/rooms/69c9401eb2d1f4c43fa95160/seat/6/lock - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:07:10.989Z"}
+{"level":"error","message":"This seat is locked by room management. - POST /api/rooms/69c9401fb2d1f4c43fa9519d/promote/69c9401fb2d1f4c43fa95199 - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:07:11.055Z"}
+{"level":"error","message":"Only empty seats can be locked. - POST /api/rooms/69c9401fb2d1f4c43fa951e5/seat/2/lock - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:07:11.175Z"}
+{"level":"error","message":"You are banned from this room - POST /api/rooms/69c9401fb2d1f4c43fa9525d/join - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:07:11.282Z"}
+{"level":"error","message":"You cannot send room chat right now - POST /api/messages/room - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:07:11.353Z"}
+{"level":"error","message":"Permanent rooms cannot be deleted. You can keep editing the same room instead. - DELETE /api/rooms/69c9401fb2d1f4c43fa95340 - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:07:11.606Z"}
+{"level":"error","message":"Only the room owner and admins can update this room - PUT /api/rooms/69c94084ee6c07b6563276eb - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:08:52.040Z"}
+{"level":"error","message":"This seat is locked by room management. - POST /api/rooms/69c94084ee6c07b656327739/seat - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:08:52.209Z"}
+{"level":"error","message":"You do not have permission to lock this seat. - POST /api/rooms/69c94084ee6c07b65632779a/seat/5/lock - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:08:52.331Z"}
+{"level":"error","message":"You do not have permission to lock this seat. - POST /api/rooms/69c94084ee6c07b65632779a/seat/6/lock - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:08:52.355Z"}
+{"level":"error","message":"This seat is locked by room management. - POST /api/rooms/69c94084ee6c07b6563277d7/promote/69c94084ee6c07b6563277d3 - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:08:52.416Z"}
+{"level":"error","message":"Only empty seats can be locked. - POST /api/rooms/69c94084ee6c07b65632781f/seat/2/lock - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:08:52.521Z"}
+{"level":"error","message":"You are banned from this room - POST /api/rooms/69c94084ee6c07b656327897/join - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:08:52.616Z"}
+{"level":"error","message":"You cannot send room chat right now - POST /api/messages/room - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:08:52.682Z"}
+{"level":"error","message":"Permanent rooms cannot be deleted. You can keep editing the same room instead. - DELETE /api/rooms/69c94084ee6c07b65632797a - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:08:52.888Z"}
+{"level":"error","message":"Only the room owner and admins can update this room - PUT /api/rooms/69c94775182da7fbccac2372 - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:38:29.535Z"}
+{"level":"error","message":"This seat is locked by room management. - POST /api/rooms/69c94775182da7fbccac23bb/seat - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:38:29.677Z"}
+{"level":"error","message":"You do not have permission to lock this seat. - POST /api/rooms/69c94775182da7fbccac241b/seat/5/lock - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:38:29.795Z"}
+{"level":"error","message":"You do not have permission to lock this seat. - POST /api/rooms/69c94775182da7fbccac241b/seat/6/lock - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:38:29.818Z"}
+{"level":"error","message":"This seat is locked by room management. - POST /api/rooms/69c94775182da7fbccac2458/promote/69c94775182da7fbccac2454 - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:38:29.879Z"}
+{"level":"error","message":"Only empty seats can be locked. - POST /api/rooms/69c94775182da7fbccac24a0/seat/2/lock - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:38:29.990Z"}
+{"level":"error","message":"You are banned from this room - POST /api/rooms/69c94776182da7fbccac2518/join - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:38:30.089Z"}
+{"level":"error","message":"You cannot send room chat right now - POST /api/messages/room - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:38:30.153Z"}
+{"level":"error","message":"Permanent rooms cannot be deleted. You can keep editing the same room instead. - DELETE /api/rooms/69c94776182da7fbccac2600 - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:38:30.373Z"}
+{"level":"error","message":"Room inactive - waiting for host/admin - POST /api/rooms/69c94776182da7fbccac2620/seat - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:38:30.429Z"}
+{"level":"error","message":"Only the room owner and admins can update this room - PUT /api/rooms/69c94959f7e48a2478876f64 - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:46:33.202Z"}
+{"level":"error","message":"This seat is locked by room management. - POST /api/rooms/69c94959f7e48a2478876fae/seat - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:46:33.375Z"}
+{"level":"error","message":"You do not have permission to lock this seat. - POST /api/rooms/69c94959f7e48a247887700e/seat/5/lock - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:46:33.507Z"}
+{"level":"error","message":"You do not have permission to lock this seat. - POST /api/rooms/69c94959f7e48a247887700e/seat/6/lock - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:46:33.534Z"}
+{"level":"error","message":"This seat is locked by room management. - POST /api/rooms/69c94959f7e48a247887704b/promote/69c94959f7e48a2478877047 - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:46:33.595Z"}
+{"level":"error","message":"Only empty seats can be locked. - POST /api/rooms/69c94959f7e48a2478877093/seat/2/lock - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:46:33.716Z"}
+{"level":"error","message":"You are banned from this room - POST /api/rooms/69c94959f7e48a247887710b/join - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:46:33.824Z"}
+{"level":"error","message":"You cannot send room chat right now - POST /api/messages/room - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:46:33.894Z"}
+{"level":"error","message":"Permanent rooms cannot be deleted. You can keep editing the same room instead. - DELETE /api/rooms/69c9495af7e48a2478877218 - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:46:34.211Z"}
+{"level":"error","message":"Room inactive - waiting for host/admin - POST /api/rooms/69c9495af7e48a2478877238/seat - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T15:46:34.269Z"}
+{"level":"error","message":"Maximum call stack size exceeded - POST /api/rooms/my-room - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T16:09:04.257Z"}
+{"level":"error","message":"Maximum call stack size exceeded - GET /api/rooms/my-room?allocate=true - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T16:09:04.301Z"}
+{"level":"error","message":"Maximum call stack size exceeded - POST /api/rooms/my-room - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T16:09:04.345Z"}
+{"level":"error","message":"Only the room owner and admins can update this room - PUT /api/rooms/69c94ec844425cf34a9858a2 - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T16:09:44.453Z"}
+{"level":"error","message":"This seat is locked by room management. - POST /api/rooms/69c94ec844425cf34a9858eb/seat - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T16:09:44.604Z"}
+{"level":"error","message":"You do not have permission to lock this seat. - POST /api/rooms/69c94ec844425cf34a98594b/seat/5/lock - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T16:09:44.741Z"}
+{"level":"error","message":"You do not have permission to lock this seat. - POST /api/rooms/69c94ec844425cf34a98594b/seat/6/lock - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T16:09:44.765Z"}
+{"level":"error","message":"This seat is locked by room management. - POST /api/rooms/69c94ec844425cf34a985988/promote/69c94ec844425cf34a985984 - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T16:09:44.833Z"}
+{"level":"error","message":"Only empty seats can be locked. - POST /api/rooms/69c94ec844425cf34a9859d0/seat/2/lock - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T16:09:44.956Z"}
+{"level":"error","message":"You are banned from this room - POST /api/rooms/69c94ec944425cf34a985a48/join - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T16:09:45.062Z"}
+{"level":"error","message":"You cannot send room chat right now - POST /api/messages/room - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T16:09:45.128Z"}
+{"level":"error","message":"Permanent rooms cannot be deleted. You can keep editing the same room instead. - DELETE /api/rooms/69c94ec944425cf34a985b4b - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T16:09:45.403Z"}
+{"level":"error","message":"Room inactive - waiting for host/admin - POST /api/rooms/69c94ec944425cf34a985b6b/seat - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T16:09:45.451Z"}
+{"level":"error","message":"Only the room owner and admins can update this room - PUT /api/rooms/69c94f11e5b40f4338da496f - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T16:10:57.138Z"}
+{"level":"error","message":"This seat is locked by room management. - POST /api/rooms/69c94f11e5b40f4338da49c4/seat - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T16:10:57.397Z"}
+{"level":"error","message":"You do not have permission to lock this seat. - POST /api/rooms/69c94f11e5b40f4338da4a24/seat/5/lock - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T16:10:57.530Z"}
+{"level":"error","message":"You do not have permission to lock this seat. - POST /api/rooms/69c94f11e5b40f4338da4a24/seat/6/lock - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T16:10:57.558Z"}
+{"level":"error","message":"This seat is locked by room management. - POST /api/rooms/69c94f11e5b40f4338da4a61/promote/69c94f11e5b40f4338da4a5d - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T16:10:57.619Z"}
+{"level":"error","message":"Only empty seats can be locked. - POST /api/rooms/69c94f11e5b40f4338da4aa9/seat/2/lock - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T16:10:57.730Z"}
+{"level":"error","message":"You are banned from this room - POST /api/rooms/69c94f11e5b40f4338da4b21/join - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T16:10:57.828Z"}
+{"level":"error","message":"You cannot send room chat right now - POST /api/messages/room - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T16:10:57.904Z"}
+{"level":"error","message":"Permanent rooms cannot be deleted. You can keep editing the same room instead. - DELETE /api/rooms/69c94f12e5b40f4338da4c2e - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T16:10:58.170Z"}
+{"level":"error","message":"Room inactive - waiting for host/admin - POST /api/rooms/69c94f12e5b40f4338da4c4e/seat - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-29T16:10:58.220Z"}
+{"level":"error","message":"Only the host or an admin can clear the board - POST /api/rooms/69ca9162ca7bf1ce7b2c6501/draw/clear - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-30T15:06:10.448Z"}
+{"level":"error","message":"You do not have drawing access in this room right now - POST /api/rooms/69ca9162ca7bf1ce7b2c6501/draw/undo - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-30T15:06:10.457Z"}
+{"level":"error","message":"Only the host or an admin can clear the board - POST /api/rooms/69ca919c18fd119500d626f7/draw/clear - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-30T15:07:08.537Z"}
+{"level":"error","message":"You do not have drawing access in this room right now - POST /api/rooms/69ca919c18fd119500d626f7/draw/undo - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-30T15:07:08.544Z"}
+{"level":"error","message":"Only the host or an admin can clear the board - POST /api/rooms/69cab4d9fa9c660ff9f48323/draw/clear - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-30T17:37:29.640Z"}
+{"level":"error","message":"You do not have drawing access in this room right now - POST /api/rooms/69cab4d9fa9c660ff9f48323/draw/undo - RID: N/A - IP: 127.0.0.1","timestamp":"2026-03-30T17:37:29.646Z"}

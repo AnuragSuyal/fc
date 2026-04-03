@@ -134,8 +134,49 @@ class MessageModel {
   bool get isVoice => type == 'voice';
   bool get isEmoji => type == 'emoji';
   bool get isGift => type == 'gift';
+  bool get isCoinTransfer =>
+      type == 'coin_transfer' || metadata['coinTransfer'] is Map;
   bool get isPrivateImage =>
-      type == 'private_image' || (type == 'image' && metadata['privateImage'] == true);
+      type == 'private_image' ||
+      (type == 'image' && metadata['privateImage'] == true);
+  Map<String, dynamic> get coinTransferData => metadata['coinTransfer'] is Map
+      ? Map<String, dynamic>.from(metadata['coinTransfer'] as Map)
+      : const {};
+  int get coinTransferGrossAmount {
+    final raw = coinTransferData['grossAmount'];
+    if (raw is int) return raw;
+    if (raw is num) return raw.toInt();
+    return 0;
+  }
+
+  int get coinTransferReceiverAmount {
+    final raw = coinTransferData['receiverAmount'];
+    if (raw is int) return raw;
+    if (raw is num) return raw.toInt();
+    return 0;
+  }
+
+  int get coinTransferPlatformFee {
+    final raw = coinTransferData['platformFee'];
+    if (raw is int) return raw;
+    if (raw is num) return raw.toInt();
+    return 0;
+  }
+
+  String get coinTransferStatus =>
+      coinTransferData['status']?.toString() ?? 'completed';
+  String get coinTransferSenderUserId =>
+      coinTransferData['senderUserId']?.toString() ?? '';
+  String get coinTransferReceiverUserId =>
+      coinTransferData['receiverUserId']?.toString() ?? '';
+  String get coinTransferSenderUsername =>
+      coinTransferData['senderUsername']?.toString() ?? senderName;
+  String get coinTransferReceiverUsername =>
+      coinTransferData['receiverUsername']?.toString() ?? '';
+  String get coinTransferSenderAvatar =>
+      coinTransferData['senderAvatar']?.toString() ?? senderAvatar;
+  String get coinTransferReceiverAvatar =>
+      coinTransferData['receiverAvatar']?.toString() ?? '';
   bool get isRoomInvite => metadata['roomInvite'] is Map;
   Map<String, dynamic> get roomInviteData => metadata['roomInvite'] is Map
       ? Map<String, dynamic>.from(metadata['roomInvite'] as Map)
@@ -190,6 +231,12 @@ class MessageModel {
   String get previewText {
     if (isRoomInvite) return 'Room invite: $roomInviteRoomName';
     if (isGift) return giftName != null ? 'Gift: $giftName' : 'Gift';
+    if (isCoinTransfer) {
+      if (coinTransferGrossAmount > 0) {
+        return 'Coin transfer: $coinTransferGrossAmount coins';
+      }
+      return 'Coin transfer';
+    }
     if (isEmoji) return 'Emote';
     if (isVoice) return 'Voice message';
     if (isPrivateImage) return 'Private photo';

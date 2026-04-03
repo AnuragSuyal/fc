@@ -1,4 +1,8 @@
-const User = require('../models/User');
+const { SPEND_XP_CONFIG } = require('../config/leveling');
+const {
+    awardUserXp,
+    buildProgressPayload
+} = require('./levelProgressionService');
 
 const normalizeAmount = (value) => {
     const amount = Number(value);
@@ -18,46 +22,55 @@ const calculateSpendXp = ({ coins = 0, gems = 0, baseXp = 0 } = {}) => {
         return 0;
     }
 
-    const scaledXp = Math.floor(safeCoins / 20) + (safeGems * 2);
+    const scaledXp = Math.floor(safeCoins / SPEND_XP_CONFIG.coinsPerXp)
+        + (safeGems * SPEND_XP_CONFIG.gemsPerXp);
 
-    return Math.max(safeBaseXp, scaledXp, 1);
+    return Math.min(
+        Math.max(safeBaseXp, scaledXp, SPEND_XP_CONFIG.minimumAward),
+        SPEND_XP_CONFIG.maximumAward
+    );
 };
 
-const awardSpendXp = async ({ user, userId, coins = 0, gems = 0, baseXp = 0 } = {}) => {
-    const targetUser = user || (userId ? await User.findById(userId) : null);
-
-    if (!targetUser) {
-        return null;
-    }
-
+const awardSpendXp = async ({
+    user,
+    userId,
+    coins = 0,
+    gems = 0,
+    baseXp = 0,
+    sourceType = 'gift_received',
+    sourceReferenceId = '',
+    sourceReferenceType = '',
+    dedupeKey = '',
+    metadata = {},
+    redis
+} = {}) => {
     const xpGained = calculateSpendXp({ coins, gems, baseXp });
 
     if (xpGained <= 0) {
         return {
-            user: targetUser,
+            user: user || null,
             xpGained: 0,
             leveledUp: false
         };
     }
 
-    const leveledUp = await targetUser.addXP(xpGained);
-    await targetUser.save();
-
-    return {
-        user: targetUser,
-        xpGained,
-        leveledUp
-    };
+    return awardUserXp({
+        user,
+        userId,
+        amount: xpGained,
+        sourceType,
+        sourceReferenceId,
+        sourceReferenceType,
+        dedupeKey,
+        metadata: {
+            ...metadata,
+            coins: normalizeAmount(coins),
+            gems: normalizeAmount(gems),
+            baseXp: normalizeAmount(baseXp)
+        },
+        redis
+    });
 };
-
-const buildProgressPayload = (user, extra = {}) => ({
-    coins: Number(user?.coins || 0),
-    gems: Number(user?.gems || 0),
-    xp: Number(user?.xp || 0),
-    level: Number(user?.level || 1),
-    vipLevel: Number(user?.vipLevel || 0),
-    ...extra
-});
 
 module.exports = {
     calculateSpendXp,

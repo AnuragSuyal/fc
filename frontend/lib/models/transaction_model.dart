@@ -63,6 +63,9 @@ class TransactionModel {
       type == 'purchase_coins' ||
       type == 'purchase_gems' ||
       type == 'gift_received' ||
+      type == 'coin_transfer_received' ||
+      type == 'dragon_packet_reward' ||
+      type == 'coin_transfer_unlock_refund' ||
       type == 'quest_reward' ||
       type == 'daily_bonus';
   bool get isDebit => !isCredit;
@@ -121,9 +124,3 @@ class TransactionReference {
     );
   }
 }
-
-
-
-
-
-

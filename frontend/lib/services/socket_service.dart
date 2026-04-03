@@ -36,6 +36,7 @@ class SocketService {
   static final _reaction = _make<Map<String, dynamic>>();
   static final _sound = _make<Map<String, dynamic>>();
   static final _roomFeature = _make<Map<String, dynamic>>();
+  static final _roomDraw = _make<Map<String, dynamic>>();
   static final _roomUpdate = _make<Map<String, dynamic>>();
   static final _voice = _make<Map<String, dynamic>>();
   static final _typing = _make<Map<String, dynamic>>();
@@ -44,6 +45,9 @@ class SocketService {
   static final _wedding = _make<Map<String, dynamic>>();
   static final _post = _make<Map<String, dynamic>>();
   static final _profile = _make<Map<String, dynamic>>();
+  static final _inventory = _make<Map<String, dynamic>>();
+  static final _coinTransfer = _make<Map<String, dynamic>>();
+  static final _dragonPacket = _make<Map<String, dynamic>>();
   static final _resync = _make<Map<String, dynamic>>();
 
   static Stream<Map<String, dynamic>> get giftStream => _gift.stream;
@@ -65,6 +69,7 @@ class SocketService {
   static Stream<Map<String, dynamic>> get soundStream => _sound.stream;
   static Stream<Map<String, dynamic>> get roomFeatureStream =>
       _roomFeature.stream;
+  static Stream<Map<String, dynamic>> get roomDrawStream => _roomDraw.stream;
   static Stream<Map<String, dynamic>> get roomUpdateStream =>
       _roomUpdate.stream;
   static Stream<Map<String, dynamic>> get voiceStream => _voice.stream;
@@ -75,6 +80,11 @@ class SocketService {
   static Stream<Map<String, dynamic>> get weddingStream => _wedding.stream;
   static Stream<Map<String, dynamic>> get postStream => _post.stream;
   static Stream<Map<String, dynamic>> get profileStream => _profile.stream;
+  static Stream<Map<String, dynamic>> get inventoryStream => _inventory.stream;
+  static Stream<Map<String, dynamic>> get coinTransferStream =>
+      _coinTransfer.stream;
+  static Stream<Map<String, dynamic>> get dragonPacketStream =>
+      _dragonPacket.stream;
   static Stream<Map<String, dynamic>> get resyncStream => _resync.stream;
 
   static Future<void> init() async {
@@ -227,6 +237,54 @@ class SocketService {
     });
   }
 
+  static void sendRoomDrawStrokeBegin({
+    required String roomId,
+    required String sessionId,
+    required String strokeId,
+    required String toolType,
+    required int colorValue,
+    required double thickness,
+    required List<Map<String, dynamic>> points,
+  }) {
+    _socket?.emit('room:draw:stroke_begin', {
+      'roomId': roomId,
+      'sessionId': sessionId,
+      'strokeId': strokeId,
+      'toolType': toolType,
+      'colorValue': colorValue,
+      'thickness': thickness,
+      'points': points,
+    });
+  }
+
+  static void sendRoomDrawStrokeChunk({
+    required String roomId,
+    required String sessionId,
+    required String strokeId,
+    required List<Map<String, dynamic>> points,
+  }) {
+    _socket?.emit('room:draw:stroke_chunk', {
+      'roomId': roomId,
+      'sessionId': sessionId,
+      'strokeId': strokeId,
+      'points': points,
+    });
+  }
+
+  static void sendRoomDrawStrokeEnd({
+    required String roomId,
+    required String sessionId,
+    required String strokeId,
+    required List<Map<String, dynamic>> points,
+  }) {
+    _socket?.emit('room:draw:stroke_end', {
+      'roomId': roomId,
+      'sessionId': sessionId,
+      'strokeId': strokeId,
+      'points': points,
+    });
+  }
+
   static void sendVoiceMute({required String roomId, required bool muted}) {
     _socket?.emit('voice:mute', {'roomId': roomId, 'muted': muted});
   }
@@ -287,6 +345,18 @@ class SocketService {
     );
   }
 
+  static void sendDragonTap({
+    required String roomId,
+    required String eventId,
+    required int seq,
+  }) {
+    _socket?.emit('dragon:tap', {
+      'roomId': roomId,
+      'eventId': eventId,
+      'seq': seq,
+    });
+  }
+
   static void _wireLifecycleHooks(io.Socket socket) {
     socket
       ..onConnect((_) => _handleConnected())
@@ -326,6 +396,34 @@ class SocketService {
     socket.on('room:reaction', (data) => _add(_reaction, data));
     socket.on('room:sound_effect', (data) => _add(_sound, data));
     socket.on('room:stage_feature', (data) => _add(_roomFeature, data));
+    socket.on(
+      'room:draw:meta',
+      (data) => _add(_roomDraw, _typed(data, 'draw_meta')),
+    );
+    socket.on(
+      'room:draw:progress',
+      (data) => _add(_roomDraw, _typed(data, 'draw_progress')),
+    );
+    socket.on(
+      'room:draw:commit',
+      (data) => _add(_roomDraw, _typed(data, 'draw_commit')),
+    );
+    socket.on(
+      'room:draw:clear',
+      (data) => _add(_roomDraw, _typed(data, 'draw_clear')),
+    );
+    socket.on(
+      'room:draw:undo',
+      (data) => _add(_roomDraw, _typed(data, 'draw_undo')),
+    );
+    socket.on(
+      'room:draw:redo',
+      (data) => _add(_roomDraw, _typed(data, 'draw_redo')),
+    );
+    socket.on(
+      'room:draw:error',
+      (data) => _add(_roomDraw, _typed(data, 'draw_error')),
+    );
     socket.on(
       'room:created',
       (data) => _add(_roomUpdate, _typed(data, 'room_created')),
@@ -474,6 +572,32 @@ class SocketService {
       (data) => _add(_wedding, _typed(data, 'blessing')),
     );
     socket.on('post:changed', (data) => _add(_post, data));
+    socket.on('inventory:updated', (data) => _add(_inventory, data));
+    socket.on('coin_transfer:updated', (data) => _add(_coinTransfer, data));
+    socket.on(
+      'room:dragon:created',
+      (data) => _add(_dragonPacket, _typed(data, 'dragon_created')),
+    );
+    socket.on(
+      'dragon:tap_ack',
+      (data) => _add(_dragonPacket, _typed(data, 'dragon_tap_ack')),
+    );
+    socket.on(
+      'room:dragon:leaderboard',
+      (data) => _add(_dragonPacket, _typed(data, 'dragon_leaderboard')),
+    );
+    socket.on(
+      'room:dragon:closing',
+      (data) => _add(_dragonPacket, _typed(data, 'dragon_closing')),
+    );
+    socket.on(
+      'room:dragon:result',
+      (data) => _add(_dragonPacket, _typed(data, 'dragon_result')),
+    );
+    socket.on(
+      'dragon_packet:updated',
+      (data) => _add(_dragonPacket, _typed(data, 'dragon_inventory_updated')),
+    );
     socket.on(
       'profile:updated',
       (data) => _add(_profile, _typed(data, 'profile_updated')),

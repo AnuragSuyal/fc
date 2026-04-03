@@ -9,7 +9,14 @@ class WalletService {
       return response;
     } catch (e) {
       debugPrint('Error getting balance: $e');
-      return {'coins': 0, 'gems': 0, 'tickets': 0, 'stars': 0, 'vipLevel': 0};
+      return {
+        'coins': 0,
+        'gems': 0,
+        'tickets': 0,
+        'stars': 0,
+        'vipLevel': 0,
+        'vipMembership': const <String, dynamic>{},
+      };
     }
   }
 
@@ -105,7 +112,6 @@ class WalletService {
     }
   }
 }
-
 
 
 

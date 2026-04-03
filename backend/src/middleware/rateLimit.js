@@ -68,9 +68,44 @@ const giftLimiter = isDev
         }
     });
 
-module.exports = { apiLimiter, authLimiter, otpLimiter, giftLimiter };
+const coinTransferLimiter = isDev
+    ? passthrough
+    : rateLimit({
+        windowMs: 60 * 1000,
+        max: 12,
+        standardHeaders: true,
+        legacyHeaders: false,
+        keyGenerator: (req) => req.userId || generateKey(req),
+        message: {
+            code: 429,
+            status: 'Resource Exhausted',
+            message: 'Slow down'
+        }
+    });
 
+const dragonPacketLimiter = isDev
+    ? passthrough
+    : rateLimit({
+        windowMs: 60 * 1000,
+        max: 15,
+        standardHeaders: true,
+        legacyHeaders: false,
+        keyGenerator: (req) => req.userId || generateKey(req),
+        message: {
+            code: 429,
+            status: 'Resource Exhausted',
+            message: 'Slow down'
+        }
+    });
 
+module.exports = {
+    apiLimiter,
+    authLimiter,
+    otpLimiter,
+    giftLimiter,
+    coinTransferLimiter,
+    dragonPacketLimiter
+};
 
 
 

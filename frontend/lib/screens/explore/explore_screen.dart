@@ -11,8 +11,10 @@ import '../../theme/app_theme.dart';
 import '../../utils/constants.dart';
 import '../../widgets/room_card.dart';
 import '../../widgets/user_avatar.dart';
+import '../../widgets/vip/vip_badge.dart';
+import '../../widgets/vip/vip_name_text.dart';
 import '../profile/enhanced_profile_screen.dart';
-import '../rooms/create_room_screen.dart';
+import '../rooms/my_room_entry_screen.dart';
 import '../rooms/room_detail_screen.dart';
 
 class ExploreScreen extends StatefulWidget {
@@ -249,13 +251,8 @@ class _ExploreScreenState extends State<ExploreScreen> {
   }
 
   void _openCreateRoom() {
-    Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => const CreateRoomScreen()),
-    ).then((created) {
-      if (created == true) {
-        unawaited(_loadExploreData(showLoader: false));
-      }
+    MyRoomEntryScreen.open(context).then((_) {
+      unawaited(_loadExploreData(showLoader: false));
     });
   }
 
@@ -521,20 +518,40 @@ class _ExploreScreenState extends State<ExploreScreen> {
                         imageUrl: user.avatar.isEmpty ? null : user.avatar,
                         username: user.username,
                         radius: 22,
+                        shopProfile: user.shopProfile,
+                        vipMembership: user.vipMembership,
+                        vipLevel: user.vipLevel,
                       ),
                       const SizedBox(width: 14),
                       Expanded(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Text(
-                              user.username,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: Theme.of(context)
-                                  .textTheme
-                                  .titleMedium
-                                  ?.copyWith(fontWeight: FontWeight.w800),
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: VipNameText(
+                                    user.username,
+                                    membership: user.vipMembership,
+                                    fallbackVipLevel: user.vipLevel,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    fallbackColor: AppColors.textPrimary,
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .titleMedium
+                                        ?.copyWith(fontWeight: FontWeight.w800),
+                                  ),
+                                ),
+                                if (user.vipLevel > 0) ...[
+                                  const SizedBox(width: 6),
+                                  VipBadge(
+                                    membership: user.vipMembership,
+                                    fallbackVipLevel: user.vipLevel,
+                                    size: VipBadgeSize.small,
+                                  ),
+                                ],
+                              ],
                             ),
                             const SizedBox(height: 4),
                             Text(
@@ -562,7 +579,7 @@ class _ExploreScreenState extends State<ExploreScreen> {
                           if (user.vipLevel > 0) ...[
                             const SizedBox(height: 8),
                             _pill(
-                              'VIP ${user.vipLevel}',
+                              user.vipMembership.currentTier.displayName,
                               background:
                                   AppColors.accentBerry.withValues(alpha: 0.12),
                               foreground: AppColors.textPrimary,
@@ -934,55 +951,165 @@ class _ExploreScreenState extends State<ExploreScreen> {
       );
     }
 
+    final activeRooms = _followedRooms.where((room) => room.roomActive).toList();
+    final offlineRooms =
+        _followedRooms.where((room) => !room.roomActive).toList();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (activeRooms.isNotEmpty) ...[
+          _buildFollowedRoomGroupLabel(
+            'Active now',
+            '${activeRooms.length} live',
+            color: AppColors.successGreen,
+          ),
+          const SizedBox(height: 10),
+          _buildFollowedRoomLane(activeRooms, isLiveSection: true),
+        ],
+        if (activeRooms.isNotEmpty && offlineRooms.isNotEmpty)
+          const SizedBox(height: 18),
+        if (offlineRooms.isNotEmpty) ...[
+          _buildFollowedRoomGroupLabel(
+            'Offline',
+            '${offlineRooms.length} waiting',
+            color: AppColors.textSecondary,
+          ),
+          const SizedBox(height: 10),
+          _buildFollowedRoomLane(offlineRooms, isLiveSection: false),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildFollowedRoomGroupLabel(
+    String title,
+    String subtitle, {
+    required Color color,
+  }) {
+    final theme = Theme.of(context);
+    return Row(
+      children: [
+        Container(
+          width: 9,
+          height: 9,
+          decoration: BoxDecoration(
+            color: color,
+            shape: BoxShape.circle,
+          ),
+        ),
+        const SizedBox(width: 8),
+        Text(
+          title,
+          style: theme.textTheme.titleSmall?.copyWith(
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+        const SizedBox(width: 8),
+        Text(
+          subtitle,
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: AppColors.textSecondary,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildFollowedRoomLane(
+    List<RoomModel> rooms, {
+    required bool isLiveSection,
+  }) {
     return SizedBox(
       height: 172,
       child: ListView.separated(
         scrollDirection: Axis.horizontal,
-        itemCount: _followedRooms.length,
+        itemCount: rooms.length,
         separatorBuilder: (_, __) => const SizedBox(width: 12),
         itemBuilder: (context, index) {
-          final room = _followedRooms[index];
-          final accent = _categoryColor(room.type);
-          return InkWell(
-            onTap: () => _openRoom(room),
-            borderRadius: BorderRadius.circular(26),
-            child: Ink(
-              width: 170,
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(26),
-                border: Border.all(color: context.mood.outlineSoft),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+          final room = rooms[index];
+          return _buildFollowedRoomCard(room, highlightLive: isLiveSection);
+        },
+      ),
+    );
+  }
+
+  Widget _buildFollowedRoomCard(
+    RoomModel room, {
+    required bool highlightLive,
+  }) {
+    final accent = _categoryColor(room.type);
+    final isLive = room.roomActive;
+
+    return InkWell(
+      onTap: () => _openRoom(room),
+      borderRadius: BorderRadius.circular(26),
+      child: Ink(
+        width: 176,
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: isLive ? 1 : 0.9),
+          borderRadius: BorderRadius.circular(26),
+          border: Border.all(
+            color: highlightLive
+                ? accent.withValues(alpha: 0.26)
+                : context.mood.outlineSoft,
+          ),
+          boxShadow: highlightLive
+              ? [
+                  BoxShadow(
+                    color: accent.withValues(alpha: 0.12),
+                    blurRadius: 18,
+                    offset: const Offset(0, 10),
+                  ),
+                ]
+              : null,
+        ),
+        child: Opacity(
+          opacity: isLive ? 1 : 0.7,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
                 children: [
+                  _pill(
+                    isLive ? 'LIVE' : 'OFFLINE',
+                    background: isLive
+                        ? AppColors.successGreen.withValues(alpha: 0.14)
+                        : Colors.black.withValues(alpha: 0.06),
+                    foreground:
+                        isLive ? AppColors.successGreen : AppColors.textSecondary,
+                  ),
+                  const Spacer(),
                   _pill(
                     room.type.toUpperCase(),
                     background: accent.withValues(alpha: 0.14),
                     foreground: AppColors.textPrimary,
                   ),
-                  const SizedBox(height: 10),
-                  _buildMyRoomPreview(room, accent),
-                  const Spacer(),
-                  Text(
-                    room.name,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                          fontWeight: FontWeight.w800,
-                        ),
-                  ),
-                  const SizedBox(height: 6),
-                  Text(
-                    '${room.onlineCount} online • ${room.followers} fans',
-                    style: Theme.of(context).textTheme.bodySmall,
-                  ),
                 ],
               ),
-            ),
-          );
-        },
+              const SizedBox(height: 10),
+              _buildMyRoomPreview(room, accent),
+              const Spacer(),
+              Text(
+                room.name,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w800,
+                    ),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                isLive
+                    ? '${room.onlineCount} online • ${room.followers} fans'
+                    : 'Waiting for host/admin • ${room.followers} fans',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -1007,7 +1134,7 @@ class _ExploreScreenState extends State<ExploreScreen> {
   Widget _buildEmptyState({
     String title = 'No rooms found',
     String message =
-        'Try another search or category, or make the first move and create a room.',
+        'Try another search or category, or open your permanent room and tune it for your crowd.',
   }) {
     final theme = Theme.of(context);
 
@@ -1045,7 +1172,7 @@ class _ExploreScreenState extends State<ExploreScreen> {
           const SizedBox(height: 16),
           FilledButton(
             onPressed: _openCreateRoom,
-            child: const Text('Create a room'),
+            child: const Text('Open my room'),
           ),
         ],
       ),

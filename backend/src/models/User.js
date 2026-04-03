@@ -1,6 +1,14 @@
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const Counter = require('./Counter');
+const {
+    buildLevelFields,
+    syncUserLevelState
+} = require('../services/levelingRulesService');
+const {
+    buildVipMembershipSnapshot,
+    syncVipMembershipState
+} = require('../services/vipMembershipService');
 
 const USER_UID_SEQUENCE = 'user_uid';
 const USER_UID_START = 1000000;
@@ -107,6 +115,42 @@ const userSchema = new mongoose.Schema({
         type: Boolean,
         default: false
     },
+    isDeleted: {
+        type: Boolean,
+        default: false,
+        index: true
+    },
+    isSystemAccount: {
+        type: Boolean,
+        default: false,
+        index: true
+    },
+    accountState: {
+        status: {
+            type: String,
+            enum: ['active', 'suspended', 'banned', 'deleted'],
+            default: 'active',
+            index: true
+        },
+        reason: {
+            type: String,
+            default: ''
+        },
+        updatedAt: {
+            type: Date,
+            default: Date.now
+        }
+    },
+    verification: {
+        isVerifiedAccount: {
+            type: Boolean,
+            default: false
+        },
+        verifiedAt: {
+            type: Date,
+            default: null
+        }
+    },
 
     // Profile views/visitors
     profileVisitors: [{
@@ -166,6 +210,60 @@ const userSchema = new mongoose.Schema({
         type: Number,
         default: 0
     },
+    lastLevelUpdatedAt: {
+        type: Date,
+        default: Date.now
+    },
+    levelMilestoneTier: {
+        type: String,
+        default: 'default'
+    },
+    levelMilestoneLevel: {
+        type: Number,
+        default: 1
+    },
+    xpStats: {
+        totalAwarded: {
+            type: Number,
+            default: 0
+        },
+        totalAwards: {
+            type: Number,
+            default: 0
+        },
+        roomXp: {
+            type: Number,
+            default: 0
+        },
+        socialXp: {
+            type: Number,
+            default: 0
+        },
+        rewardXp: {
+            type: Number,
+            default: 0
+        },
+        profileXp: {
+            type: Number,
+            default: 0
+        },
+        premiumXp: {
+            type: Number,
+            default: 0
+        },
+        lastAwardedAt: {
+            type: Date,
+            default: null
+        },
+        lastSourceType: {
+            type: String,
+            default: ''
+        },
+        lastAwardAmount: {
+            type: Number,
+            default: 0
+        }
+    },
 
     // Currency
     coins: {
@@ -181,10 +279,84 @@ const userSchema = new mongoose.Schema({
         default: 0
     },
 
+    shopProfile: {
+        equipped: {
+            profileFrameItemId: { type: String, default: '' },
+            profileGlowItemId: { type: String, default: '' },
+            profileBackgroundItemId: { type: String, default: '' },
+            avatarBorderItemId: { type: String, default: '' },
+            nameplateItemId: { type: String, default: '' },
+            levelFrameSkinItemId: { type: String, default: '' },
+            roomCardSkinItemId: { type: String, default: '' },
+            popupCardThemeItemId: { type: String, default: '' },
+            chatBubbleItemId: { type: String, default: '' },
+            messageHighlightItemId: { type: String, default: '' },
+            entryEffectItemId: { type: String, default: '' },
+            micAuraItemId: { type: String, default: '' },
+            speakingGlowItemId: { type: String, default: '' }
+        },
+        activeBoosts: {
+            xpBoostMultiplier: { type: Number, default: 1 },
+            xpBoostItemId: { type: String, default: '' },
+            xpBoostExpiresAt: { type: Date, default: null },
+            profileHighlightItemId: { type: String, default: '' },
+            profileHighlightExpiresAt: { type: Date, default: null },
+            discoverBoostItemId: { type: String, default: '' },
+            discoverBoostExpiresAt: { type: Date, default: null },
+            voiceAuraBoostItemId: { type: String, default: '' },
+            voiceAuraBoostExpiresAt: { type: Date, default: null }
+        },
+        firstShopPurchaseAt: { type: Date, default: null },
+        lastInventoryUpdatedAt: { type: Date, default: null },
+        recentlyViewedItemIds: {
+            type: [String],
+            default: []
+        }
+    },
+
     // VIP
+    vipTier: {
+        type: String,
+        default: '',
+        index: true
+    },
+    vipStatus: {
+        type: String,
+        enum: ['inactive', 'active', 'expired', 'cancelled'],
+        default: 'inactive'
+    },
+    vipStartAt: {
+        type: Date,
+        default: null
+    },
+    vipExpireAt: {
+        type: Date,
+        default: null
+    },
+    vipAutoRenew: {
+        type: Boolean,
+        default: false
+    },
+    vipPlanDuration: {
+        type: String,
+        enum: ['monthly', 'quarterly', 'yearly'],
+        default: 'monthly'
+    },
+    vipPurchaseSource: {
+        type: String,
+        default: ''
+    },
+    monthlyRewardLastClaimedAt: {
+        type: Date,
+        default: null
+    },
+    vipLastUpdatedAt: {
+        type: Date,
+        default: Date.now
+    },
     vipLevel: {
         type: Number,
-        default: 0, // 0 = no VIP, 1-12 = VIP levels
+        default: 0, // 0 = no active VIP, 1-13 = active tier level
         index: true
     },
     vipExpiry: {
@@ -317,6 +489,25 @@ const userSchema = new mongoose.Schema({
             ref: 'Room'
         }
     },
+    permanentRoomId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Room'
+    },
+    hasPermanentRoom: {
+        type: Boolean,
+        default: false
+    },
+    recentRooms: [{
+        roomId: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'Room',
+            required: true
+        },
+        lastVisitedAt: {
+            type: Date,
+            default: Date.now
+        }
+    }],
 
     // Settings
     settings: {
@@ -467,6 +658,7 @@ const userSchema = new mongoose.Schema({
 // Add geospatial index for location
 userSchema.index({ location: '2dsphere' });
 userSchema.index({ uid: 1 }, { unique: true, sparse: true });
+userSchema.index({ permanentRoomId: 1 }, { unique: true, sparse: true });
 
 // Allocate a permanent public UID once for every user.
 userSchema.pre('validate', async function () {
@@ -478,6 +670,8 @@ userSchema.pre('validate', async function () {
 // Update timestamps and Hash password before saving
 userSchema.pre('save', async function () {
     this.updatedAt = Date.now();
+    syncUserLevelState(this);
+    syncVipMembershipState(this);
 
     if (!this.isModified('password')) return;
 
@@ -497,17 +691,10 @@ userSchema.methods.comparePassword = async function (candidatePassword) {
 
 // Method to add XP and handle level up
 userSchema.methods.addXP = async function (amount) {
-    this.xp += amount;
-
-    // Simple leveling logic: level = floor(sqrt(xp / 100)) + 1
-    // or: xpRequired = level * level * 100
-    const newLevel = Math.floor(Math.sqrt(this.xp / 100)) + 1;
-
-    if (newLevel > this.level) {
-        this.level = newLevel;
-        return true; // Level up
-    }
-    return false;
+    const previousLevel = this.level || 1;
+    this.xp = Math.max(0, Number(this.xp || 0) + Math.max(Number(amount || 0), 0));
+    const syncResult = syncUserLevelState(this);
+    return syncResult.newLevel > previousLevel;
 };
 
 userSchema.statics.findByIdOrUid = function (identifier) {
@@ -572,6 +759,8 @@ userSchema.methods.toJSON = function () {
     const user = this.toObject();
     delete user.password;
     delete user.avatarUploadHistory;
+    Object.assign(user, buildLevelFields(user));
+    user.vipMembership = buildVipMembershipSnapshot(user);
     return user;
 };
 

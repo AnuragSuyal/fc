@@ -5,8 +5,12 @@ import '../models/user_model.dart';
 import '../models/message_model.dart';
 import '../services/chat_activity_service.dart';
 import '../services/notification_sound_service.dart';
+import '../services/level_up_celebration_service.dart';
 import '../services/socket_service.dart';
 import '../services/wallet_service.dart';
+import '../models/level_progress_model.dart';
+import '../models/shop_models.dart';
+import '../models/vip_model.dart';
 
 class AuthProvider extends ChangeNotifier {
   UserModel? _user;
@@ -118,22 +122,35 @@ class AuthProvider extends ChangeNotifier {
     _cancelSubs();
     _subs.add(SocketService.balanceStream.listen(_onBalance));
     _subs.add(SocketService.levelUpStream.listen(_onLevelUp));
+    _subs.add(SocketService.profileStream.listen(_onProfile));
     _subs.add(SocketService.friendStream.listen(_onFriend));
     _subs.add(SocketService.dmStream.listen(_onDirectMessage));
   }
 
-  void _onBalance(Map<String, dynamic> d) => updateProfile(
-        coins: _toInt(d['coins']),
-        gems: _toInt(d['gems']),
-        xp: _toInt(d['xp']),
-        level: _toInt(d['level']),
-        vipLevel: _toInt(d['vipLevel']),
-      );
+  void _onBalance(Map<String, dynamic> d) => mergeProfilePatch(d);
 
-  void _onLevelUp(Map<String, dynamic> d) => updateProfile(
-        level: _toInt(d['newLevel']),
-        xp: _toInt(d['xp']),
-      );
+  void _onLevelUp(Map<String, dynamic> d) {
+    LevelUpCelebrationService.showFromPayload(d);
+    mergeProfilePatch({
+      'level': d['newLevel'],
+      'xp': d['xp'],
+      'levelMilestoneTier': d['newTier'],
+      'levelInfo': d['levelInfo'],
+    });
+  }
+
+  void _onProfile(Map<String, dynamic> d) {
+    final payloadUserId =
+        d['userId']?.toString() ?? d['user']?['id']?.toString();
+    if (_user == null || payloadUserId != _user!.id) {
+      return;
+    }
+
+    final rawUser = d['user'];
+    if (rawUser is Map) {
+      mergeProfilePatch(Map<String, dynamic>.from(rawUser));
+    }
+  }
 
   void _onFriend(Map<String, dynamic> d) {
     final type = d['_eventType'] as String? ?? '';
@@ -153,7 +170,8 @@ class AuthProvider extends ChangeNotifier {
       return;
     }
 
-    final message = MessageModel.fromJson(Map<String, dynamic>.from(rawMessage));
+    final message =
+        MessageModel.fromJson(Map<String, dynamic>.from(rawMessage));
     if (message.senderId == currentUserId) {
       return;
     }
@@ -167,7 +185,14 @@ class AuthProvider extends ChangeNotifier {
 
   // ── Profile helpers ─────────────────────────────────────────────────────────
   void updateProfile(
-      {int? coins, int? gems, int? xp, int? level, int? vipLevel}) {
+      {int? coins,
+      int? gems,
+      int? xp,
+      int? level,
+      int? vipLevel,
+      VipMembershipSnapshot? vipMembership,
+      LevelProgressSnapshot? levelInfo,
+      UserShopProfile? shopProfile}) {
     if (_user == null) return;
     final nextUser = _user!.copyWith(
       coins: coins,
@@ -175,6 +200,9 @@ class AuthProvider extends ChangeNotifier {
       xp: xp,
       level: level,
       vipLevel: vipLevel,
+      vipMembership: vipMembership,
+      levelInfo: levelInfo,
+      shopProfile: shopProfile,
     );
     if (_sameUserSnapshot(_user!, nextUser)) return;
     _user = nextUser;
@@ -197,6 +225,8 @@ class AuthProvider extends ChangeNotifier {
     String? coverPhoto,
     String? bio,
     String? region,
+    String? permanentRoomId,
+    bool? hasPermanentRoom,
   }) {
     if (_user == null) return;
 
@@ -207,6 +237,8 @@ class AuthProvider extends ChangeNotifier {
       coverPhoto: coverPhoto,
       bio: bio,
       region: region,
+      permanentRoomId: permanentRoomId,
+      hasPermanentRoom: hasPermanentRoom,
     );
 
     if (_sameUserSnapshot(_user!, nextUser)) return;
@@ -214,11 +246,52 @@ class AuthProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  void mergeProfilePatch(Map<String, dynamic> patch) {
+    if (_user == null || patch.isEmpty) return;
+
+    final base = _user!.toJson();
+    base.addAll(patch);
+    if (patch['status'] is Map) {
+      final mergedStatus = Map<String, dynamic>.from(
+        base['status'] as Map<String, dynamic>? ?? const <String, dynamic>{},
+      )..addAll(Map<String, dynamic>.from(patch['status'] as Map));
+      base['status'] = mergedStatus;
+    }
+
+    final nextUser = UserModel.fromJson(base);
+    if (_sameUserSnapshot(_user!, nextUser)) return;
+    _user = nextUser;
+    notifyListeners();
+  }
+
+  void cachePermanentRoom(String roomId) {
+    if (_user == null) return;
+    final normalizedRoomId = roomId.trim();
+    if (normalizedRoomId.isEmpty) return;
+    if (_user!.permanentRoomId == normalizedRoomId && _user!.hasPermanentRoom) {
+      return;
+    }
+
+    _user = _user!.copyWith(
+      permanentRoomId: normalizedRoomId,
+      hasPermanentRoom: true,
+    );
+    notifyListeners();
+  }
+
   Future<void> refreshBalance() async {
     try {
       final b = await WalletService.getBalance();
       updateProfile(
-          coins: b['coins'], gems: b['gems'], vipLevel: b['vipLevel']);
+        coins: b['coins'],
+        gems: b['gems'],
+        vipLevel: b['vipLevel'],
+        vipMembership: VipMembershipSnapshot.fromJson(
+          b['vipMembership'] is Map
+              ? Map<String, dynamic>.from(b['vipMembership'] as Map)
+              : null,
+        ),
+      );
     } catch (_) {}
   }
 
@@ -313,13 +386,6 @@ class AuthProvider extends ChangeNotifier {
     _subs.clear();
   }
 
-  static int? _toInt(dynamic v) {
-    if (v == null) return null;
-    if (v is int) return v;
-    if (v is num) return v.toInt();
-    return null;
-  }
-
   static bool _sameUserSnapshot(UserModel a, UserModel b) {
     return a.id == b.id &&
         a.uid == b.uid &&
@@ -334,8 +400,20 @@ class AuthProvider extends ChangeNotifier {
         a.coins == b.coins &&
         a.gems == b.gems &&
         a.vipLevel == b.vipLevel &&
+        mapEquals(a.vipMembership.currentTier.featureFlags,
+            b.vipMembership.currentTier.featureFlags) &&
+        a.vipMembership.activeTierId == b.vipMembership.activeTierId &&
+        a.vipMembership.currentTierId == b.vipMembership.currentTierId &&
+        a.vipMembership.status == b.vipMembership.status &&
+        a.vipMembership.autoRenew == b.vipMembership.autoRenew &&
+        a.vipMembership.planDuration == b.vipMembership.planDuration &&
+        a.vipMembership.vipExpireAt == b.vipMembership.vipExpireAt &&
+        mapEquals(a.levelInfo.toJson(), b.levelInfo.toJson()) &&
+        mapEquals(a.shopProfile.toJson(), b.shopProfile.toJson()) &&
         a.isOnline == b.isOnline &&
         a.isGuest == b.isGuest &&
+        a.permanentRoomId == b.permanentRoomId &&
+        a.hasPermanentRoom == b.hasPermanentRoom &&
         a.lastActive == b.lastActive &&
         mapEquals(a.gameStats, b.gameStats) &&
         listEquals(a.badges, b.badges) &&

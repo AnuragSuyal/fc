@@ -1,3 +1,4 @@
+import 'mini_draw_model.dart';
 import 'user_model.dart';
 
 class RoomSettings {
@@ -89,6 +90,7 @@ class Participant {
   final int seatIndex;
   final bool isMuted;
   final bool isSpeaking;
+  final bool isPresent;
   final bool isOnline;
   final int contribution;
   final bool raisedHand;
@@ -104,6 +106,7 @@ class Participant {
     this.seatIndex = -1,
     this.isMuted = false,
     this.isSpeaking = false,
+    this.isPresent = true,
     this.isOnline = false,
     this.contribution = 0,
     this.raisedHand = false,
@@ -127,6 +130,7 @@ class Participant {
       seatIndex: json['seatIndex'] ?? -1,
       isMuted: json['isMuted'] ?? false,
       isSpeaking: json['isSpeaking'] ?? false,
+      isPresent: json['isPresent'] is bool ? json['isPresent'] as bool : true,
       isOnline: user?.isOnline ?? json['isOnline'] == true,
       contribution: json['contribution'] ?? 0,
       raisedHand: json['raisedHand'] ?? false,
@@ -144,6 +148,7 @@ class Participant {
     int? seatIndex,
     bool? isMuted,
     bool? isSpeaking,
+    bool? isPresent,
     bool? isOnline,
     int? contribution,
     bool? raisedHand,
@@ -159,6 +164,7 @@ class Participant {
       seatIndex: seatIndex ?? this.seatIndex,
       isMuted: isMuted ?? this.isMuted,
       isSpeaking: isSpeaking ?? this.isSpeaking,
+      isPresent: isPresent ?? this.isPresent,
       isOnline: isOnline ?? this.isOnline,
       contribution: contribution ?? this.contribution,
       raisedHand: raisedHand ?? this.raisedHand,
@@ -287,15 +293,20 @@ class RoomModel {
   final String roomId;
   final String name;
   final String description;
+  final String topic;
+  final String language;
+  final String roomRules;
   final String type;
   final String mode;
   final String category;
   final List<String> tags;
 
+  final String ownerId;
   final String hostId;
   final String hostName;
   final String hostAvatar;
   final int hostLevel;
+  final bool isPermanent;
 
   final RoomSettings settings;
 
@@ -307,6 +318,11 @@ class RoomModel {
   final List<String> followerIds;
   final List<String> coHostIds;
   final List<String> moderatorIds;
+  final bool hostPresent;
+  final int adminCount;
+  final int activeControllersCount;
+  final bool roomActive;
+  final DateTime? inactiveSince;
 
   final int level;
   final int exp;
@@ -340,20 +356,26 @@ class RoomModel {
   final DateTime? endedAt;
   final Map<String, bool> capabilities;
   final Map<String, dynamic> roomSettingsSnapshot;
+  final MiniDrawSessionSummary miniDraw;
 
   RoomModel({
     required this.id,
     required this.roomId,
     required this.name,
     required this.description,
+    this.topic = '',
+    this.language = 'en',
+    this.roomRules = '',
     required this.type,
     this.mode = 'normal',
     required this.category,
     required this.tags,
+    this.ownerId = '',
     required this.hostId,
     required this.hostName,
     required this.hostAvatar,
     required this.hostLevel,
+    this.isPermanent = false,
     required this.settings,
     required this.participantCount,
     required this.onlineCount,
@@ -363,6 +385,11 @@ class RoomModel {
     required this.followerIds,
     required this.coHostIds,
     required this.moderatorIds,
+    this.hostPresent = false,
+    this.adminCount = 0,
+    this.activeControllersCount = 0,
+    this.roomActive = true,
+    this.inactiveSince,
     required this.level,
     required this.exp,
     required this.expToday,
@@ -392,6 +419,7 @@ class RoomModel {
     this.endedAt,
     this.capabilities = const {},
     this.roomSettingsSnapshot = const {},
+    this.miniDraw = const MiniDrawSessionSummary(),
   });
 
   factory RoomModel.fromJson(Map<String, dynamic> json) {
@@ -426,6 +454,25 @@ class RoomModel {
         ? Map<String, dynamic>.from(
             json['roomSettings'] as Map<String, dynamic>)
         : <String, dynamic>{};
+    final miniDrawSummary = json['miniDraw'] is Map<String, dynamic>
+        ? MiniDrawSessionSummary.fromJson(
+            json['miniDraw'] as Map<String, dynamic>,
+          )
+        : json['miniDraw'] is Map
+            ? MiniDrawSessionSummary.fromJson(
+                Map<String, dynamic>.from(json['miniDraw'] as Map),
+              )
+            : roomSettingsSnapshot['miniDraw'] is Map<String, dynamic>
+                ? MiniDrawSessionSummary.fromJson(
+                    roomSettingsSnapshot['miniDraw'] as Map<String, dynamic>,
+                  )
+                : roomSettingsSnapshot['miniDraw'] is Map
+                    ? MiniDrawSessionSummary.fromJson(
+                        Map<String, dynamic>.from(
+                          roomSettingsSnapshot['miniDraw'] as Map,
+                        ),
+                      )
+                    : const MiniDrawSessionSummary();
     final rawLockedSeats = json['lockedSeats'] is List
         ? (json['lockedSeats'] as List)
             .map((seat) => seat is int ? seat : int.tryParse('$seat'))
@@ -452,12 +499,25 @@ class RoomModel {
         : null;
     final isRallyActive = json['rallyActive'] == true ||
         (rallyExpiresAt != null && rallyExpiresAt.isAfter(DateTime.now()));
+    final controllerState =
+        roomSettingsSnapshot['controllerState'] is Map<String, dynamic>
+            ? Map<String, dynamic>.from(
+                roomSettingsSnapshot['controllerState'] as Map<String, dynamic>,
+              )
+            : <String, dynamic>{};
 
     return RoomModel(
       id: json['_id']?.toString() ?? json['id']?.toString() ?? '',
       roomId: json['roomId']?.toString() ?? '',
       name: json['name']?.toString() ?? 'Unnamed Room',
       description: json['description']?.toString() ?? '',
+      topic: json['topic']?.toString() ?? '',
+      language: json['language']?.toString() ??
+          roomSettingsSnapshot['roomConfig']?['language']?.toString() ??
+          'en',
+      roomRules: json['roomRules']?.toString() ??
+          roomSettingsSnapshot['roomConfig']?['roomRules']?.toString() ??
+          '',
       type: json['type']?.toString() ?? 'voice',
       mode: json['mode']?.toString() ??
           (json['type']?.toString() == 'auction'
@@ -467,10 +527,17 @@ class RoomModel {
                   : 'normal'),
       category: json['category']?.toString() ?? 'all',
       tags: json['tags'] is List ? List<String>.from(json['tags']) : [],
+      ownerId: json['ownerId'] is Map<String, dynamic>
+          ? (json['ownerId']['_id']?.toString() ??
+              json['ownerId']['id']?.toString() ??
+              '')
+          : json['ownerId']?.toString() ?? '',
       hostId: hostUser?.id ?? (hostJson is String ? hostJson : ''),
       hostName: hostUser?.username ?? json['hostName']?.toString() ?? 'Unknown',
       hostAvatar: hostUser?.avatar ?? json['hostAvatar']?.toString() ?? '',
       hostLevel: hostUser?.level ?? json['hostLevel'] ?? 1,
+      isPermanent: json['isPermanent'] == true ||
+          roomSettingsSnapshot['roomConfig']?['isPermanent'] == true,
       settings: RoomSettings.fromJson(settingsMap),
       participantCount: json['participantCount'] ?? participantsList.length,
       onlineCount: json['onlineCount'] ?? 0,
@@ -480,6 +547,32 @@ class RoomModel {
       followerIds: _parseIdList(json['followers']),
       coHostIds: _parseIdList(json['coHosts']),
       moderatorIds: _parseIdList(json['moderators']),
+      hostPresent:
+          json['hostPresent'] == true || controllerState['hostPresent'] == true,
+      adminCount: json['adminCount'] is int
+          ? json['adminCount'] as int
+          : int.tryParse('${json['adminCount']}') ??
+              (controllerState['adminCount'] is int
+                  ? controllerState['adminCount'] as int
+                  : int.tryParse('${controllerState['adminCount']}') ?? 0),
+      activeControllersCount: json['activeControllersCount'] is int
+          ? json['activeControllersCount'] as int
+          : int.tryParse('${json['activeControllersCount']}') ??
+              (controllerState['activeControllersCount'] is int
+                  ? controllerState['activeControllersCount'] as int
+                  : int.tryParse(
+                          '${controllerState['activeControllersCount']}') ??
+                      0),
+      roomActive: json['roomActive'] is bool
+          ? json['roomActive'] as bool
+          : controllerState['roomActive'] is bool
+              ? controllerState['roomActive'] as bool
+              : true,
+      inactiveSince: json['inactiveSince'] != null
+          ? DateTime.tryParse(json['inactiveSince'].toString())
+          : controllerState['inactiveSince'] != null
+              ? DateTime.tryParse(controllerState['inactiveSince'].toString())
+              : null,
       level: json['level'] ?? 1,
       exp: json['exp'] ?? 0,
       expToday: json['expToday'] ?? 0,
@@ -532,21 +625,45 @@ class RoomModel {
           : null,
       capabilities: capabilitiesMap,
       roomSettingsSnapshot: roomSettingsSnapshot,
+      miniDraw: miniDrawSummary,
     );
   }
 
   RoomModel copyWith({
     String? name,
+    String? description,
+    String? topic,
+    String? language,
+    String? roomRules,
     String? type,
     String? mode,
     String? category,
+    List<String>? tags,
+    String? ownerId,
+    String? hostId,
+    String? hostName,
+    String? hostAvatar,
+    int? hostLevel,
+    bool? isPermanent,
     int? onlineCount,
     int? participantCount,
     List<Participant>? participants,
     List<RoomSeatState>? seatStates,
     List<int>? lockedSeats,
     List<String>? followerIds,
+    List<String>? coHostIds,
+    List<String>? moderatorIds,
+    bool? hostPresent,
+    int? adminCount,
+    int? activeControllersCount,
+    bool? roomActive,
+    DateTime? inactiveSince,
+    int? level,
+    int? exp,
+    int? expToday,
+    String? region,
     int? followers,
+    int? totalEarned,
     int? fans,
     String? announcement,
     RoomSettings? settings,
@@ -564,10 +681,14 @@ class RoomModel {
     String? musicUrl,
     String? musicTitle,
     bool? musicLoop,
+    bool? isVipRoom,
     bool? isRallyActive,
     DateTime? rallyExpiresAt,
+    DateTime? createdAt,
+    DateTime? endedAt,
     Map<String, bool>? capabilities,
     Map<String, dynamic>? roomSettingsSnapshot,
+    MiniDrawSessionSummary? miniDraw,
   }) {
     final nextSeatStates = seatStates ?? this.seatStates;
     final nextLockedSeats = lockedSeats ??
@@ -581,15 +702,20 @@ class RoomModel {
       id: id,
       roomId: roomId,
       name: name ?? this.name,
-      description: description,
+      description: description ?? this.description,
+      topic: topic ?? this.topic,
+      language: language ?? this.language,
+      roomRules: roomRules ?? this.roomRules,
       type: type ?? this.type,
       mode: mode ?? this.mode,
       category: category ?? this.category,
-      tags: tags,
-      hostId: hostId,
-      hostName: hostName,
-      hostAvatar: hostAvatar,
-      hostLevel: hostLevel,
+      tags: tags ?? this.tags,
+      ownerId: ownerId ?? this.ownerId,
+      hostId: hostId ?? this.hostId,
+      hostName: hostName ?? this.hostName,
+      hostAvatar: hostAvatar ?? this.hostAvatar,
+      hostLevel: hostLevel ?? this.hostLevel,
+      isPermanent: isPermanent ?? this.isPermanent,
       settings: settings ?? this.settings,
       participantCount: participantCount ?? this.participantCount,
       onlineCount: onlineCount ?? this.onlineCount,
@@ -597,14 +723,20 @@ class RoomModel {
       seatStates: nextSeatStates,
       lockedSeats: nextLockedSeats,
       followerIds: followerIds ?? this.followerIds,
-      coHostIds: coHostIds,
-      moderatorIds: moderatorIds,
-      level: level,
-      exp: exp,
-      expToday: expToday,
-      region: region,
+      coHostIds: coHostIds ?? this.coHostIds,
+      moderatorIds: moderatorIds ?? this.moderatorIds,
+      hostPresent: hostPresent ?? this.hostPresent,
+      adminCount: adminCount ?? this.adminCount,
+      activeControllersCount:
+          activeControllersCount ?? this.activeControllersCount,
+      roomActive: roomActive ?? this.roomActive,
+      inactiveSince: inactiveSince ?? this.inactiveSince,
+      level: level ?? this.level,
+      exp: exp ?? this.exp,
+      expToday: expToday ?? this.expToday,
+      region: region ?? this.region,
       followers: followers ?? this.followers,
-      totalEarned: totalEarned,
+      totalEarned: totalEarned ?? this.totalEarned,
       background: background ?? this.background,
       coverImage: coverImage ?? this.coverImage,
       youtubeUrl: youtubeUrl ?? this.youtubeUrl,
@@ -622,18 +754,28 @@ class RoomModel {
       musicLoop: musicLoop ?? this.musicLoop,
       announcement: announcement ?? this.announcement,
       fans: fans ?? this.fans,
-      isVipRoom: isVipRoom,
+      isVipRoom: isVipRoom ?? this.isVipRoom,
       isRallyActive: isRallyActive ?? this.isRallyActive,
       rallyExpiresAt: rallyExpiresAt ?? this.rallyExpiresAt,
-      createdAt: createdAt,
-      endedAt: endedAt,
+      createdAt: createdAt ?? this.createdAt,
+      endedAt: endedAt ?? this.endedAt,
       capabilities: capabilities ?? this.capabilities,
       roomSettingsSnapshot: roomSettingsSnapshot ?? this.roomSettingsSnapshot,
+      miniDraw: miniDraw ?? this.miniDraw,
     );
   }
 
   bool isUserInRoom(String userId) {
+    return participants.any((p) => p.userId == userId && p.isPresent);
+  }
+
+  bool hasParticipantRecord(String userId) {
     return participants.any((p) => p.userId == userId);
+  }
+
+  bool isOwnedBy(String userId) {
+    final effectiveOwnerId = ownerId.isNotEmpty ? ownerId : hostId;
+    return effectiveOwnerId == userId;
   }
 
   String? getUserRole(String userId) {

@@ -3,12 +3,18 @@ const router = express.Router();
 
 const rc = require('../controllers/roomController');
 const admin = require('../controllers/roomAdminController');
+const dragonPacket = require('../controllers/dragonPacketController');
+const miniDraw = require('../controllers/roomMiniDrawController');
 const mc = require('../controllers/messageController');
 const auth = require('../middleware/auth');
+const idempotency = require('../middleware/idempotency');
+const { dragonPacketLimiter } = require('../middleware/rateLimit');
 const validate = require('../middleware/validate');
 const {
   createRoomSchema,
+  dragonEventActivateSchema,
   inviteRoomFriendSchema,
+  miniDrawSettingsSchema,
   updateRoomSchema,
 } = require('../utils/validation');
 const optionalAuth = require('../middleware/optionalAuth');
@@ -19,7 +25,9 @@ router.get('/categories', optionalAuth, rc.getCategories);
 router.get('/', optionalAuth, rc.getRooms);
 
 // My rooms
+router.get('/my-room', auth, rc.getMyRoom);
 router.get('/my-rooms', auth, rc.getMyRooms);
+router.get('/recent', auth, rc.getRecentRooms);
 router.get('/followed', auth, rc.getFollowedRooms);
 
 // Room details and chat history
@@ -31,6 +39,7 @@ router.get('/:id/youtube-search', auth, rc.searchYoutubeVideos);
 router.get('/:id', optionalAuth, rc.getRoomById);
 
 // CRUD
+router.post('/my-room', auth, validate(updateRoomSchema), rc.createRoom);
 router.post('/', auth, validate(createRoomSchema), rc.createRoom);
 router.put('/:id', auth, validate(updateRoomSchema), rc.updateRoom);
 router.delete('/:id', auth, rc.deleteRoom);
@@ -66,6 +75,36 @@ router.delete('/:id/moderators/:userId', auth, admin.removeModerator);
 router.post('/:id/transfer-ownership/:userId', auth, admin.transferOwnership);
 
 // Room features
+router.get('/:id/draw', auth, miniDraw.getSnapshot);
+router.post(
+  '/:id/draw/unlock',
+  auth,
+  idempotency({ keyPrefix: 'room:draw:unlock' }),
+  miniDraw.unlock,
+);
+router.put(
+  '/:id/draw/settings',
+  auth,
+  validate(miniDrawSettingsSchema),
+  miniDraw.updateSettings,
+);
+router.post('/:id/draw/clear', auth, miniDraw.clear);
+router.post('/:id/draw/undo', auth, miniDraw.undo);
+router.post('/:id/draw/redo', auth, miniDraw.redo);
+router.get('/:id/dragon-events/active', auth, dragonPacket.getActiveEvent);
+router.post(
+  '/:id/dragon-events/activate',
+  auth,
+  dragonPacketLimiter,
+  idempotency({ keyPrefix: 'room:dragon:activate' }),
+  validate(dragonEventActivateSchema),
+  dragonPacket.activate,
+);
+router.get(
+  '/:id/dragon-events/:eventId/result',
+  auth,
+  dragonPacket.getResult,
+);
 router.post('/:id/announcement', auth, admin.setAnnouncement);
 router.post('/:id/follow', auth, admin.followRoom);
 router.delete('/:id/follow', auth, admin.unfollowRoom);

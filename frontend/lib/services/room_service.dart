@@ -2,7 +2,23 @@ import 'package:flutter/foundation.dart';
 import 'api_service.dart';
 import '../models/room_model.dart';
 
+class MyRoomResolution {
+  const MyRoomResolution({
+    required this.room,
+    this.created = false,
+    this.migrated = false,
+    this.archivedLegacyRoomCount = 0,
+  });
+
+  final RoomModel room;
+  final bool created;
+  final bool migrated;
+  final int archivedLegacyRoomCount;
+}
+
 class RoomService {
+  static const String _defaultPermanentRoomName = 'New Room';
+
   static Future<List<RoomModel>> getRooms({
     String? category,
     String? type,
@@ -53,14 +69,141 @@ class RoomService {
     }
   }
 
-  static Future<RoomModel?> getRoomById(String roomId) async {
+  static Future<RoomModel?> getRoomById(
+    String roomId, {
+    bool forceRefresh = false,
+  }) async {
     try {
-      final response = await ApiService.get('/rooms/$roomId');
+      final response = await ApiService.get(
+        '/rooms/$roomId',
+        dedupe: !forceRefresh,
+      );
       return RoomModel.fromJson(response);
     } catch (e) {
       debugPrint('Error getting room: $e');
       return null;
     }
+  }
+
+  static Future<MyRoomResolution?> getMyRoomResolution({
+    bool allocateIfMissing = false,
+  }) async {
+    try {
+      final suffix = allocateIfMissing ? '?allocate=true' : '';
+      final response = await ApiService.get('/rooms/my-room$suffix');
+      final roomJson =
+          response is Map<String, dynamic> ? response['room'] : null;
+      if (roomJson is Map<String, dynamic>) {
+        return MyRoomResolution(
+          room: RoomModel.fromJson(roomJson),
+          created: response['created'] == true,
+          migrated: response['migrated'] == true,
+          archivedLegacyRoomCount: response['archivedLegacyRoomCount'] is int
+              ? response['archivedLegacyRoomCount'] as int
+              : int.tryParse('${response['archivedLegacyRoomCount']}') ?? 0,
+        );
+      }
+      return null;
+    } catch (e) {
+      debugPrint('Error getting my permanent room: $e');
+      return null;
+    }
+  }
+
+  static Future<RoomModel?> getMyRoom({bool allocateIfMissing = false}) async {
+    final resolution =
+        await getMyRoomResolution(allocateIfMissing: allocateIfMissing);
+    return resolution?.room;
+  }
+
+  static Future<MyRoomResolution?> ensureMyRoom({
+    String? name,
+    String? description,
+    String? announcement,
+    String? topic,
+    String? language,
+    String? region,
+    String? roomRules,
+    String type = 'voice',
+    String category = 'all',
+    List<String>? tags,
+    Map<String, dynamic>? settings,
+    Map<String, dynamic>? theme,
+  }) async {
+    final payload = Map<String, dynamic>.from(_pruneNulls({
+      if (name != null) 'name': name,
+      if (description != null) 'description': description,
+      if (announcement != null) 'announcement': announcement,
+      if (topic != null) 'topic': topic,
+      if (language != null) 'language': language,
+      if (region != null) 'region': region,
+      if (roomRules != null) 'roomRules': roomRules,
+      if (name != null || type != 'voice') 'type': type,
+      if (name != null || category != 'all') 'category': category,
+      if (tags != null) 'tags': tags,
+      if (settings != null) 'settings': settings,
+      if (theme != null) 'theme': theme,
+    }) as Map);
+    final normalizedName = (payload['name']?.toString().trim().isNotEmpty ?? false)
+        ? payload['name'].toString().trim()
+        : _defaultPermanentRoomName;
+    payload['name'] = normalizedName;
+
+    try {
+      final response = await ApiService.post(
+        '/rooms/my-room',
+        payload,
+      );
+      final resolution = _parseRoomResolutionResponse(response);
+      if (resolution != null) {
+        return resolution;
+      }
+
+      if (_looksLikeHtmlPayload(response)) {
+        return _ensureMyRoomViaLegacyCreate(payload);
+      }
+      return null;
+    } catch (e) {
+      debugPrint('Error ensuring permanent room: $e');
+      if (_shouldFallbackToLegacyCreate(e)) {
+        try {
+          return await _ensureMyRoomViaLegacyCreate(payload);
+        } catch (legacyError) {
+          debugPrint('Legacy permanent room fallback failed: $legacyError');
+          throw _normalizeMyRoomError(legacyError);
+        }
+      }
+      throw _normalizeMyRoomError(e);
+    }
+  }
+
+  static Future<MyRoomResolution?> resolveMyRoom({
+    String? cachedRoomId,
+  }) async {
+    final normalizedCachedId = cachedRoomId?.trim() ?? '';
+    if (normalizedCachedId.isNotEmpty) {
+      final cachedRoom = await getRoomById(
+        normalizedCachedId,
+        forceRefresh: true,
+      );
+      if (cachedRoom != null) {
+        return MyRoomResolution(room: cachedRoom);
+      }
+    }
+
+    final ensured = await ensureMyRoom(name: _defaultPermanentRoomName);
+    if (ensured != null) {
+      return ensured;
+    }
+
+    final existing = await getMyRoomResolution(allocateIfMissing: false);
+    if (existing != null) {
+      return existing;
+    }
+
+    throw _normalizeMyRoomError(
+      Exception('Could not open your room right now. Please try again.'),
+    );
   }
 
   static Future<List<Map<String, dynamic>>> searchYoutubeVideos(
@@ -89,6 +232,10 @@ class RoomService {
     required String name,
     String? description,
     String? announcement,
+    String? topic,
+    String? language,
+    String? region,
+    String? roomRules,
     String type = 'voice',
     String category = 'all',
     List<String>? tags,
@@ -96,14 +243,18 @@ class RoomService {
     Map<String, dynamic>? theme,
   }) async {
     try {
-      final payload = _pruneNulls({
-        'name': name,
-        'description': description ?? '',
-        'announcement': announcement,
-        'type': type,
-        'category': category,
-        'tags': tags ?? [],
-        'settings': settings ??
+      final ensured = await ensureMyRoom(
+        name: name,
+        description: description,
+        announcement: announcement,
+        topic: topic,
+        language: language,
+        region: region,
+        roomRules: roomRules,
+        type: type,
+        category: category,
+        tags: tags,
+        settings: settings ??
             {
               'maxParticipants': 20,
               'entryFee': 0,
@@ -112,16 +263,11 @@ class RoomService {
               'stageJoinsLocked': false,
               'maxActiveSpeakers': 8,
             },
-        'theme': theme ?? {'background': 'default'},
-      });
-      final response = await ApiService.post(
-        '/rooms',
-        Map<String, dynamic>.from(payload as Map),
+        theme: theme ?? {'background': 'default'},
       );
-
-      return RoomModel.fromJson(response);
+      return ensured?.room;
     } catch (e) {
-      debugPrint('Error creating room: $e');
+      debugPrint('Error creating permanent room: $e');
       rethrow;
     }
   }
@@ -165,6 +311,16 @@ class RoomService {
       return _parseRoomList(response, key: 'rooms');
     } catch (e) {
       debugPrint('Error getting followed rooms: $e');
+      return [];
+    }
+  }
+
+  static Future<List<RoomModel>> getRecentRooms() async {
+    try {
+      final response = await ApiService.get('/rooms/recent');
+      return _parseRoomList(response, key: 'rooms');
+    } catch (e) {
+      debugPrint('Error getting recent rooms: $e');
       return [];
     }
   }
@@ -491,6 +647,84 @@ class RoomService {
     }
 
     return value;
+  }
+
+  static MyRoomResolution? _parseRoomResolutionResponse(dynamic response) {
+    if (response is Map<String, dynamic>) {
+      final nestedRoomJson = response['room'];
+      if (nestedRoomJson is Map<String, dynamic>) {
+        return MyRoomResolution(
+          room: RoomModel.fromJson(nestedRoomJson),
+          created: response['created'] == true,
+          migrated: response['migrated'] == true,
+          archivedLegacyRoomCount: response['archivedLegacyRoomCount'] is int
+              ? response['archivedLegacyRoomCount'] as int
+              : int.tryParse('${response['archivedLegacyRoomCount']}') ?? 0,
+        );
+      }
+
+      if (_looksLikeRoomPayload(response)) {
+        return MyRoomResolution(
+          room: RoomModel.fromJson(response),
+          created: response['created'] == true,
+          migrated: response['migrated'] == true,
+          archivedLegacyRoomCount: response['archivedLegacyRoomCount'] is int
+              ? response['archivedLegacyRoomCount'] as int
+              : int.tryParse('${response['archivedLegacyRoomCount']}') ?? 0,
+        );
+      }
+    }
+    return null;
+  }
+
+  static bool _looksLikeHtmlPayload(dynamic response) {
+    if (response is! String) {
+      return false;
+    }
+    final normalized = response.trimLeft().toLowerCase();
+    return normalized.startsWith('<!doctype') || normalized.startsWith('<html');
+  }
+
+  static bool _looksLikeRoomPayload(Map<String, dynamic> payload) {
+    return (payload['_id'] ?? payload['id']) != null &&
+        (payload['name'] != null ||
+            payload['hostId'] != null ||
+            payload['participants'] != null);
+  }
+
+  static bool _shouldFallbackToLegacyCreate(Object error) {
+    final normalized = error.toString().toLowerCase();
+    return normalized.contains('unexpected token \'<\'') ||
+        normalized.contains('<!doctype') ||
+        normalized.contains('<html') ||
+        normalized.contains('server error: 404') ||
+        normalized.contains('server error: 405') ||
+        normalized.contains('server error: 500');
+  }
+
+  static Exception _normalizeMyRoomError(Object error) {
+    final normalized = error.toString().toLowerCase();
+    if (normalized.contains('unexpected token \'<\'') ||
+        normalized.contains('<!doctype') ||
+        normalized.contains('<html')) {
+      return Exception('Could not open your room right now. Please try again.');
+    }
+    return error is Exception
+        ? error
+        : Exception('Could not open your room right now. Please try again.');
+  }
+
+  static Future<MyRoomResolution?> _ensureMyRoomViaLegacyCreate(
+    Map<String, dynamic> payload,
+  ) async {
+    final legacyPayload = Map<String, dynamic>.from(payload);
+    legacyPayload['name'] = (legacyPayload['name']?.toString().trim().isNotEmpty ??
+            false)
+        ? legacyPayload['name'].toString().trim()
+        : _defaultPermanentRoomName;
+
+    final response = await ApiService.post('/rooms', legacyPayload);
+    return _parseRoomResolutionResponse(response);
   }
 
   static Future<List<RoomModel>> _parseRoomList(

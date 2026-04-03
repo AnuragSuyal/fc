@@ -173,13 +173,36 @@ app.set('redis', redisClient);
 const rankingService = require('./src/services/rankingService');
 const economyController = require('./src/controllers/economyController');
 const registerColorClashSocket = require('./src/socket/colorClashSocket');
+const registerDragonPacketSocket = require('./src/socket/dragonPacketSocket');
 const {
     ROOM_ACTIONS,
     canPerformRoomAction,
     isRoomOwner
 } = require('./src/services/roomPermissionService');
 const { findGiftByIdentifier, syncGiftCatalog } = require('./src/services/giftCatalogService');
-const { emitRoomUpdate } = require('./src/services/roomSettingsService');
+const {
+    ROOM_UPDATE_EVENTS,
+    emitRoomUpdate
+} = require('./src/services/roomSettingsService');
+const {
+    markParticipantPresence,
+    recalculateRoomPresenceState
+} = require('./src/services/roomPresenceService');
+const {
+    appendPendingStroke,
+    beginPendingStroke,
+    buildMiniDrawSummary,
+    clearPendingStrokesForSocket,
+    commitPendingStroke
+} = require('./src/services/miniDrawService');
+const {
+    awardUserXp,
+    buildProgressPayload,
+    emitLevelDrivenRealtime
+} = require('./src/services/levelProgressionService');
+const {
+    initializeDragonPacketRuntime
+} = require('./src/services/dragonPacketService');
 rankingService.initialize({ redisClient }).catch(console.error);
 
 // ── Security headers ────────────────────────────────────────────────────────────
@@ -244,6 +267,10 @@ const rankingRoutes  = require('./src/routes/rankingRoutes');
 const uploadRoutes   = require('./src/routes/uploadRoutes');
 const userRoutes     = require('./src/routes/userRoutes');
 const colorClashRoutes = require('./src/routes/colorClashRoutes');
+const shopRoutes     = require('./src/routes/shopRoutes');
+const coinTransferRoutes = require('./src/routes/coinTransferRoutes');
+const dragonPacketRoutes = require('./src/routes/dragonPacketRoutes');
+const dragonEventRoutes = require('./src/routes/dragonEventRoutes');
 // const livekitRoutes  = require('./src/routes/livekitRoutes');
 // const webhookRoutes  = require('./src/routes/webhookRoutes');
 
@@ -264,6 +291,10 @@ app.use('/api/profile',   profileRoutes);
 app.use('/api/rankings',  rankingRoutes);
 app.use('/api/uploads',   uploadRoutes);
 app.use('/api/users',     userRoutes);
+app.use('/api/shop',      shopRoutes);
+app.use('/api/coin-transfer', coinTransferRoutes);
+app.use('/api/dragon-packets', dragonPacketRoutes);
+app.use('/api/dragon-events', dragonEventRoutes);
 app.use('/api/color-clash', colorClashRoutes);
 // app.use('/api/livekit',   livekitRoutes);
 // app.use('/webhooks',      webhookRoutes);
@@ -316,6 +347,7 @@ Promise.all([pubClient.connect(), subClient.connect()])
     .catch(err => console.error('Socket.IO Redis adapter error (continuing without):', err.message));
 
 app.set('io', io);
+initializeDragonPacketRuntime({ io, redis: redisClient });
 
 // ── Socket.IO auth middleware ───────────────────────────────────────────────────
 io.use(async (socket, next) => {
@@ -349,6 +381,94 @@ function broadcastToFriends(socket, event, extraData = {}) {
 }
 
 const activeSocketIdsByUserId = new Map();
+const roomCacheKey = (roomId) => `cache:room:${roomId}`;
+const STREAM_ROOM_TYPE = 'video';
+const STREAM_HOST_SEAT_INDEX = 1;
+
+const invalidateRoomCache = async (roomId) => {
+    if (!roomId || !redisClient.isReady) return;
+    await redisClient.del(roomCacheKey(roomId.toString())).catch(() => {});
+};
+
+const syncStreamHostSeat = (room) => {
+    if (!room || room.type !== STREAM_ROOM_TYPE) return;
+    const hostId = room.hostId?.toString();
+    if (!hostId) return;
+
+    let hostParticipant = null;
+    room.participants = (room.participants || []).map((participant) => {
+        if (participant.userId?.toString() === hostId && participant.isPresent !== false) {
+            participant.seatIndex = STREAM_HOST_SEAT_INDEX;
+            participant.role = 'host';
+            hostParticipant = participant;
+            return participant;
+        }
+
+        if (participant.seatIndex === STREAM_HOST_SEAT_INDEX) {
+            participant.seatIndex = -1;
+            participant.isSpeaking = false;
+            participant.raisedHand = false;
+            if (participant.role === 'speaker') {
+                participant.role = 'listener';
+            }
+        }
+
+        return participant;
+    });
+
+    if (!hostParticipant) {
+        return;
+    }
+};
+
+const syncSocketRoomParticipantPresence = async ({
+    roomId,
+    userId,
+    present,
+    lobbyAction
+}) => {
+    if (!roomId || !userId) return null;
+
+    try {
+        const Room = require('./src/models/Room');
+        const room = await Room.findById(roomId);
+        if (!room) return null;
+
+        const participant = room.participants?.find(
+            (entry) => entry.userId?.toString() === userId.toString()
+        );
+        if (!participant) return null;
+
+        if ((participant.isPresent !== false) === present) {
+            return room;
+        }
+
+        markParticipantPresence(room, userId, { present });
+        recalculateRoomPresenceState(room);
+        syncStreamHostSeat(room);
+        await room.save();
+        await invalidateRoomCache(room._id);
+
+        emitRoomUpdate(io, room, {
+            updateEvent: ROOM_UPDATE_EVENTS.ROLES,
+            lobbyAction,
+            extraPayload: {
+                userId,
+                present,
+                hostPresent: room.hostPresent === true,
+                adminCount: Number(room.adminCount || 0),
+                activeControllersCount: Number(room.activeControllersCount || 0),
+                roomActive: room.roomActive !== false,
+                inactiveSince: room.inactiveSince || null
+            }
+        });
+
+        return room;
+    } catch (error) {
+        console.error('syncSocketRoomParticipantPresence error:', error.message);
+        return null;
+    }
+};
 
 // ── Socket.IO connection ────────────────────────────────────────────────────────
 io.on('connection', (socket) => {
@@ -371,6 +491,12 @@ io.on('connection', (socket) => {
         io,
         socket,
         redis: redisClient
+    });
+    registerDragonPacketSocket({
+        io,
+        socket,
+        redis: redisClient,
+        isActiveRoomParticipant
     });
 
     // Mark online
@@ -409,6 +535,12 @@ io.on('connection', (socket) => {
         socket.currentRoomId = roomId;
         socket.joinedRoomIds.add(roomId);
         socket.activePresenceRoomIds.add(roomId);
+        await syncSocketRoomParticipantPresence({
+            roomId,
+            userId: socket.userId,
+            present: true,
+            lobbyAction: 'participant_joined'
+        });
         io.to(`room:${roomId}`).emit('user_joined', {
             roomId,
             userId: socket.userId,
@@ -435,6 +567,12 @@ io.on('connection', (socket) => {
         questHeartbeatByRoom.delete(roomId);
         if (socket.currentRoomId === roomId) socket.currentRoomId = null;
         if (!hadPresence) return;
+        void syncSocketRoomParticipantPresence({
+            roomId,
+            userId: socket.userId,
+            present: false,
+            lobbyAction: 'participant_left'
+        });
         io.to(`room:${roomId}`).emit('user_left', { roomId, userId: socket.userId });
         if (redisClient.isReady) {
             const key = `room:${roomId}:users`;
@@ -607,6 +745,129 @@ io.on('connection', (socket) => {
         }
     });
 
+    socket.on('room:draw:stroke_begin', async ({
+        roomId,
+        strokeId,
+        sessionId,
+        toolType,
+        colorValue,
+        thickness,
+        points
+    } = {}) => {
+        if (!roomId || !strokeId) return;
+        if (!isActiveRoomParticipant(roomId)) return;
+
+        try {
+            const Room = require('./src/models/Room');
+            const room = await Room.findById(roomId)
+                .select('participants hostId ownerId coHosts moderators roomActive miniDraw');
+            if (!room) return;
+            if (sessionId && room.miniDraw?.sessionId && room.miniDraw.sessionId !== sessionId) {
+                socket.emit('room:draw:error', {
+                    roomId,
+                    code: 'MINI_DRAW_SESSION_STALE',
+                    message: 'Mini Draw session changed. Please resync the board.',
+                    summary: buildMiniDrawSummary(room, socket.userId)
+                });
+                return;
+            }
+
+            const payload = beginPendingStroke({
+                room,
+                socketId: socket.id,
+                userId: socket.userId,
+                strokeId,
+                toolType,
+                colorValue,
+                thickness,
+                points
+            });
+
+            socket.to(`room:${roomId}`).emit('room:draw:progress', payload);
+        } catch (err) {
+            socket.emit('room:draw:error', {
+                roomId,
+                code: err.code || 'MINI_DRAW_BEGIN_FAILED',
+                message: err.message || 'Could not start that stroke'
+            });
+        }
+    });
+
+    socket.on('room:draw:stroke_chunk', async ({
+        roomId,
+        strokeId,
+        sessionId,
+        points
+    } = {}) => {
+        if (!roomId || !strokeId) return;
+        if (!isActiveRoomParticipant(roomId)) return;
+
+        try {
+            const payload = appendPendingStroke({
+                roomId,
+                userId: socket.userId,
+                strokeId,
+                sessionId,
+                points
+            });
+            if (!payload) return;
+
+            socket.to(`room:${roomId}`).emit('room:draw:progress', payload);
+        } catch (err) {
+            socket.emit('room:draw:error', {
+                roomId,
+                code: err.code || 'MINI_DRAW_PROGRESS_FAILED',
+                message: err.message || 'Could not update that stroke'
+            });
+        }
+    });
+
+    socket.on('room:draw:stroke_end', async ({
+        roomId,
+        strokeId,
+        sessionId,
+        points
+    } = {}) => {
+        if (!roomId || !strokeId) return;
+        if (!isActiveRoomParticipant(roomId)) return;
+
+        try {
+            const Room = require('./src/models/Room');
+            const room = await Room.findById(roomId)
+                .select('participants hostId ownerId coHosts moderators roomActive miniDraw');
+            if (!room) return;
+            if (sessionId && room.miniDraw?.sessionId && room.miniDraw.sessionId !== sessionId) {
+                socket.emit('room:draw:error', {
+                    roomId,
+                    code: 'MINI_DRAW_SESSION_STALE',
+                    message: 'Mini Draw session changed. Please resync the board.',
+                    summary: buildMiniDrawSummary(room, socket.userId)
+                });
+                return;
+            }
+
+            const result = await commitPendingStroke({
+                room,
+                userId: socket.userId,
+                strokeId,
+                points
+            });
+
+            io.to(`room:${roomId}`).emit('room:draw:commit', {
+                roomId,
+                sessionId: result.summary.sessionId,
+                stroke: result.stroke,
+                summary: buildMiniDrawSummary(room, null)
+            });
+        } catch (err) {
+            socket.emit('room:draw:error', {
+                roomId,
+                code: err.code || 'MINI_DRAW_COMMIT_FAILED',
+                message: err.message || 'Could not finish that stroke'
+            });
+        }
+    });
+
     // ── XP heartbeat ──────────────────────────────────────────────────────────
     socket.on('room:heartbeat', async ({ roomId } = {}) => {
         if (!roomId || !socket.userId) return;
@@ -615,17 +876,33 @@ io.on('connection', (socket) => {
             const User = require('./src/models/User');
             const user = await User.findById(socket.userId);
             if (!user) return;
-            const leveledUp = await user.addXP(2);
-            await user.save();
+            const heartbeatProgress = await awardUserXp({
+                user,
+                amount: 2,
+                sourceType: 'room_heartbeat',
+                sourceReferenceId: roomId.toString(),
+                sourceReferenceType: 'room',
+                redis: redisClient,
+                metadata: {
+                    roomId: roomId.toString()
+                }
+            });
+            const progressedUser = heartbeatProgress?.user || user;
             const now = Date.now();
             const lastQuestTick = questHeartbeatByRoom.get(roomId) || 0;
             if (now - lastQuestTick >= 55000) {
                 questHeartbeatByRoom.set(roomId, now);
                 economyController._progressQuest(redisClient, socket.userId, 'room_heartbeat', 1).catch(() => {});
             }
-            if (leveledUp) io.to(`user:${socket.userId}`).emit('level_up', { newLevel: user.level, xp: user.xp });
-            io.to(`user:${socket.userId}`).emit('balance_update', {
-                coins: user.coins, gems: user.gems, xp: user.xp, level: user.level
+            io.to(`user:${socket.userId}`).emit(
+                'balance_update',
+                buildProgressPayload(progressedUser, {
+                    xpGained: heartbeatProgress?.xpGained || 0,
+                    source: 'room_heartbeat'
+                })
+            );
+            await emitLevelDrivenRealtime(io, progressedUser, heartbeatProgress, {
+                source: 'room_heartbeat'
             });
         } catch (err) { console.error('room:heartbeat error:', err.message); }
     });
@@ -807,6 +1084,7 @@ io.on('connection', (socket) => {
     // ── Disconnect ────────────────────────────────────────────────────────────
     socket.on('disconnect', async () => {
         console.log('🔌 User disconnected:', socket.userId);
+        clearPendingStrokesForSocket(socket.id);
         const activeSockets = activeSocketIdsByUserId.get(resolvedUserId);
         let isLastActiveSocket = true;
         if (activeSockets) {
@@ -839,51 +1117,17 @@ io.on('connection', (socket) => {
             }
         } catch (err) { console.error('disconnect user update error:', err.message); }
 
-        if (socket.currentRoomId && socket.activePresenceRoomIds.has(socket.currentRoomId)) {
-            io.to(`room:${socket.currentRoomId}`).emit('user_left', {
-                roomId: socket.currentRoomId,
+        for (const roomId of socket.activePresenceRoomIds) {
+            io.to(`room:${roomId}`).emit('user_left', {
+                roomId,
                 userId: socket.userId
             });
-            try {
-                const Room = require('./src/models/Room');
-                const room = await Room.findById(socket.currentRoomId);
-                if (room) {
-                    const p = room.participants.find(x => x.userId.toString() === socket.userId);
-                    const disconnectedHost = room.hostId?.toString() === socket.userId.toString();
-                    if (p && p.seatIndex !== -1) {
-                        p.seatIndex = -1;
-                        if (p.role === 'speaker') p.role = 'listener';
-                    }
-                    if (disconnectedHost) {
-                        if (p) {
-                            p.role = 'listener';
-                        }
-                        const nextHost = room.participants.find((entry) =>
-                            entry.userId.toString() !== socket.userId.toString() &&
-                            room.coHosts?.some((id) => id.toString() === entry.userId.toString())
-                        ) || room.participants.find((entry) =>
-                            entry.userId.toString() !== socket.userId.toString() &&
-                            room.moderators?.some((id) => id.toString() === entry.userId.toString())
-                        ) || room.participants.find((entry) => entry.userId.toString() !== socket.userId.toString());
-                        if (nextHost) {
-                            room.hostId = nextHost.userId;
-                            nextHost.role = 'host';
-                        }
-                    }
-                    await room.save();
-                    emitRoomUpdate(io, room, {
-                        updateEvent: 'room:update_roles',
-                        lobbyAction: disconnectedHost ? 'ownership_transferred' : 'seat_updated',
-                        extraPayload: { userId: socket.userId, disconnected: true }
-                    });
-                    if (disconnectedHost && room.hostId?.toString() !== socket.userId.toString()) {
-                        io.to(`room:${room._id}`).emit('host_transferred', {
-                            roomId: room._id.toString(),
-                            newHostId: room.hostId.toString()
-                        });
-                    }
-                }
-            } catch (err) { console.error('disconnect seat-free error:', err.message); }
+            await syncSocketRoomParticipantPresence({
+                roomId,
+                userId: socket.userId,
+                present: false,
+                lobbyAction: 'participant_left'
+            });
         }
     });
 });

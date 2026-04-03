@@ -205,7 +205,8 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
 
     final amountCoins = t['amount']['coins'] as num? ?? 0;
     final amountGems = t['amount']['gems'] as num? ?? 0;
-    final isPositive = amountCoins > 0 || amountGems > 0;
+    final amountRealMoney = t['amount']['realMoney'] as num? ?? 0;
+    final isPositive = amountCoins > 0 || amountGems > 0 || amountRealMoney > 0;
 
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
@@ -274,6 +275,27 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
                   ),
                 ),
               ),
+            if (amountRealMoney != 0)
+              Padding(
+                padding: const EdgeInsets.only(left: 4),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 4,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.orange.shade50,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Text(
+                    '${amountRealMoney > 0 ? '+' : '-'}₹${amountRealMoney.abs()}',
+                    style: TextStyle(
+                      color: Colors.orange.shade800,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+              ),
           ],
         ),
       ),
@@ -291,6 +313,13 @@ class _TransactionsScreenState extends State<TransactionsScreen> {
         return Icons.card_giftcard;
       case 'daily_bonus':
         return Icons.calendar_today;
+      case 'coin_transfer_sent':
+        return Icons.north_east_rounded;
+      case 'coin_transfer_received':
+        return Icons.south_west_rounded;
+      case 'coin_transfer_unlock_purchase':
+      case 'coin_transfer_unlock_refund':
+        return Icons.workspace_premium_rounded;
       case 'quest_reward':
         return Icons.assignment_turned_in;
       case 'vip_purchase':

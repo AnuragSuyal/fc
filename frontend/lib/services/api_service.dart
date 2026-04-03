@@ -16,12 +16,15 @@ class ApiService {
   static Future<dynamic> get(
     String endpoint, {
     Map<String, String>? headers,
+    bool dedupe = true,
   }) async {
     final token = await AuthService.getToken();
     final requestKey = '$endpoint::${token ?? ''}';
-    final existing = _pendingGets[requestKey];
-    if (existing != null) {
-      return existing;
+    if (dedupe) {
+      final existing = _pendingGets[requestKey];
+      if (existing != null) {
+        return existing;
+      }
     }
 
     final future = _performRequest(
@@ -38,12 +41,14 @@ class ApiService {
             .timeout(_timeout);
       },
     );
-    _pendingGets[requestKey] = future;
+    if (dedupe) {
+      _pendingGets[requestKey] = future;
+    }
 
     try {
       return await future;
     } finally {
-      if (identical(_pendingGets[requestKey], future)) {
+      if (dedupe && identical(_pendingGets[requestKey], future)) {
         _pendingGets.remove(requestKey);
       }
     }
@@ -209,6 +214,10 @@ class ApiService {
       } catch (_) {
         return response.body;
       }
+    }
+    final responseBody = response.body.trimLeft();
+    if (responseBody.startsWith('<!DOCTYPE') || responseBody.startsWith('<html')) {
+      throw Exception('Server error: ${response.statusCode}');
     }
     try {
       final body = json.decode(response.body);

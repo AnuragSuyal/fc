@@ -5,8 +5,11 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../../models/post_model.dart';
+import '../../models/level_progress_model.dart';
+import '../../models/shop_models.dart';
 import '../../models/stats_model.dart';
 import '../../models/user_model.dart';
+import '../../models/vip_model.dart';
 import '../../providers/auth_provider.dart';
 import '../../services/api_service.dart';
 import '../../services/economy_service.dart';
@@ -18,7 +21,10 @@ import '../../services/socket_service.dart';
 import '../../theme/app_theme.dart';
 import '../../utils/constants.dart';
 import '../../widgets/post_card.dart';
+import '../../widgets/level_badge.dart';
 import '../../widgets/user_avatar.dart';
+import '../../widgets/vip/vip_badge.dart';
+import '../../widgets/vip/vip_name_text.dart';
 import '../messages/chat_screen.dart';
 
 class EnhancedProfileScreen extends StatefulWidget {
@@ -230,29 +236,7 @@ class _EnhancedProfileScreenState extends State<EnhancedProfileScreen>
     final currentUser = _user;
     if (currentUser == null) return;
 
-    final base = <String, dynamic>{
-      '_id': currentUser.id,
-      'id': currentUser.id,
-      'uid': currentUser.uid,
-      'username': currentUser.username,
-      'email': currentUser.email,
-      'avatar': currentUser.avatar,
-      'coverPhoto': currentUser.coverPhoto,
-      'bio': currentUser.bio,
-      'region': currentUser.region,
-      'level': currentUser.level,
-      'xp': currentUser.xp,
-      'coins': currentUser.coins,
-      'gems': currentUser.gems,
-      'vipLevel': currentUser.vipLevel,
-      'status': {
-        'isOnline': currentUser.isOnline,
-        'lastActive': currentUser.lastActive?.toIso8601String(),
-      },
-      'gameStats': currentUser.gameStats,
-      'badges': currentUser.badges,
-      'stats': currentUser.stats,
-    };
+    final base = currentUser.toJson();
 
     if (incoming['status'] is Map) {
       final status = Map<String, dynamic>.from(
@@ -384,8 +368,7 @@ class _EnhancedProfileScreenState extends State<EnhancedProfileScreen>
     if (index == -1) return;
 
     _safeSetState(() {
-      _posts = List<PostModel>.from(_posts)
-        ..[index] = updatedPost;
+      _posts = List<PostModel>.from(_posts)..[index] = updatedPost;
     });
   }
 
@@ -400,7 +383,8 @@ class _EnhancedProfileScreenState extends State<EnhancedProfileScreen>
     }
 
     _safeSetState(() {
-      _posts = _posts.where((item) => item.id != post.id).toList(growable: false);
+      _posts =
+          _posts.where((item) => item.id != post.id).toList(growable: false);
     });
   }
 
@@ -616,6 +600,9 @@ class _EnhancedProfileScreenState extends State<EnhancedProfileScreen>
         : user.level;
     final xp =
         _isOwner ? (authUser?.xp ?? _economyStats?.xp ?? user.xp) : user.xp;
+    final levelInfo = _isOwner
+        ? (authUser?.levelInfo ?? _economyStats?.levelInfo ?? user.levelInfo)
+        : user.levelInfo;
     final coins = _isOwner
         ? (authUser?.coins ?? _economyStats?.coins ?? user.coins)
         : user.coins;
@@ -625,9 +612,12 @@ class _EnhancedProfileScreenState extends State<EnhancedProfileScreen>
     final vipLevel = _isOwner
         ? (authUser?.vipLevel ?? _economyStats?.vipLevel ?? user.vipLevel)
         : user.vipLevel;
-    final nextLevelXp = _economyStats?.nextLevelXp ?? (level * 1000);
-    final xpProgress =
-        nextLevelXp > 0 ? (xp / nextLevelXp).clamp(0.0, 1.0) : 0.0;
+    final shopProfile = _isOwner
+        ? (authUser?.shopProfile ?? user.shopProfile)
+        : user.shopProfile;
+    final nextLevelXp =
+        levelInfo.nextLevelXp ?? _economyStats?.nextLevelXp ?? 0;
+    final xpProgress = levelInfo.progress;
 
     return Scaffold(
       body: Container(
@@ -657,9 +647,14 @@ class _EnhancedProfileScreenState extends State<EnhancedProfileScreen>
                             region: region,
                             level: level,
                             xp: xp,
+                            levelInfo: levelInfo,
                             xpProgress: xpProgress,
                             nextLevelXp: nextLevelXp,
                             vipLevel: vipLevel,
+                            vipMembership: _isOwner
+                                ? (authUser?.vipMembership ?? user.vipMembership)
+                                : user.vipMembership,
+                            shopProfile: shopProfile,
                             coins: coins,
                             gems: gems,
                           ),
@@ -800,9 +795,12 @@ class _EnhancedProfileScreenState extends State<EnhancedProfileScreen>
     required String region,
     required int level,
     required int xp,
+    required LevelProgressSnapshot levelInfo,
     required double xpProgress,
     required int nextLevelXp,
     required int vipLevel,
+    required VipMembershipSnapshot vipMembership,
+    required UserShopProfile shopProfile,
     required int coins,
     required int gems,
   }) {
@@ -870,22 +868,32 @@ class _EnhancedProfileScreenState extends State<EnhancedProfileScreen>
                   username: username,
                   radius: 38,
                   fontSize: 28,
+                  shopProfile: shopProfile,
+                  vipMembership: vipMembership,
+                  vipLevel: vipLevel,
                 ),
                 const SizedBox(width: 16),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(
+                      VipNameText(
                         username,
+                        membership: vipMembership,
+                        fallbackVipLevel: vipLevel,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
-                          color: Colors.white,
                           fontSize: 26,
                           fontWeight: FontWeight.w800,
                           letterSpacing: -0.6,
                         ),
+                      ),
+                      const SizedBox(height: 10),
+                      LevelBadge(
+                        level: level,
+                        levelInfo: levelInfo,
+                        size: LevelBadgeSize.large,
                       ),
                       const SizedBox(height: 8),
                       Wrap(
@@ -919,9 +927,20 @@ class _EnhancedProfileScreenState extends State<EnhancedProfileScreen>
                             label: 'XP $xp',
                           ),
                           if (vipLevel > 0)
-                            _HeroChip(
-                              icon: Icons.workspace_premium_rounded,
-                              label: 'VIP $vipLevel',
+                            Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                VipBadge(
+                                  membership: vipMembership,
+                                  fallbackVipLevel: vipLevel,
+                                  size: VipBadgeSize.medium,
+                                ),
+                                const SizedBox(width: 6),
+                                _HeroChip(
+                                  icon: Icons.workspace_premium_rounded,
+                                  label: vipMembership.currentTier.displayName,
+                                ),
+                              ],
                             ),
                         ],
                       ),
@@ -966,7 +985,9 @@ class _EnhancedProfileScreenState extends State<EnhancedProfileScreen>
                 ),
                 const Spacer(),
                 Text(
-                  'Next level $nextLevelXp',
+                  nextLevelXp > 0
+                      ? '${levelInfo.xpToNextLevel} XP to next level'
+                      : 'Max level reached',
                   style: TextStyle(
                     color: Colors.white.withValues(alpha: 0.78),
                     fontSize: 12,

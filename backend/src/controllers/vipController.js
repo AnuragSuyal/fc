@@ -1,314 +1,616 @@
-const User        = require('../models/User');
+const mongoose = require('mongoose');
+
 const Transaction = require('../models/Transaction');
-const { awardSpendXp, buildProgressPayload } = require('../services/spendXpService');
+const User = require('../models/User');
+const VipEntitlementHistory = require('../models/VipEntitlementHistory');
+const { awardSpendXp } = require('../services/spendXpService');
+const {
+    buildProgressPayload,
+    buildRealtimeIdentityPayload,
+    emitLevelDrivenRealtime
+} = require('../services/levelProgressionService');
+const {
+    buildVipCatalog,
+    buildVipMembershipSnapshot,
+    calculateVipUpgradeCredit,
+    getVipPlanConfig,
+    getVipTierConfig,
+    normalizeVipTierId,
+    resolveMonthlyRewardState,
+    serializeVipTier,
+    syncVipMembershipState
+} = require('../services/vipMembershipService');
+const {
+    VIP_TIER_ORDER,
+    VIP_TIER_BY_ID
+} = require('../config/vipMembershipConfig');
 
-// Full VIP tier definition
-const VIP_TIERS = [
-    {
-        level: 1, name: 'VIP I', price: 499, annualPrice: 4990,
-        coinBonus: 5, dailyCoins: 100, color: '#A0AEC0',
-        benefits: [
-            { id: 'daily_coins',  name: 'Daily Coins',      description: '+100 bonus coins per day' },
-            { id: 'chat_colors',  name: 'Chat Colors',      description: 'Unlock colored chat text' },
-            { id: 'vip_badge',    name: 'VIP Badge',        description: 'Display VIP badge on profile' }
-        ]
-    },
-    {
-        level: 2, name: 'VIP II', price: 499, annualPrice: 4990,
-        coinBonus: 8, dailyCoins: 150, color: '#68D391',
-        benefits: [
-            { id: 'daily_coins',  name: 'Daily Coins',      description: '+150 bonus coins per day' },
-            { id: 'chat_colors',  name: 'Chat Colors',      description: 'More chat color options' },
-            { id: 'vip_frame',    name: 'VIP Avatar Frame', description: 'Exclusive avatar border' }
-        ]
-    },
-    {
-        level: 3, name: 'VIP III', price: 499, annualPrice: 4990,
-        coinBonus: 10, dailyCoins: 200, color: '#63B3ED',
-        benefits: [
-            { id: 'daily_coins',  name: 'Daily Coins',      description: '+200 bonus coins per day' },
-            { id: 'mic_priority', name: 'Mic Priority',     description: 'Priority speaker seat access' },
-            { id: 'gift_bonus',   name: 'Gift Bonus',       description: '10% extra coins on gifts received' }
-        ]
-    },
-    {
-        level: 4, name: 'VIP IV', price: 499, annualPrice: 4990,
-        coinBonus: 12, dailyCoins: 250, color: '#B794F4',
-        benefits: [
-            { id: 'daily_coins',  name: 'Daily Coins',      description: '+250 bonus coins per day' },
-            { id: 'room_theme',   name: 'Room Themes',      description: 'Unlock exclusive room backgrounds' },
-            { id: 'profile_visit_alert', name: 'Visitor Alerts', description: 'See who visited your profile' }
-        ]
-    },
-    {
-        level: 5, name: 'VIP V', price: 999, annualPrice: 9990,
-        coinBonus: 15, dailyCoins: 350, color: '#F6AD55',
-        benefits: [
-            { id: 'daily_coins',  name: 'Daily Coins',      description: '+350 bonus coins per day' },
-            { id: 'super_gift',   name: 'Super Gifts',      description: 'Unlock luxury gift catalog' },
-            { id: 'custom_enter', name: 'Custom Entrance',  description: 'Animated room entrance effect' }
-        ]
-    },
-    {
-        level: 6, name: 'VIP VI', price: 999, annualPrice: 9990,
-        coinBonus: 18, dailyCoins: 450, color: '#FC8181',
-        benefits: [
-            { id: 'daily_coins',  name: 'Daily Coins',      description: '+450 bonus coins per day' },
-            { id: 'co_host',      name: 'Co-Host Rights',   description: 'Auto co-host in partner rooms' },
-            { id: 'gift_bonus',   name: 'Gift Bonus',       description: '15% extra coins on gifts received' }
-        ]
-    },
-    {
-        level: 7, name: 'VIP VII', price: 999, annualPrice: 9990,
-        coinBonus: 22, dailyCoins: 600, color: '#F687B3',
-        benefits: [
-            { id: 'daily_coins',  name: 'Daily Coins',      description: '+600 bonus coins per day' },
-            { id: 'legend_gifts', name: 'Legendary Gifts',  description: 'Access all legendary gifts' },
-            { id: 'vip_room',     name: 'VIP Room Access',  description: 'Enter VIP-only rooms' }
-        ]
-    },
-    {
-        level: 8, name: 'VIP VIII', price: 999, annualPrice: 9990,
-        coinBonus: 28, dailyCoins: 800, color: '#76E4F7',
-        benefits: [
-            { id: 'daily_coins',  name: 'Daily Coins',      description: '+800 bonus coins per day' },
-            { id: 'gift_bonus',   name: 'Gift Bonus',       description: '20% extra coins on gifts received' },
-            { id: 'name_color',   name: 'Custom Name Color','description': 'Gold username color in all rooms' }
-        ]
-    },
-    {
-        level: 9, name: 'VIP IX', price: 1999, annualPrice: 19990,
-        coinBonus: 35, dailyCoins: 1200, color: '#FAF089',
-        benefits: [
-            { id: 'daily_coins',  name: 'Daily Coins',      description: '+1200 bonus coins per day' },
-            { id: 'instant_seat', name: 'Instant Seat',     description: 'Reserve speaker seat instantly' },
-            { id: 'gift_bonus',   name: 'Gift Bonus',       description: '25% extra coins on gifts received' }
-        ]
-    },
-    {
-        level: 10, name: 'VIP X', price: 1999, annualPrice: 19990,
-        coinBonus: 45, dailyCoins: 1800, color: '#FBD38D',
-        benefits: [
-            { id: 'daily_coins',  name: 'Daily Coins',      description: '+1800 bonus coins per day' },
-            { id: 'rank_boost',   name: 'Rank Boost',       description: '2× ranking score multiplier' },
-            { id: 'exclusive_bg', name: 'Exclusive BG',     description: 'Ultra-rare room backgrounds' }
-        ]
-    },
-    {
-        level: 11, name: 'Diamond', price: 1999, annualPrice: 19990,
-        coinBonus: 60, dailyCoins: 2500, color: '#90CDF4',
-        benefits: [
-            { id: 'daily_coins',  name: 'Daily Coins',      description: '+2500 bonus coins per day' },
-            { id: 'diamond_badge','name': 'Diamond Badge',  description: 'Diamond crown on all rooms' },
-            { id: 'gift_bonus',   name: 'Gift Bonus',       description: '30% extra coins on gifts received' }
-        ]
-    },
-    {
-        level: 12, name: 'Legend', price: 1999, annualPrice: 19990,
-        coinBonus: 80, dailyCoins: 4000, color: '#FEB2B2',
-        benefits: [
-            { id: 'daily_coins',  name: 'Daily Coins',      description: '+4000 bonus coins per day' },
-            { id: 'global_shout', name: 'Global Shout',     description: '1× global announcement per month' },
-            { id: 'gift_bonus',   name: 'Gift Bonus',       description: '40% extra coins on gifts received' }
-        ]
-    },
-    {
-        level: 13, name: 'Supreme', price: 1999, annualPrice: 19990,
-        coinBonus: 100, dailyCoins: 6000, color: '#E9D8FD',
-        benefits: [
-            { id: 'daily_coins',  name: 'Daily Coins',      description: '+6000 bonus coins per day' },
-            { id: 'supreme_badge','name': 'Supreme Badge',  description: 'Supreme halo + name animation' },
-            { id: 'gift_bonus',   name: 'Gift Bonus',       description: '50% extra coins on gifts received' },
-            { id: 'all_access',   name: 'All Access',       description: 'Unlimited access to all features' }
-        ]
+const withSession = (query, session) => (session ? query.session(session) : query);
+
+const runWithOptionalTransaction = async (work) => {
+    const session = await mongoose.startSession();
+    try {
+        session.startTransaction();
+        const result = await work(session);
+        await session.commitTransaction();
+        return result;
+    } catch (error) {
+        await session.abortTransaction();
+        if (error?.message?.includes('Transaction numbers are only allowed')) {
+            return work(null);
+        }
+        throw error;
+    } finally {
+        await session.endSession();
     }
-];
+};
 
-exports.getVipLevels = (req, res) => res.json(VIP_TIERS);
+const buildVipStatusResponse = (user, { selectedTierId = '' } = {}) => {
+    const membership = buildVipMembershipSnapshot(user, { selectedTierId });
+    const currentTierIndex = membership.activeTierId
+        ? VIP_TIER_ORDER.indexOf(membership.activeTierId)
+        : -1;
+    const nextTier = currentTierIndex >= 0 && currentTierIndex < VIP_TIER_ORDER.length - 1
+        ? serializeVipTier(VIP_TIER_BY_ID[VIP_TIER_ORDER[currentTierIndex + 1]], {
+            currentTierId: membership.activeTierId,
+            selectedTierId
+        })
+        : null;
+
+    return {
+        membership,
+        currentLevel: membership.currentTier,
+        nextLevel: nextTier,
+        comparison: buildVipCatalog({
+            currentTierId: membership.activeTierId,
+            selectedTierId
+        }).comparison,
+        totalSpent: Number(user.totalCoinsSpent || user.stats?.totalSpent || 0)
+    };
+};
+
+const emitVipIdentityUpdate = async (req, user, {
+    xpProgress = null,
+    source = 'vip_update',
+    extra = {}
+} = {}) => {
+    const io = req.app.get('io');
+    if (!io || !user?._id) return;
+
+    const userId = user._id.toString();
+    const progressPayload = buildProgressPayload(user, {
+        xpGained: xpProgress?.xpGained || 0,
+        source,
+        ...extra
+    });
+    io.to(`user:${userId}`).emit('balance_update', progressPayload);
+    io.to(`user:${userId}`).emit('vip_activated', {
+        ...progressPayload,
+        membership: buildVipMembershipSnapshot(user)
+    });
+    io.to(`user:${userId}`).emit('profile:updated', {
+        userId,
+        timestamp: new Date().toISOString(),
+        user: buildRealtimeIdentityPayload(user),
+        fields: {
+            vipLevel: user.vipLevel,
+            vipMembership: buildVipMembershipSnapshot(user)
+        }
+    });
+
+    if (xpProgress) {
+        await emitLevelDrivenRealtime(io, user, xpProgress, { source });
+    }
+};
+
+const readIdempotencyKey = (req, fallbackPrefix = 'vip') => {
+    const headerKey = req.get('X-Idempotency-Key');
+    const bodyKey = req.body?.idempotencyKey;
+    const key = String(headerKey || bodyKey || '').trim();
+    if (key) return key;
+    return `${fallbackPrefix}:${req.userId}:${Date.now()}`;
+};
+
+const resolveRequestedPlanDuration = (body = {}) => {
+    if (body.planDuration) return body.planDuration;
+    if (body.period === 'annual') return 'yearly';
+    return body.period || 'monthly';
+};
+
+const buildPurchaseResponse = ({
+    user,
+    tier,
+    plan,
+    payableCoins,
+    creditCoins = 0,
+    startedAt,
+    expireAt,
+    transactionId = ''
+}) => ({
+    success: true,
+    message: payableCoins > 0
+        ? `${tier.displayName} activated successfully.`
+        : `${tier.displayName} activated using your existing membership credit.`,
+    membership: buildVipMembershipSnapshot(user),
+    tier: serializeVipTier(tier, {
+        currentTierId: tier.tierId,
+        selectedTierId: tier.tierId
+    }),
+    plan: {
+        planDuration: plan.planDuration,
+        label: plan.label,
+        durationDays: plan.durationDays
+    },
+    charge: {
+        originalCoins: Number(tier.pricing?.[plan.planDuration]?.coins || 0),
+        creditCoins: Number(creditCoins || 0),
+        payableCoins: Number(payableCoins || 0)
+    },
+    startedAt: startedAt?.toISOString() || null,
+    expireAt: expireAt?.toISOString() || null,
+    transactionId,
+    newBalance: buildProgressPayload(user, {
+        source: 'vip_purchase'
+    })
+});
+
+exports.getVipLevels = (req, res) => {
+    const selectedTierId = normalizeVipTierId(req.query?.tierId);
+    res.json(buildVipCatalog({ selectedTierId }));
+};
 
 exports.getVipStatus = async (req, res, next) => {
     try {
         const user = await User.findById(req.userId)
-            .select('vipLevel vipExpiry coins gems username totalCoinsSpent stats.totalSpent');
-        if (!user) { const e = new Error('User not found'); e.status = 404; throw e; }
+            .select('coins gems xp level totalCoinsSpent stats.totalSpent vipTier vipStatus vipStartAt vipExpireAt vipAutoRenew vipPlanDuration vipPurchaseSource monthlyRewardLastClaimedAt vipLastUpdatedAt vipLevel vipExpiry vipPurchasedAt shopProfile badges status gameStats avatar coverPhoto bio region username uid');
+        if (!user) {
+            const error = new Error('User not found');
+            error.status = 404;
+            throw error;
+        }
 
-        const currentLevel = VIP_TIERS.find(t => t.level === (user.vipLevel || 0)) || null;
-        const nextLevel    = VIP_TIERS.find(t => t.level === (user.vipLevel || 0) + 1) || null;
+        syncVipMembershipState(user);
+        if (user.isModified()) {
+            await user.save();
+        }
 
-        res.json({
-            vipLevel:     user.vipLevel || 0,
-            currentLevel: currentLevel  || {
-                level: 0,
-                name: 'Free',
-                description: 'Upgrade to unlock premium member perks.',
-                benefits: [],
-                coinBonus: 0,
-                dailyCoins: 0,
-                color: '#64748B',
-                icon: 'VIP'
-            },
-            nextLevel,
-            expiry:       user.vipExpiry,
-            isActive:     user.vipLevel > 0 && (!user.vipExpiry || user.vipExpiry > new Date()),
-            progress:     nextLevel ? Math.min(((user.vipLevel || 0) / nextLevel.level) * 100, 100) : 100,
-            totalSpent:   user.totalCoinsSpent || user.stats?.totalSpent || 0
-        });
-    } catch (error) { next(error); }
+        res.json(buildVipStatusResponse(user));
+    } catch (error) {
+        next(error);
+    }
 };
 
 exports.purchaseVip = async (req, res, next) => {
     try {
-        const { level, period = 'monthly' } = req.body;
-        const tier = VIP_TIERS.find(t => t.level === parseInt(level));
-        if (!tier) { const e = new Error('Invalid VIP level'); e.status = 400; throw e; }
-
-        const existingUser = await User.findById(req.userId);
-        if (!existingUser) { const e = new Error('User not found'); e.status = 404; throw e; }
-
-        const price = period === 'annual' ? tier.annualPrice : tier.price;
-        if ((existingUser.coins || 0) < price) {
-            const e = new Error('Insufficient coins for this VIP plan');
-            e.status = 400;
-            throw e;
+        const tierId = normalizeVipTierId(req.body?.tierId || req.body?.level);
+        const tier = getVipTierConfig(tierId);
+        if (!tier) {
+            const error = new Error('Invalid VIP tier');
+            error.status = 400;
+            throw error;
         }
 
-        const durationMs = period === 'annual' ? 365 * 24 * 3600 * 1000 : 30 * 24 * 3600 * 1000;
-        const vipStartAt = existingUser.vipExpiry && existingUser.vipExpiry > new Date()
-            ? existingUser.vipExpiry
-            : new Date();
-        const newExpiry  = new Date(vipStartAt.getTime() + durationMs);
-        const purchasedAt = new Date();
-        const balanceBefore = {
-            coins: existingUser.coins || 0,
-            gems: existingUser.gems || 0
-        };
+        const plan = getVipPlanConfig(resolveRequestedPlanDuration(req.body));
+        const idempotencyKey = readIdempotencyKey(req, 'vip-purchase');
+        const existingTransaction = await Transaction.findOne({
+            userId: req.userId,
+            idempotencyKey
+        }).sort({ createdAt: -1 });
 
-        const user = await User.findOneAndUpdate(
-            { _id: req.userId, coins: { $gte: price } },
-            {
-                $inc: {
-                    coins: -price,
-                    'stats.totalSpent': price,
-                    totalCoinsSpent: price
-                },
-                $set: {
-                    vipLevel: parseInt(level),
-                    vipExpiry: newExpiry,
-                    vipPurchasedAt: purchasedAt
-                }
-            },
-            { new: true }
-        );
-
-        if (!user) {
-            const e = new Error('VIP purchase failed due to a concurrent balance update');
-            e.status = 409;
-            throw e;
-        }
-
-        const vipProgress = await awardSpendXp({
-            user,
-            coins: price
-        });
-        const progressedUser = vipProgress?.user || user;
-
-        // Record transaction
-        const transaction = new Transaction({
-            userId: progressedUser._id,
-            type:   'vip_purchase',
-            amount: { coins: -price, gems: 0 },
-            balanceBefore,
-            balanceAfter:  { coins: progressedUser.coins, gems: progressedUser.gems },
-            description:   `VIP ${tier.name} (${period}) activated`,
-            reference: { productId: `vip_${tier.level}_${period}` },
-            status: 'completed', completedAt: new Date()
-        });
-        await transaction.save();
-
-        // Notify via socket
-        const io = req.app.get('io');
-        if (io) {
-            const progressPayload = buildProgressPayload(progressedUser, {
-                xpGained: vipProgress?.xpGained || 0,
-                source: 'vip_purchase',
-                tierName: tier.name,
-                expiry: newExpiry
-            });
-
-            io.to(`user:${progressedUser._id}`).emit('balance_update', progressPayload);
-            io.to(`user:${progressedUser._id}`).emit('vip_activated', {
-                ...progressPayload,
-                vipLevel: progressedUser.vipLevel,
-                tierName: tier.name,
-                expiry: newExpiry
-            });
-            if (vipProgress?.leveledUp) {
-                io.to(`user:${progressedUser._id}`).emit('level_up', {
-                    newLevel: progressedUser.level,
-                    xp: progressedUser.xp,
-                    xpGained: vipProgress.xpGained,
-                    source: 'vip_purchase'
-                });
+        if (existingTransaction) {
+            const existingUser = await User.findById(req.userId);
+            if (!existingUser) {
+                const error = new Error('User not found');
+                error.status = 404;
+                throw error;
             }
+            syncVipMembershipState(existingUser);
+            if (existingUser.isModified()) {
+                await existingUser.save();
+            }
+
+            return res.json(buildPurchaseResponse({
+                user: existingUser,
+                tier,
+                plan,
+                payableCoins: existingTransaction.amount?.coins
+                    ? Math.abs(Number(existingTransaction.amount.coins))
+                    : 0,
+                creditCoins: existingTransaction.metadata?.creditCoins || 0,
+                startedAt: existingUser.vipStartAt,
+                expireAt: existingUser.vipExpireAt,
+                transactionId: existingTransaction.transactionId
+            }));
         }
 
-        res.json({
-            success:  true,
-            message:  `${tier.name} activated!`,
-            vipLevel: progressedUser.vipLevel,
-            tier,
-            expiry:   newExpiry,
-            newBalance: buildProgressPayload(progressedUser, {
-                xpGained: vipProgress?.xpGained || 0,
-                source: 'vip_purchase'
-            })
+        const purchaseSource = String(req.body?.purchaseSource || 'coins').trim() || 'coins';
+
+        const purchaseResult = await runWithOptionalTransaction(async (session) => {
+            const user = await withSession(User.findById(req.userId), session);
+            if (!user) {
+                const error = new Error('User not found');
+                error.status = 404;
+                throw error;
+            }
+
+            syncVipMembershipState(user);
+
+            const now = new Date();
+            const currentActiveTierId = user.vipLevel > 0 ? normalizeVipTierId(user.vipTier || user.vipLevel) : '';
+            const currentActiveTier = getVipTierConfig(currentActiveTierId);
+            const isDowngradeWhileActive = currentActiveTier &&
+                currentActiveTier.tierId !== tier.tierId &&
+                currentActiveTier.level > tier.level;
+
+            if (isDowngradeWhileActive) {
+                const error = new Error('Downgrades apply after your current membership expires. Upgrade or renew instead.');
+                error.status = 409;
+                throw error;
+            }
+
+            const priceCoins = Number(tier.pricing?.[plan.planDuration]?.coins || 0);
+            const creditCoins = currentActiveTier &&
+                currentActiveTier.tierId !== tier.tierId &&
+                tier.level > currentActiveTier.level
+                ? calculateVipUpgradeCredit({
+                    currentTierId: currentActiveTier.tierId,
+                    currentPlanDuration: user.vipPlanDuration,
+                    currentExpireAt: user.vipExpireAt,
+                    now
+                })
+                : 0;
+            const payableCoins = Math.max(0, priceCoins - creditCoins);
+
+            if (purchaseSource === 'coins' && Number(user.coins || 0) < payableCoins) {
+                const error = new Error('Insufficient coins for this membership plan');
+                error.status = 400;
+                throw error;
+            }
+
+            const renewsCurrentTier = currentActiveTier?.tierId === tier.tierId;
+            const startedAt = renewsCurrentTier && user.vipExpireAt && user.vipExpireAt > now
+                ? new Date(user.vipExpireAt)
+                : now;
+            const expireAt = new Date(startedAt.getTime() + (plan.durationDays * 24 * 60 * 60 * 1000));
+
+            const previousTier = user.vipTier || '';
+            const previousStatus = user.vipStatus || 'inactive';
+            const balanceBefore = {
+                coins: Number(user.coins || 0),
+                gems: Number(user.gems || 0)
+            };
+
+            if (purchaseSource === 'coins' && payableCoins > 0) {
+                user.coins = Math.max(0, Number(user.coins || 0) - payableCoins);
+            }
+
+            user.vipTier = tier.tierId;
+            user.vipStatus = 'active';
+            user.vipStartAt = renewsCurrentTier && user.vipStartAt ? user.vipStartAt : now;
+            user.vipExpireAt = expireAt;
+            user.vipAutoRenew = req.body?.autoRenew === true;
+            user.vipPlanDuration = plan.planDuration;
+            user.vipPurchaseSource = purchaseSource;
+            user.vipLastUpdatedAt = now;
+            user.vipPurchasedAt = now;
+            syncVipMembershipState(user, { now });
+
+            await user.save(session ? { session } : undefined);
+
+            const transaction = new Transaction({
+                userId: user._id,
+                type: 'vip_purchase',
+                amount: { coins: -payableCoins, gems: 0 },
+                balanceBefore,
+                balanceAfter: {
+                    coins: Number(user.coins || 0),
+                    gems: Number(user.gems || 0)
+                },
+                currencyType: 'coins',
+                quantityPurchased: 1,
+                reference: {
+                    productId: `${tier.tierId}_${plan.planDuration}`
+                },
+                metadata: {
+                    tierId: tier.tierId,
+                    planDuration: plan.planDuration,
+                    purchaseSource,
+                    creditCoins,
+                    startedAt: startedAt.toISOString(),
+                    expireAt: expireAt.toISOString()
+                },
+                idempotencyKey,
+                paymentMethod: purchaseSource === 'coins' ? 'system' : 'mock',
+                status: 'completed',
+                description: `${tier.displayName} ${plan.label} membership`,
+                completedAt: now
+            });
+            await transaction.save(session ? { session } : undefined);
+
+            await VipEntitlementHistory.create(session ? [{
+                userId: user._id,
+                oldTier: previousTier,
+                newTier: tier.tierId,
+                oldStatus: previousStatus,
+                newStatus: user.vipStatus,
+                changedAt: now,
+                source: 'purchase',
+                transactionReference: transaction.transactionId,
+                metadata: {
+                    planDuration: plan.planDuration,
+                    creditCoins,
+                    payableCoins
+                }
+            }] : {
+                userId: user._id,
+                oldTier: previousTier,
+                newTier: tier.tierId,
+                oldStatus: previousStatus,
+                newStatus: user.vipStatus,
+                changedAt: now,
+                source: 'purchase',
+                transactionReference: transaction.transactionId,
+                metadata: {
+                    planDuration: plan.planDuration,
+                    creditCoins,
+                    payableCoins
+                }
+            }, session ? { session } : undefined);
+
+            return {
+                user,
+                tier,
+                plan,
+                payableCoins,
+                creditCoins,
+                startedAt,
+                expireAt,
+                transaction
+            };
         });
-    } catch (error) { next(error); }
+
+        const xpProgress = await awardSpendXp({
+            user: purchaseResult.user,
+            coins: purchaseResult.payableCoins,
+            sourceType: 'vip_purchase',
+            sourceReferenceId: `${purchaseResult.tier.tierId}_${purchaseResult.plan.planDuration}`,
+            sourceReferenceType: 'membership_plan',
+            dedupeKey: idempotencyKey,
+            metadata: {
+                tierId: purchaseResult.tier.tierId,
+                planDuration: purchaseResult.plan.planDuration
+            },
+            redis: req.app.get('redis')
+        });
+        const progressedUser = xpProgress?.user || purchaseResult.user;
+
+        await emitVipIdentityUpdate(req, progressedUser, {
+            xpProgress,
+            source: 'vip_purchase',
+            extra: {
+                tierId: purchaseResult.tier.tierId,
+                planDuration: purchaseResult.plan.planDuration
+            }
+        });
+
+        res.json(buildPurchaseResponse({
+            user: progressedUser,
+            tier: purchaseResult.tier,
+            plan: purchaseResult.plan,
+            payableCoins: purchaseResult.payableCoins,
+            creditCoins: purchaseResult.creditCoins,
+            startedAt: purchaseResult.startedAt,
+            expireAt: purchaseResult.expireAt,
+            transactionId: purchaseResult.transaction.transactionId
+        }));
+    } catch (error) {
+        if (error?.code === 11000) {
+            try {
+                const user = await User.findById(req.userId);
+                if (user) {
+                    syncVipMembershipState(user);
+                    if (user.isModified()) {
+                        await user.save();
+                    }
+                    return res.json(buildVipStatusResponse(user));
+                }
+            } catch (_) {}
+        }
+        next(error);
+    }
 };
 
 exports.cancelVip = async (req, res, next) => {
     try {
         const user = await User.findById(req.userId);
-        if (!user) { const e = new Error('User not found'); e.status = 404; throw e; }
-        // In production you'd cancel Stripe subscription here
-        res.json({ success: true, message: 'VIP auto-renewal cancelled. Benefits remain until expiry.', expiry: user.vipExpiry });
-    } catch (error) { next(error); }
-};
-
-// @desc    Claim VIP daily coin bonus
-exports.claimVipDailyBonus = async (req, res, next) => {
-    try {
-        const user = await User.findById(req.userId);
-        if (!user || !user.vipLevel) { const e = new Error('VIP required'); e.status = 403; throw e; }
-        if (user.vipExpiry && user.vipExpiry < new Date()) { const e = new Error('VIP expired'); e.status = 403; throw e; }
-
-        const tier = VIP_TIERS.find(t => t.level === user.vipLevel);
-        if (!tier) { const e = new Error('Tier not found'); e.status = 500; throw e; }
-
-        const today = new Date(); today.setHours(0,0,0,0);
-        if (user.lastVipDailyBonus) {
-            const last = new Date(user.lastVipDailyBonus); last.setHours(0,0,0,0);
-            if (last.getTime() === today.getTime()) {
-                return res.json({ success: true, alreadyClaimed: true, dailyCoins: tier.dailyCoins });
-            }
+        if (!user) {
+            const error = new Error('User not found');
+            error.status = 404;
+            throw error;
         }
 
-        const balanceBefore = { coins: user.coins, gems: user.gems };
-        user.coins += tier.dailyCoins;
-        user.lastVipDailyBonus = new Date();
+        syncVipMembershipState(user);
+        if (!user.vipTier) {
+            return res.json({
+                success: true,
+                message: 'No active membership to manage.',
+                membership: buildVipMembershipSnapshot(user)
+            });
+        }
+
+        const previousStatus = user.vipStatus;
+        user.vipAutoRenew = false;
+        user.vipStatus = user.vipLevel > 0 ? 'active' : 'expired';
+        user.vipLastUpdatedAt = new Date();
         await user.save();
 
-        const txn = new Transaction({
-            userId: user._id, type: 'vip_daily_bonus',
-            amount: { coins: tier.dailyCoins },
-            balanceBefore, balanceAfter: { coins: user.coins, gems: user.gems },
-            description: `VIP ${tier.name} daily bonus`, status: 'completed', completedAt: new Date()
+        await VipEntitlementHistory.create({
+            userId: user._id,
+            oldTier: user.vipTier,
+            newTier: user.vipTier,
+            oldStatus: previousStatus,
+            newStatus: user.vipStatus,
+            changedAt: new Date(),
+            source: 'cancel_auto_renew',
+            metadata: {
+                autoRenew: false
+            }
         });
-        await txn.save();
 
-        const io = req.app.get('io');
-        if (io) io.to(`user:${user._id}`).emit('balance_update', { coins: user.coins, gems: user.gems });
-
-        res.json({ success: true, dailyCoins: tier.dailyCoins, newBalance: { coins: user.coins, gems: user.gems } });
-    } catch (error) { next(error); }
+        res.json({
+            success: true,
+            message: 'Auto-renew turned off. Your membership stays active until expiry.',
+            membership: buildVipMembershipSnapshot(user)
+        });
+    } catch (error) {
+        next(error);
+    }
 };
+
+exports.restoreVip = async (req, res, next) => {
+    try {
+        const user = await User.findById(req.userId);
+        if (!user) {
+            const error = new Error('User not found');
+            error.status = 404;
+            throw error;
+        }
+
+        syncVipMembershipState(user);
+        if (user.isModified()) {
+            await user.save();
+        }
+
+        await VipEntitlementHistory.create({
+            userId: user._id,
+            oldTier: user.vipTier || '',
+            newTier: user.vipTier || '',
+            oldStatus: user.vipStatus || 'inactive',
+            newStatus: user.vipStatus || 'inactive',
+            changedAt: new Date(),
+            source: 'restore',
+            metadata: {
+                restored: true
+            }
+        });
+
+        await emitVipIdentityUpdate(req, user, {
+            source: 'vip_restore'
+        });
+
+        res.json({
+            success: true,
+            message: user.vipLevel > 0
+                ? 'Membership restored from the server state.'
+                : 'No active membership was found to restore.',
+            membership: buildVipMembershipSnapshot(user)
+        });
+    } catch (error) {
+        next(error);
+    }
+};
+
+exports.claimVipMonthlyReward = async (req, res, next) => {
+    try {
+        const idempotencyKey = readIdempotencyKey(req, 'vip-reward');
+        const user = await User.findById(req.userId);
+        if (!user) {
+            const error = new Error('User not found');
+            error.status = 404;
+            throw error;
+        }
+
+        syncVipMembershipState(user);
+        const tier = getVipTierConfig(user.vipTier || user.vipLevel);
+        if (!tier || user.vipLevel <= 0) {
+            const error = new Error('Active VIP membership required');
+            error.status = 403;
+            throw error;
+        }
+
+        const rewardState = resolveMonthlyRewardState({
+            startAt: user.vipStartAt,
+            lastClaimedAt: user.monthlyRewardLastClaimedAt,
+            active: true
+        });
+        if (!rewardState.eligible) {
+            return res.json({
+                success: true,
+                alreadyClaimed: true,
+                membership: buildVipMembershipSnapshot(user),
+                monthlyCoins: Number(tier.monthlyCoinReward || 0)
+            });
+        }
+
+        const existingTransaction = await Transaction.findOne({
+            userId: req.userId,
+            idempotencyKey
+        }).sort({ createdAt: -1 });
+        if (existingTransaction) {
+            syncVipMembershipState(user);
+            if (user.isModified()) {
+                await user.save();
+            }
+            return res.json({
+                success: true,
+                monthlyCoins: Number(tier.monthlyCoinReward || 0),
+                membership: buildVipMembershipSnapshot(user),
+                newBalance: buildProgressPayload(user, {
+                    source: 'vip_monthly_reward'
+                })
+            });
+        }
+
+        const rewardCoins = Number(tier.monthlyCoinReward || 0);
+        const balanceBefore = {
+            coins: Number(user.coins || 0),
+            gems: Number(user.gems || 0)
+        };
+        user.coins = balanceBefore.coins + rewardCoins;
+        user.monthlyRewardLastClaimedAt = new Date();
+        user.vipLastUpdatedAt = new Date();
+        await user.save();
+
+        const transaction = await Transaction.create({
+            userId: user._id,
+            type: 'vip_monthly_reward',
+            amount: { coins: rewardCoins, gems: 0 },
+            balanceBefore,
+            balanceAfter: {
+                coins: Number(user.coins || 0),
+                gems: Number(user.gems || 0)
+            },
+            currencyType: 'coins',
+            description: `${tier.displayName} monthly reward`,
+            idempotencyKey,
+            metadata: {
+                tierId: tier.tierId,
+                rewardCycle: rewardState.currentCycle
+            },
+            status: 'completed',
+            completedAt: new Date()
+        });
+
+        await emitVipIdentityUpdate(req, user, {
+            source: 'vip_monthly_reward',
+            extra: {
+                rewardCoins
+            }
+        });
+
+        res.json({
+            success: true,
+            monthlyCoins: rewardCoins,
+            membership: buildVipMembershipSnapshot(user),
+            transactionId: transaction.transactionId,
+            newBalance: buildProgressPayload(user, {
+                source: 'vip_monthly_reward',
+                rewardCoins
+            })
+        });
+    } catch (error) {
+        next(error);
+    }
+};
+
+exports.claimVipDailyBonus = exports.claimVipMonthlyReward;

@@ -31,12 +31,14 @@ import 'screens/profile/badges_screen.dart';
 import 'screens/profile/game_stats_screen.dart';
 import 'screens/rankings/rankings_screen.dart';
 import 'screens/rooms/create_room_screen.dart';
+import 'screens/rooms/my_room_entry_screen.dart';
 import 'screens/gifts/gift_history_screen.dart';
 import 'screens/gifts/gift_leaderboard_screen.dart';
 import 'screens/gifts/gift_achievements_screen.dart';
 import 'screens/vip/vip_screen.dart';
 import 'screens/economy/daily_rewards_screen.dart';
 import 'screens/economy/quests_screen.dart';
+import 'screens/shop/shop_hub_screen.dart';
 import 'screens/posts/create_post_screen.dart';
 import 'screens/posts/feed_screen.dart';
 import 'screens/auth/otp_screen.dart';
@@ -52,6 +54,7 @@ import 'screens/games/color_clash_table_screen.dart';
 import 'services/app_route_observer.dart';
 import 'services/app_navigation_service.dart';
 import 'widgets/error_boundary.dart';
+import 'widgets/level_up_overlay.dart';
 import 'widgets/rooms/floating_room_overlay.dart';
 
 void main() async {
@@ -85,6 +88,7 @@ class MyApp extends StatelessWidget {
           builder: (context, child) => Stack(
             children: [
               if (child != null) child,
+              const LevelUpOverlayHost(),
               const FloatingRoomOverlay(),
             ],
           ),
@@ -102,6 +106,8 @@ class MyApp extends StatelessWidget {
             '/home': (context) => const MainScreen(),
             '/wallet': (context) => const WalletScreen(),
             '/wallet/transactions': (context) => const TransactionsScreen(),
+            '/shop': (context) => const ShopHubScreen(),
+            '/inventory': (context) => const ShopHubScreen(initialTab: 1),
             '/settings': (context) => const SettingsScreen(),
             '/settings/account': (context) => AccountSettingsScreen(
                   settings: const {},
@@ -135,6 +141,7 @@ class MyApp extends StatelessWidget {
               return GroupDetailScreen(groupId: args);
             },
             '/rooms/create': (context) => const CreateRoomScreen(),
+            MyRoomEntryScreen.routeName: (context) => const MyRoomEntryScreen(),
             '/gifts/history': (context) => const GiftHistoryScreen(),
             '/gifts/leaderboard': (context) => const GiftLeaderboardScreen(),
             '/gifts/achievements': (context) => const GiftAchievementsScreen(),

@@ -8,6 +8,7 @@ class RoomSeatTile extends StatelessWidget {
     required this.seatIndex,
     this.isLocked = false,
     this.isClosedByLimit = false,
+    this.isInactive = false,
     this.hasOccupant = false,
     this.canManageLock = false,
     this.showLabel = true,
@@ -19,6 +20,7 @@ class RoomSeatTile extends StatelessWidget {
   final int seatIndex;
   final bool isLocked;
   final bool isClosedByLimit;
+  final bool isInactive;
   final bool hasOccupant;
   final bool canManageLock;
   final bool showLabel;
@@ -28,8 +30,10 @@ class RoomSeatTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final disabled = isLocked || isClosedByLimit;
-    final label = isClosedByLimit
+    final disabled = isLocked || isClosedByLimit || isInactive;
+    final label = isInactive
+        ? 'Inactive'
+        : isClosedByLimit
         ? 'Closed'
         : isLocked
             ? 'Locked'
@@ -42,8 +46,13 @@ class RoomSeatTile extends StatelessWidget {
           clipBehavior: Clip.none,
           children: [
             GestureDetector(
-              onTap: onTapSeat,
-              child: child ?? _buildEmptySeat(disabled: disabled),
+              onTap: disabled ? null : onTapSeat,
+              child: child == null
+                  ? _buildEmptySeat(disabled: disabled)
+                  : Opacity(
+                      opacity: isInactive ? 0.5 : 1,
+                      child: child!,
+                    ),
             ),
             if (canManageLock && onToggleLock != null)
               Positioned(
@@ -92,6 +101,8 @@ class RoomSeatTile extends StatelessWidget {
             style: TextStyle(
               color: isLocked
                   ? const Color(0xFFFFD451)
+                  : isInactive
+                      ? Colors.white30
                   : isClosedByLimit
                       ? Colors.white38
                       : Colors.white24,
@@ -110,11 +121,15 @@ class RoomSeatTile extends StatelessWidget {
       height: 56,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
-        color: isLocked
+        color: isInactive
+            ? Colors.white.withValues(alpha: 0.04)
+            : isLocked
             ? const Color(0xFF172241).withValues(alpha: 0.84)
             : Colors.white.withValues(alpha: 0.03),
         border: Border.all(
-          color: isLocked
+          color: isInactive
+              ? Colors.white12
+              : isLocked
               ? const Color(0xFFFFD451).withValues(alpha: 0.36)
               : Colors.white10,
           width: 1.4,
@@ -123,7 +138,7 @@ class RoomSeatTile extends StatelessWidget {
       child: Stack(
         alignment: Alignment.center,
         children: [
-          if (!isLocked)
+          if (!isLocked && !isInactive)
             CustomPaint(
               size: const Size(56, 56),
               painter: _DottedCirclePainter(color: Colors.white24),
@@ -132,6 +147,12 @@ class RoomSeatTile extends StatelessWidget {
             SeatLockBadge(
               key: Key('room-seat-locked-badge-$seatIndex'),
               size: 28,
+            )
+          else if (isInactive)
+            Icon(
+              Icons.pause_circle_outline_rounded,
+              color: Colors.white38,
+              size: 22,
             )
           else
             Icon(

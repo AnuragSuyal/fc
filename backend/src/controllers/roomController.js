@@ -48,6 +48,21 @@ const {
     assertSeatJoinAllowed
 } = require('../services/roomSeatService');
 const { logRoomAuditEvent } = require('../services/roomAuditService');
+const {
+    ensureUserPermanentRoom,
+    getUserPermanentRoom
+} = require('../services/permanentRoomService');
+const {
+    awardUserXp,
+    buildProgressPayload,
+    emitLevelDrivenRealtime
+} = require('../services/levelProgressionService');
+const {
+    getPresentParticipants,
+    markParticipantPresence,
+    recalculateRoomPresenceState,
+    trackRecentRoomVisit
+} = require('../services/roomPresenceService');
 
 const roomCacheKey = (roomId) => `cache:room:${roomId}`;
 const escapeRegex = (value = '') => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -280,11 +295,13 @@ const resetSeatsForStreamMode = (room) => {
     clearSeatLockMetadata(room, STREAM_HOST_SEAT_INDEX);
 
     const hostId = room.hostId?.toString();
+    const isHostPresent = (participant) =>
+        participant.userId?.toString() === hostId && participant.isPresent !== false;
     let hostParticipant = null;
     room.participants = (room.participants || []).map((participant) => {
         participant.raisedHand = false;
 
-        if (participant.userId?.toString() === hostId) {
+        if (isHostPresent(participant)) {
             participant.seatIndex = STREAM_HOST_SEAT_INDEX;
             participant.role = 'host';
             participant.lastActive = new Date();
@@ -303,9 +320,10 @@ const resetSeatsForStreamMode = (room) => {
         room.participants.unshift({
             userId: room.hostId,
             role: 'host',
-            seatIndex: STREAM_HOST_SEAT_INDEX,
+            seatIndex: -1,
             joinedAt: new Date(),
             lastActive: new Date(),
+            isPresent: false,
             raisedHand: false
         });
     }
@@ -321,7 +339,7 @@ const anchorHostToStreamSeat = (room) => {
 
     let hostParticipant = null;
     room.participants = (room.participants || []).map((participant) => {
-        if (participant.userId?.toString() === hostId) {
+        if (participant.userId?.toString() === hostId && participant.isPresent !== false) {
             participant.seatIndex = STREAM_HOST_SEAT_INDEX;
             participant.role = 'host';
             participant.lastActive = new Date();
@@ -340,16 +358,7 @@ const anchorHostToStreamSeat = (room) => {
         return participant;
     });
 
-    if (!hostParticipant) {
-        room.participants.unshift({
-            userId: room.hostId,
-            role: 'host',
-            seatIndex: STREAM_HOST_SEAT_INDEX,
-            joinedAt: new Date(),
-            lastActive: new Date(),
-            raisedHand: false
-        });
-    }
+    if (!hostParticipant) return;
 };
 
 const buildRoomInviteMetadata = ({
@@ -385,7 +394,12 @@ const buildRoomQuery = ({
     search,
     tag
 }) => {
-    const filters = [{ endedAt: null }, { showInExplore: { $ne: false } }];
+    const filters = [
+        { endedAt: null },
+        { showInExplore: { $ne: false } },
+        { roomActive: true },
+        { activeControllersCount: { $gt: 0 } }
+    ];
 
     if (category && category !== 'all') {
         const categoryMatchers = [
@@ -505,79 +519,16 @@ const getLivekitServerUrl = (req) => {
     }
 };
 
-// @desc    Create a new room
+// @desc    Ensure the caller permanent room exists
 // @route   POST /api/rooms
 // @access  Private
 exports.createRoom = async (req, res, next) => {
     try {
-        const {
-            name,
-            description,
-            announcement,
-            type,
-            mode,
-            category,
-            tags,
-            settings,
-            theme
-        } = req.body;
-        const announcementText = String(announcement || '').trim();
-
-        const room = new Room({
-            name,
-            description: description || '',
-            ...(announcementText
-                ? {
-                    announcement: {
-                        text: announcementText,
-                        updatedAt: new Date(),
-                        updatedBy: req.userId
-                    }
-                }
-                : {}),
-            type: type || 'voice',
-            mode: mode || (type === 'auction' ? 'auction' : type === 'chat' ? 'acquaint' : 'normal'),
-            category: category || 'all',
-            tags: tags || [],
-            hostId: req.userId,
-            settings: {
-                isPrivate: settings?.isPrivate || false,
-                password: settings?.password,
-                maxParticipants: settings?.maxParticipants || 20,
-                entryFee: settings?.entryFee || 0,
-                hdVoice: settings?.hdVoice || false,
-                banTextChat: settings?.banTextChat || false,
-                banPhotoChat: settings?.banPhotoChat || false,
-                banRedPacket: settings?.banRedPacket || false,
-                allowGifts: settings?.allowGifts ?? true,
-                allowScreenShare: settings?.allowScreenShare || false,
-                allowVideo: settings?.allowVideo || false,
-                stageJoinsLocked: settings?.stageJoinsLocked || false,
-                allowAdminSeatControl: settings?.allowAdminSeatControl ?? true,
-                maxActiveSpeakers: settings?.maxActiveSpeakers || 8,
-                requireApproval: settings?.requireApproval || false,
-                slowMode: settings?.slowMode || 0,
-                ageRestricted: settings?.ageRestricted || false
-            },
-            theme: theme || { background: 'default' },
-            participants: [{
-                userId: req.userId,
-                role: 'host',
-                joinedAt: Date.now()
-            }]
-        });
-
-        if (room.type === STREAM_ROOM_TYPE) {
-            resetSeatsForStreamMode(room);
-        }
-
-        await room.save();
-
-        const populatedRoom = await populateRoomById(room._id);
+        const ensured = await ensureUserPermanentRoom(req.userId, req.body || {});
+        const populatedRoom = await populateRoomById(ensured.room._id);
 
         const redis = req.app.get('redis');
-        await invalidateRoomCache(redis, room._id);
-        await updateRoomPresence(redis, room._id, req.userId, 'join');
+        await invalidateRoomCache(redis, populatedRoom._id);
 
         const livekitToken = await buildLivekitToken(
             populatedRoom.roomId || populatedRoom._id,
@@ -589,14 +540,51 @@ exports.createRoom = async (req, res, next) => {
 
         const io = req.app.get('io');
         if (io) {
-            io.emit('room:created', roomPayload);
-            emitRoomUpdate(io, populatedRoom, {
-                updateEvent: ROOM_UPDATE_EVENTS.IDENTITY,
-                lobbyAction: 'created'
+            if (ensured.created) {
+                io.emit('room:created', roomPayload);
+                emitRoomUpdate(io, populatedRoom, {
+                    updateEvent: ROOM_UPDATE_EVENTS.IDENTITY,
+                    lobbyAction: 'created'
+                });
+            }
+        }
+
+        res.status(ensured.created ? 201 : 200).json({
+            room: roomPayload,
+            created: ensured.created,
+            migrated: ensured.migrated,
+            archivedLegacyRoomCount: ensured.archivedLegacyRoomCount,
+            livekitToken
+        });
+    } catch (error) {
+        next(error);
+    }
+};
+
+exports.getMyRoom = async (req, res, next) => {
+    try {
+        const result = await getUserPermanentRoom(req.userId, {
+            allocateIfMissing: req.query.allocate === 'true'
+        });
+
+        if (!result.room) {
+            return res.status(404).json({
+                room: null,
+                hasRoom: false,
+                created: false,
+                migrated: false,
+                archivedLegacyRoomCount: 0
             });
         }
 
-        res.status(201).json({ ...roomPayload, livekitToken });
+        const populatedRoom = await populateRoomById(result.room._id);
+        return res.json({
+            room: decorateRoomPayload(populatedRoom, req.userId),
+            hasRoom: true,
+            created: result.created,
+            migrated: result.migrated,
+            archivedLegacyRoomCount: result.archivedLegacyRoomCount
+        });
     } catch (error) {
         next(error);
     }
@@ -766,6 +754,14 @@ exports.joinRoom = async (req, res, next) => {
             error.status = 404;
             throw error;
         }
+        if (room.endedAt && !room.isPermanent) {
+            const error = new Error('Room not found');
+            error.status = 404;
+            throw error;
+        }
+        if (room.isPermanent && room.endedAt) {
+            room.endedAt = null;
+        }
 
         if (room.groupId) {
             const memberGroup = await Group.findOne({
@@ -779,7 +775,8 @@ exports.joinRoom = async (req, res, next) => {
             }
         }
 
-        if (room.participants.length >= room.settings.maxParticipants) {
+        const presentParticipantsCount = getPresentParticipants(room).length;
+        if (presentParticipantsCount >= room.settings.maxParticipants) {
             const error = new Error('Room is full');
             error.status = 400;
             throw error;
@@ -855,19 +852,43 @@ exports.joinRoom = async (req, res, next) => {
                 userId: req.userId,
                 role,
                 joinedAt: joinTimestamp,
-                lastActive: joinTimestamp
+                lastActive: joinTimestamp,
+                isPresent: true
             });
 
-            if (room.participants.length > room.metrics.peakParticipants) {
-                room.metrics.peakParticipants = room.participants.length;
+            const nextPeakCount = getPresentParticipants(room).length;
+            if (nextPeakCount > room.metrics.peakParticipants) {
+                room.metrics.peakParticipants = nextPeakCount;
             }
         } else {
             room.participants[existingIdx].lastActive = joinTimestamp;
+            room.participants[existingIdx].isPresent = true;
         }
 
+        recalculateRoomPresenceState(room);
         anchorHostToStreamSeat(room);
+        trackRecentRoomVisit(user, room._id);
 
-        await room.save();
+        await Promise.all([room.save(), user.save()]);
+
+        let joinXpProgress = null;
+        if (didJoinRoom) {
+            joinXpProgress = await awardUserXp({
+                user,
+                amount: 12,
+                sourceType: 'room_join',
+                sourceReferenceId: room._id.toString(),
+                sourceReferenceType: 'room',
+                dedupeKey: `room-join:${room._id}:${new Date().toISOString().slice(0, 10)}`,
+                redis: req.app.get('redis'),
+                metadata: {
+                    roomId: room._id.toString(),
+                    roomType: room.type,
+                    roomCategory: room.category
+                }
+            });
+        }
+        const progressedUser = joinXpProgress?.user || user;
 
         const populatedRoom = await populateRoomById(room._id);
 
@@ -917,7 +938,16 @@ exports.joinRoom = async (req, res, next) => {
                 });
             }
             // Update balance for the user
-            io.to(`user:${user._id}`).emit('balance_update', { coins: user.coins, gems: user.gems });
+            io.to(`user:${progressedUser._id}`).emit(
+                'balance_update',
+                buildProgressPayload(progressedUser, {
+                    xpGained: joinXpProgress?.xpGained || 0,
+                    source: didJoinRoom ? 'room_join' : 'room_entry'
+                })
+            );
+            await emitLevelDrivenRealtime(io, progressedUser, joinXpProgress, {
+                source: 'room_join'
+            });
             emitRoomUpdate(io, populatedRoom, {
                 updateEvent: ROOM_UPDATE_EVENTS.ROLES,
                 lobbyAction: 'participant_joined',
@@ -947,19 +977,10 @@ exports.leaveRoom = async (req, res, next) => {
         room.participants = room.participants.filter(p => p.userId.toString() !== req.userId);
 
         if (room.participants.length === 0) {
-            room.endedAt = Date.now();
-        } else if (room.hostId.toString() === req.userId) {
-            // Assign new host
-            let newHostP = room.participants.find(p => room.coHosts?.some(id => id.toString() === p.userId.toString())) ||
-                room.participants.find(p => room.moderators?.some(id => id.toString() === p.userId.toString())) ||
-                room.participants[0];
-
-            if (newHostP) {
-                room.hostId = newHostP.userId;
-                newHostP.role = 'host';
-            }
+            room.endedAt = room.isPermanent ? null : Date.now();
         }
 
+        recalculateRoomPresenceState(room);
         anchorHostToStreamSeat(room);
 
         await room.save();
@@ -1020,6 +1041,10 @@ exports.updateRoom = async (req, res, next) => {
 
         const previousSnapshot = {
             name: room.name,
+            topic: room.topic || '',
+            language: room.language || 'en',
+            region: room.region || 'Global',
+            roomRules: room.roomRules || '',
             announcement: room.announcement?.text || room.announcement || '',
             category: room.category,
             type: room.type,
@@ -1034,7 +1059,21 @@ exports.updateRoom = async (req, res, next) => {
         ).trim();
         const previousYoutubeSessionVersion = getYoutubeSessionVersion(room.theme);
         const normalizedThemePatch = normalizeThemePatch(patch.theme);
-        const allowedUpdates = ['name', 'description', 'type', 'mode', 'category', 'tags', 'settings', 'theme', 'announcement'];
+        const allowedUpdates = [
+            'name',
+            'description',
+            'type',
+            'mode',
+            'category',
+            'tags',
+            'topic',
+            'language',
+            'region',
+            'roomRules',
+            'settings',
+            'theme',
+            'announcement'
+        ];
         allowedUpdates.forEach(field => {
             if (patch[field] !== undefined) {
                 if (field === 'settings') {
@@ -1172,6 +1211,10 @@ exports.updateRoom = async (req, res, next) => {
             before: previousSnapshot,
             after: {
                 name: populatedRoom.name,
+                topic: populatedRoom.topic || '',
+                language: populatedRoom.language || 'en',
+                region: populatedRoom.region || 'Global',
+                roomRules: populatedRoom.roomRules || '',
                 announcement: populatedRoom.announcement?.text || populatedRoom.announcement || '',
                 category: populatedRoom.category,
                 type: populatedRoom.type,
@@ -1352,6 +1395,11 @@ exports.takeSeat = async (req, res, next) => {
         if (!room) {
             const error = new Error('Room not found');
             error.status = 404;
+            throw error;
+        }
+        if (room.roomActive === false) {
+            const error = new Error('Room inactive - waiting for host/admin');
+            error.status = 403;
             throw error;
         }
 
@@ -1572,11 +1620,18 @@ exports.searchYoutubeVideos = async (req, res, next) => {
 exports.getTrendingRooms = async (req, res, next) => {
     try {
         await cleanupExpiredRallies();
-        const rooms = await Room.find({ endedAt: null })
+        const rooms = await Room.find({
+            endedAt: null,
+            roomActive: true,
+            activeControllersCount: { $gt: 0 }
+        })
             .populate('hostId', 'username avatar level')
             .sort({ rallyActive: -1, rallyExpiresAt: -1, onlineCount: -1, participantCount: -1 })
             .limit(10);
-        res.json(rooms);
+        res.json(rooms.map((room) => decorateRoomPayload(room, req.userId || null, {
+            includeCapabilities: false,
+            includeModeration: false
+        })));
     } catch (error) {
         next(error);
     }
@@ -1592,6 +1647,11 @@ exports.deleteRoom = async (req, res, next) => {
         }
         if (!isRoomOwner(room, req.userId)) {
             const error = new Error('Only host can delete room');
+            error.status = 403;
+            throw error;
+        }
+        if (room.isPermanent) {
+            const error = new Error('Permanent rooms cannot be deleted. You can keep editing the same room instead.');
             error.status = 403;
             throw error;
         }
@@ -1625,9 +1685,15 @@ exports.deleteRoom = async (req, res, next) => {
 exports.getMyRooms = async (req, res, next) => {
     try {
         await cleanupExpiredRallies();
-        const rooms = await Room.find({ 'participants.userId': req.userId, endedAt: null })
+        const result = await getUserPermanentRoom(req.userId);
+        if (!result.room) {
+            return res.json([]);
+        }
+
+        const rooms = await Room.find({ _id: result.room._id, endedAt: null })
+            .populate('ownerId', 'username avatar level vipLevel')
             .populate('hostId', 'username avatar level')
-            .sort({ rallyActive: -1, rallyExpiresAt: -1, updatedAt: -1 });
+            .sort({ updatedAt: -1 });
         res.json(rooms.map((room) => decorateRoomPayload(room, req.userId, {
             includeCapabilities: false,
             includeModeration: false
@@ -1642,11 +1708,62 @@ exports.getFollowedRooms = async (req, res, next) => {
         await cleanupExpiredRallies();
         const rooms = await Room.find({ followers: req.userId, endedAt: null })
             .populate('hostId', 'username avatar level')
-            .sort({ rallyActive: -1, rallyExpiresAt: -1, updatedAt: -1 });
+            .sort({
+                roomActive: -1,
+                activeControllersCount: -1,
+                rallyActive: -1,
+                rallyExpiresAt: -1,
+                updatedAt: -1
+            });
         res.json(rooms.map((room) => decorateRoomPayload(room, req.userId, {
             includeCapabilities: false,
             includeModeration: false
         })));
+    } catch (error) {
+        next(error);
+    }
+};
+
+exports.getRecentRooms = async (req, res, next) => {
+    try {
+        const user = await User.findById(req.userId)
+            .select('recentRooms')
+            .lean();
+        const recentEntries = Array.isArray(user?.recentRooms)
+            ? [...user.recentRooms]
+            : [];
+        if (recentEntries.length === 0) {
+            return res.json({ rooms: [] });
+        }
+
+        recentEntries.sort((left, right) =>
+            new Date(right.lastVisitedAt || 0).getTime() -
+            new Date(left.lastVisitedAt || 0).getTime()
+        );
+        const orderedIds = recentEntries
+            .map((entry) => entry.roomId?.toString?.() || '')
+            .filter(Boolean)
+            .slice(0, 10);
+        if (orderedIds.length === 0) {
+            return res.json({ rooms: [] });
+        }
+
+        const rooms = await Room.find({
+            _id: { $in: orderedIds },
+            endedAt: null
+        }).populate('hostId', 'username avatar level');
+        const roomById = new Map(
+            rooms.map((room) => [room._id.toString(), room])
+        );
+        const orderedRooms = orderedIds
+            .map((roomId) => roomById.get(roomId))
+            .filter(Boolean)
+            .map((room) => decorateRoomPayload(room, req.userId, {
+                includeCapabilities: false,
+                includeModeration: false
+            }));
+
+        res.json({ rooms: orderedRooms });
     } catch (error) {
         next(error);
     }

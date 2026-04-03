@@ -7,11 +7,17 @@ import 'package:image_picker/image_picker.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:url_launcher/url_launcher.dart';
 
+import '../../models/coin_transfer_model.dart';
 import '../../models/message_model.dart';
+import '../../models/level_progress_model.dart';
+import '../../models/shop_models.dart';
+import '../../models/vip_model.dart';
 import '../../providers/auth_provider.dart';
 import '../../services/app_route_observer.dart';
 import '../../services/chat_activity_service.dart';
+import '../../services/coin_transfer_service.dart';
 import '../../services/chat_voice_note_service.dart';
 import '../../services/friend_service.dart';
 import '../../services/message_service.dart';
@@ -21,10 +27,15 @@ import '../../services/socket_service.dart';
 import '../../services/upload_service.dart';
 import '../../utils/constants.dart';
 import '../../utils/media_url.dart';
+import '../../utils/shop_appearance_resolver.dart';
 import '../../widgets/gifting/gift_bottom_sheet.dart';
 import '../../widgets/gift_image.dart';
+import '../../widgets/level_badge.dart';
 import '../../widgets/rounded_scaffold.dart';
 import '../../widgets/user_avatar.dart';
+import '../../widgets/coin_transfer/coin_transfer_sheet.dart';
+import '../../widgets/vip/vip_badge.dart';
+import '../../widgets/vip/vip_name_text.dart';
 import '../profile/enhanced_profile_screen.dart';
 import '../rooms/room_detail_screen.dart';
 
@@ -73,8 +84,11 @@ class _ChatScreenState extends State<ChatScreen>
   String? _activeAudioMessageId;
   Map<String, dynamic> _relationship = const {};
   Map<String, dynamic> _peerProfile = const {};
+  CoinTransferEligibility? _coinTransferEligibility;
   Duration _voiceRecordingDuration = Duration.zero;
   bool _routeObserverAttached = false;
+  bool _isCoinTransferLoading = false;
+  bool _isCoinTransferPurchaseBusy = false;
 
   @override
   void initState() {
@@ -87,6 +101,7 @@ class _ChatScreenState extends State<ChatScreen>
     _loadPrivatePhotoState();
     if (_effectivePeerUserId != null) {
       _loadMessages();
+      _loadCoinTransferEligibility(silent: true);
     } else {
       _isLoading = true;
     }
@@ -164,6 +179,20 @@ class _ChatScreenState extends State<ChatScreen>
   bool get _canMessage => _relationship['canMessage'] == true || _isFriend;
   bool get _canSendGift => _isFriend && !_isBlocked;
   bool get _isBlocked => _relationship['isBlocked'] == true;
+  bool get _coinTransferFeatureEnabled =>
+      _coinTransferEligibility?.featureEnabled == true;
+  bool get _coinTransferUnlocked => _coinTransferEligibility?.unlocked == true;
+  bool get _canShowCoinTransferUnlock =>
+      _isFriend &&
+      !_isBlocked &&
+      _coinTransferFeatureEnabled &&
+      !_coinTransferUnlocked &&
+      (_coinTransferEligibility?.canPurchaseUnlock ?? false);
+  bool get _canShowCoinTransferEntry =>
+      _isFriend &&
+      !_isBlocked &&
+      _coinTransferFeatureEnabled &&
+      _coinTransferUnlocked;
   int get _introMessageLimit {
     final raw = _relationship['introMessageLimit'];
     if (raw is int) return raw;
@@ -225,6 +254,24 @@ class _ChatScreenState extends State<ChatScreen>
     return 1;
   }
 
+  LevelProgressSnapshot get _peerLevelInfo =>
+      LevelProgressSnapshot.fromRoot(_peerProfile);
+  UserShopProfile get _peerShopProfile =>
+      UserShopProfile.fromJson(_peerProfile['shopProfile']);
+  VipMembershipSnapshot get _peerVipMembership =>
+      VipMembershipSnapshot.fromJson(
+        _peerProfile['vipMembership'] is Map
+            ? Map<String, dynamic>.from(_peerProfile['vipMembership'] as Map)
+            : null,
+      );
+
+  int get _peerVipLevel {
+    final raw = _peerProfile['vipLevel'];
+    if (raw is int) return raw;
+    if (raw is num) return raw.toInt();
+    return 0;
+  }
+
   bool _looksLikeMongoId(String? value) {
     final trimmed = value?.trim() ?? '';
     return RegExp(r'^[0-9a-fA-F]{24}$').hasMatch(trimmed);
@@ -275,9 +322,13 @@ class _ChatScreenState extends State<ChatScreen>
       SocketService.profileStream.listen(_handleProfileEvent),
     );
     _subscriptions.add(
+      SocketService.coinTransferStream.listen(_handleCoinTransferEvent),
+    );
+    _subscriptions.add(
       SocketService.resyncStream.listen((_) {
         unawaited(_loadMessages(reset: true, silent: _messages.isNotEmpty));
         unawaited(_loadRelationship());
+        unawaited(_loadCoinTransferEligibility(silent: true));
       }),
     );
     _subscriptions.add(
@@ -419,6 +470,7 @@ class _ChatScreenState extends State<ChatScreen>
         _setChatActivity(ModalRoute.of(context)?.isCurrent == true);
         unawaited(_loadMessages(reset: true, silent: _messages.isNotEmpty));
       }
+      unawaited(_loadCoinTransferEligibility(silent: true));
     } catch (_) {
       if (!mounted) return;
       setState(() {
@@ -435,6 +487,48 @@ class _ChatScreenState extends State<ChatScreen>
     setState(() {
       _consumedPrivatePhotoIds.addAll(consumedIds);
     });
+  }
+
+  Future<void> _loadCoinTransferEligibility({bool silent = false}) async {
+    final peerUserId = _effectivePeerUserId;
+    final currentUserId = _currentUserId;
+    if (peerUserId == null ||
+        peerUserId.isEmpty ||
+        currentUserId == null ||
+        currentUserId.isEmpty) {
+      if (!silent && mounted) {
+        setState(() => _coinTransferEligibility = null);
+      }
+      return;
+    }
+
+    if (!silent && mounted) {
+      setState(() => _isCoinTransferLoading = true);
+    }
+
+    try {
+      final eligibility = await CoinTransferService.getEligibility(
+        receiverUserId: peerUserId,
+        chatId: CoinTransferService.buildDirectChatId(
+          currentUserId,
+          peerUserId,
+        ),
+      );
+      if (!mounted) return;
+      setState(() {
+        _coinTransferEligibility = eligibility;
+        _isCoinTransferLoading = false;
+      });
+    } catch (error) {
+      CoinTransferService.debugPrintTransferError(error);
+      if (!mounted) return;
+      setState(() {
+        _isCoinTransferLoading = false;
+        if (!silent) {
+          _coinTransferEligibility = null;
+        }
+      });
+    }
   }
 
   Future<void> _markPrivatePhotoConsumed(String messageId) async {
@@ -591,6 +685,36 @@ class _ChatScreenState extends State<ChatScreen>
         _resolvedPeerUserId = nextResolvedPeerUserId;
       }
     });
+  }
+
+  void _handleCoinTransferEvent(Map<String, dynamic> data) {
+    final type = data['type']?.toString() ?? '';
+    if (type == 'coin_transfer_unlock_updated') {
+      unawaited(_loadCoinTransferEligibility(silent: true));
+      return;
+    }
+
+    if (type != 'coin_transfer_completed') {
+      return;
+    }
+
+    final transfer = data['transfer'];
+    if (transfer is! Map) {
+      return;
+    }
+
+    final chatId = transfer['chatId']?.toString() ?? '';
+    final expectedChatId = CoinTransferService.buildDirectChatId(
+      _currentUserId ?? '',
+      _effectivePeerUserId ?? '',
+    );
+    if (chatId.isNotEmpty &&
+        expectedChatId.isNotEmpty &&
+        chatId != expectedChatId) {
+      return;
+    }
+
+    unawaited(_loadCoinTransferEligibility(silent: true));
   }
 
   String? _peerUserIdFromEvent(Map<String, dynamic> data) {
@@ -1255,6 +1379,212 @@ class _ChatScreenState extends State<ChatScreen>
     await MessageService.markAsRead(peerUserId);
   }
 
+  Future<void> _showCoinTransferUnlock() async {
+    if (_isCoinTransferPurchaseBusy) return;
+    final limits = _coinTransferEligibility?.limits;
+    final unlockPrice = limits?.unlockPriceInr ?? 599;
+    final unlockCurrency = limits?.unlockCurrency ?? 'INR';
+    final receiverPercentage = limits?.feePercentages.receiverPercentage ?? 70;
+    final platformPercentage = limits?.feePercentages.platformPercentage ?? 30;
+
+    final confirmed = await showModalBottomSheet<bool>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (context) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+          child: Material(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(28),
+            child: Padding(
+              padding: const EdgeInsets.all(22),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Unlock Coin Transfers',
+                    style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                          fontWeight: FontWeight.w900,
+                        ),
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'Send coins directly to friends in private chat.',
+                    style: TextStyle(
+                      color: Color(0xFF64748B),
+                      height: 1.4,
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFF8FAFC),
+                      borderRadius: BorderRadius.circular(18),
+                      border: Border.all(color: const Color(0xFFE2E8F0)),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          '$unlockPrice $unlockCurrency',
+                          style: TextStyle(
+                            fontSize: 24,
+                            fontWeight: FontWeight.w900,
+                            color: Color(0xFF0F172A),
+                          ),
+                        ),
+                        SizedBox(height: 8),
+                        Text(
+                          'When you send coins, your friend receives $receiverPercentage% and Friend Circle keeps $platformPercentage% as the platform fee.',
+                          style: TextStyle(
+                            color: Color(0xFF475569),
+                            height: 1.45,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 18),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton(
+                          onPressed: () => Navigator.pop(context, false),
+                          child: const Text('Maybe later'),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: FilledButton(
+                          onPressed: () => Navigator.pop(context, true),
+                          style: FilledButton.styleFrom(
+                            backgroundColor: const Color(0xFF111827),
+                          ),
+                          child: const Text('Continue'),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    if (confirmed != true || !mounted) {
+      return;
+    }
+
+    setState(() => _isCoinTransferPurchaseBusy = true);
+    try {
+      final result = await CoinTransferService.purchaseUnlock(
+        purchaseSource: 'stripe',
+      );
+      if (!mounted) return;
+
+      if (result.pendingCheckout && result.checkoutUrl.isNotEmpty) {
+        final launched = await launchUrl(
+          Uri.parse(result.checkoutUrl),
+          mode: LaunchMode.externalApplication,
+        );
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              launched
+                  ? 'Complete the purchase and return to Friend Circle.'
+                  : 'Checkout link is ready. Open it from your browser to finish the unlock.',
+            ),
+          ),
+        );
+      } else if (result.unlocked) {
+        await _loadCoinTransferEligibility();
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Coin transfers are now unlocked.'),
+            backgroundColor: AppColors.successGreen,
+          ),
+        );
+      }
+    } catch (error) {
+      _showError(error);
+    } finally {
+      if (mounted) {
+        setState(() => _isCoinTransferPurchaseBusy = false);
+      }
+    }
+  }
+
+  Future<void> _openCoinTransferComposer() async {
+    final eligibility = _coinTransferEligibility;
+    final peerUserId = _effectivePeerUserId;
+    if (eligibility == null || peerUserId == null || peerUserId.isEmpty) {
+      _showError(
+          'Coin transfers are still loading. Please try again in a moment.');
+      return;
+    }
+
+    if (eligibility.unlocked != true) {
+      await _showCoinTransferUnlock();
+      return;
+    }
+
+    if (!eligibility.eligibleAfterUnlock && eligibility.reasons.isNotEmpty) {
+      _showError(eligibility.reasons.first.message);
+      return;
+    }
+
+    final result = await showCoinTransferComposerSheet(
+      context: context,
+      eligibility: eligibility,
+      receiverName: _peerDisplayName,
+      onPreview: (amount) => CoinTransferService.previewTransfer(
+        receiverUserId: peerUserId,
+        chatId: eligibility.chatId,
+        amount: amount,
+      ),
+      onSubmit: (amount) => CoinTransferService.sendTransfer(
+        receiverUserId: peerUserId,
+        chatId: eligibility.chatId,
+        amount: amount,
+      ),
+    );
+
+    if (result == null || !mounted) {
+      return;
+    }
+
+    context.read<AuthProvider>().updateBalance(
+          coins: result.newBalance.coins,
+          gems: result.newBalance.gems,
+        );
+    await _loadCoinTransferEligibility(silent: true);
+
+    if (result.messageJson != null) {
+      final message = MessageModel.fromJson(result.messageJson!);
+      if (_messages.every((entry) => entry.id != message.id)) {
+        _handleSuccessfulOutgoingMessage(message);
+      }
+    }
+
+    if (!mounted) return;
+    final receiverAmount = result.transfer.receiverAmount;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          'Sent ${result.transfer.grossAmount} coins. $_peerDisplayName received $receiverAmount.',
+        ),
+        backgroundColor: AppColors.successGreen,
+      ),
+    );
+  }
+
   Future<void> _showGiftComposer() async {
     final peerUserId = _effectivePeerUserId;
     if (peerUserId == null || peerUserId.isEmpty) {
@@ -1399,6 +1729,9 @@ class _ChatScreenState extends State<ChatScreen>
               imageUrl: _peerAvatar,
               username: _peerDisplayName,
               radius: 21,
+              shopProfile: _peerShopProfile,
+              vipMembership: _peerVipMembership,
+              vipLevel: _peerVipLevel,
             ),
             Positioned(
               right: -1,
@@ -1421,15 +1754,34 @@ class _ChatScreenState extends State<ChatScreen>
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
             children: [
-              Text(
-                _peerDisplayName,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  fontSize: 17,
-                  color: Color(0xFF111827),
-                  fontWeight: FontWeight.w800,
-                ),
+              Row(
+                children: [
+                  Expanded(
+                    child: VipNameText(
+                      _peerDisplayName,
+                      membership: _peerVipMembership,
+                      fallbackVipLevel: _peerVipLevel,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      fallbackColor: resolveDisplayNameColor(
+                        _peerShopProfile,
+                        fallback: const Color(0xFF111827),
+                      ),
+                      style: const TextStyle(
+                        fontSize: 17,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ),
+                  if (_peerVipLevel > 0) ...[
+                    const SizedBox(width: 6),
+                    VipBadge(
+                      membership: _peerVipMembership,
+                      fallbackVipLevel: _peerVipLevel,
+                      size: VipBadgeSize.small,
+                    ),
+                  ],
+                ],
               ),
               const SizedBox(height: 2),
               AnimatedSwitcher(
@@ -1448,21 +1800,11 @@ class _ChatScreenState extends State<ChatScreen>
           ),
         ),
         const SizedBox(width: 10),
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-          decoration: BoxDecoration(
-            color: Colors.white.withValues(alpha: 0.92),
-            borderRadius: BorderRadius.circular(999),
-            border: Border.all(color: const Color(0xFFD7DEE8)),
-          ),
-          child: Text(
-            'Lv $_peerLevel',
-            style: const TextStyle(
-              color: Color(0xFF111827),
-              fontSize: 11,
-              fontWeight: FontWeight.w800,
-            ),
-          ),
+        LevelBadge(
+          level: _peerLevel,
+          levelInfo: _peerLevelInfo,
+          size: LevelBadgeSize.medium,
+          showGlow: false,
         ),
       ],
     );
@@ -2010,6 +2352,22 @@ class _ChatScreenState extends State<ChatScreen>
                   label: 'Gift',
                   onPressed: _canSendGift ? _showGiftComposer : null,
                 ),
+                if (_canShowCoinTransferUnlock || _canShowCoinTransferEntry)
+                  _composerToolChip(
+                    icon: _canShowCoinTransferUnlock
+                        ? Icons.workspace_premium_outlined
+                        : Icons.toll_rounded,
+                    label: _canShowCoinTransferUnlock
+                        ? (_isCoinTransferPurchaseBusy
+                            ? 'Unlocking...'
+                            : 'Unlock Coins')
+                        : (_isCoinTransferLoading
+                            ? 'Loading...'
+                            : 'Send Coins'),
+                    onPressed: _isCoinTransferPurchaseBusy
+                        ? null
+                        : _openCoinTransferComposer,
+                  ),
                 _composerToolChip(
                   icon: Icons.photo_library_outlined,
                   label: 'Photo',
@@ -2292,6 +2650,10 @@ class _ChatScreenState extends State<ChatScreen>
       return _buildGiftMessage(message, isFromMe);
     }
 
+    if (message.isCoinTransfer) {
+      return _buildCoinTransferMessage(message, isFromMe);
+    }
+
     if (message.isEmoji) {
       return Text(
         message.content,
@@ -2453,6 +2815,104 @@ class _ChatScreenState extends State<ChatScreen>
               ),
               icon: const Icon(Icons.login_rounded, size: 18),
               label: Text(isFromMe ? 'Open room' : 'Join room'),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildCoinTransferMessage(MessageModel message, bool isFromMe) {
+    final currentUserId = _currentUserId ?? '';
+    final viewerIsSender = message.coinTransferSenderUserId == currentUserId;
+    final grossAmount = message.coinTransferGrossAmount;
+    final receiverAmount = message.coinTransferReceiverAmount;
+    final platformFee = message.coinTransferPlatformFee;
+    final status = message.coinTransferStatus.trim().isEmpty
+        ? 'completed'
+        : message.coinTransferStatus.trim();
+    final titleColor = isFromMe ? Colors.white : const Color(0xFF0F172A);
+    final subtitleColor = isFromMe ? Colors.white70 : const Color(0xFF64748B);
+    final badgeBackground = isFromMe
+        ? Colors.white.withValues(alpha: 0.14)
+        : const Color(0xFFEFF6FF);
+    final badgeForeground = isFromMe ? Colors.white : const Color(0xFF1D4ED8);
+    final peerName = _peerDisplayName;
+    final title = viewerIsSender
+        ? 'You sent $grossAmount coins'
+        : 'You received $receiverAmount coins';
+    final subtitle = viewerIsSender
+        ? '$peerName received $receiverAmount coins. Friend Circle fee: $platformFee.'
+        : '${message.coinTransferSenderUsername} spent $grossAmount coins. Friend Circle fee: $platformFee.';
+
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: isFromMe
+            ? Colors.white.withValues(alpha: 0.08)
+            : const Color(0xFFF8FAFC),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(
+          color: isFromMe ? Colors.white24 : const Color(0xFFE2E8F0),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  color: badgeBackground,
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Icon(
+                  Icons.toll_rounded,
+                  color: badgeForeground,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: TextStyle(
+                        color: titleColor,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      subtitle,
+                      style: TextStyle(
+                        color: subtitleColor,
+                        fontSize: 12,
+                        height: 1.4,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            decoration: BoxDecoration(
+              color: badgeBackground,
+              borderRadius: BorderRadius.circular(999),
+            ),
+            child: Text(
+              status[0].toUpperCase() + status.substring(1),
+              style: TextStyle(
+                color: badgeForeground,
+                fontSize: 11,
+                fontWeight: FontWeight.w800,
+              ),
             ),
           ),
         ],
@@ -3025,4 +3485,3 @@ class _EphemeralPhotoViewerState extends State<_EphemeralPhotoViewer> {
     );
   }
 }
-

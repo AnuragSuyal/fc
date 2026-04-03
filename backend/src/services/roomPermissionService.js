@@ -6,6 +6,12 @@ const ROOM_MODES = Object.freeze({
     AUCTION: 'auction'
 });
 
+const MINI_DRAW_ACCESS_POLICIES = Object.freeze({
+    ALL_PARTICIPANTS: 'all_participants',
+    HOST_ADMIN: 'host_admin',
+    VIEW_ONLY: 'view_only'
+});
+
 const MODE_BY_ROOM_TYPE = Object.freeze({
     auction: ROOM_MODES.AUCTION,
     chat: ROOM_MODES.ACQUAINT,
@@ -47,6 +53,7 @@ const ROOM_ACTIONS = Object.freeze({
     JOIN_STAGE_DIRECTLY: 'join_stage_directly',
     REQUEST_MIC: 'request_mic',
     RALLY_FANS: 'rally_fans',
+    ACTIVATE_DRAGON_PACKET: 'activate_dragon_packet',
     TRANSFER_OWNERSHIP: 'transfer_ownership',
     END_ROOM: 'end_room',
     GET_ROOM_TOKEN: 'get_room_token'
@@ -71,9 +78,38 @@ const ADMIN_REALTIME_THEME_KEYS = new Set([
     'youtubeQueue'
 ]);
 
+const toIdString = (value) => {
+    if (!value) return '';
+    if (typeof value === 'string') return value;
+    if (typeof value === 'number') return String(value);
+    if (typeof value === 'object') {
+        const bsonType = value._bsontype || value.constructor?.name;
+        if (bsonType === 'ObjectId' || bsonType === 'ObjectID') {
+            return value.toString();
+        }
+        if ('_id' in value && value._id && value._id !== value) {
+            return toIdString(value._id);
+        }
+        if ('id' in value && value.id && value.id !== value) {
+            return toIdString(value.id);
+        }
+    }
+
+    if (typeof value.toString === 'function') {
+        const normalized = value.toString();
+        if (normalized && normalized !== '[object Object]') {
+            return normalized;
+        }
+    }
+
+    return '';
+};
+
 const idsEqual = (left, right) => {
-    if (!left || !right) return false;
-    return left.toString() === right.toString();
+    const normalizedLeft = toIdString(left);
+    const normalizedRight = toIdString(right);
+    if (!normalizedLeft || !normalizedRight) return false;
+    return normalizedLeft === normalizedRight;
 };
 
 const getParticipant = (room, userId) => {
@@ -82,12 +118,26 @@ const getParticipant = (room, userId) => {
 };
 
 const isRoomParticipant = (room, userId) => Boolean(getParticipant(room, userId));
+const isRoomActive = (room) => room?.roomActive !== false;
 
-const isRoomOwner = (room, userId) => idsEqual(room?.hostId, userId);
+const normalizeMiniDrawAccessPolicy = (value) => {
+    const normalized = String(value || '').trim().toLowerCase();
+    if (Object.values(MINI_DRAW_ACCESS_POLICIES).includes(normalized)) {
+        return normalized;
+    }
+    return MINI_DRAW_ACCESS_POLICIES.ALL_PARTICIPANTS;
+};
+
+const resolveRoomOwnerId = (room) => room?.ownerId || room?.hostId;
+
+const isRoomOwner = (room, userId) => idsEqual(resolveRoomOwnerId(room), userId);
+
+const isActiveRoomHost = (room, userId) => idsEqual(room?.hostId, userId);
 
 const isRoomAdmin = (room, userId) => {
     if (!room || !userId) return false;
     if (isRoomOwner(room, userId)) return true;
+    if (isActiveRoomHost(room, userId)) return true;
     if (room.coHosts?.some((id) => idsEqual(id, userId))) return true;
     if (room.moderators?.some((id) => idsEqual(id, userId))) return true;
     return false;
@@ -108,6 +158,7 @@ const isRoomSpeaker = (room, userId) => {
 const getAuthorityLevel = (room, userId) => {
     if (!room || !userId) return 0;
     if (isRoomOwner(room, userId)) return 4;
+    if (isActiveRoomHost(room, userId)) return 4;
     if (isRoomAdmin(room, userId)) return 3;
     if (isRoomSpeaker(room, userId)) return 2;
     if (isRoomParticipant(room, userId)) return 1;
@@ -131,6 +182,7 @@ const getRoomMode = (room) => {
 const getPersistedPermissionFlags = (room) => ({
     banTextChat: room?.settings?.banTextChat === true,
     banPhotoChat: room?.settings?.banPhotoChat === true,
+    banRedPacket: room?.settings?.banRedPacket === true,
     highQualityMode: room?.settings?.hdVoice === true,
     allowGifting: room?.settings?.allowGifts !== false,
     lockStageJoins: room?.settings?.stageJoinsLocked === true,
@@ -198,18 +250,65 @@ const findNextAvailableSeat = (room) => {
     return null;
 };
 
+const getUserMiniDrawCapabilities = (room, userId) => {
+    const participant = getParticipant(room, userId);
+    const isParticipant = Boolean(participant);
+    const isOwner = isRoomOwner(room, userId);
+    const isAdmin = isRoomAdmin(room, userId);
+    const miniDraw = room?.miniDraw || {};
+    const isUnlocked = miniDraw.isUnlocked === true;
+    const enabled = miniDraw.enabled !== false;
+    const accessPolicy = normalizeMiniDrawAccessPolicy(miniDraw.accessPolicy);
+    const canManageMiniDraw = isUnlocked && isParticipant && isOwner;
+    const canClearMiniDraw = isUnlocked && isParticipant && isAdmin;
+    const canUnlock = !isUnlocked && isParticipant && isOwner;
+    const canViewMiniDraw =
+        isUnlocked &&
+        isParticipant &&
+        (enabled || canManageMiniDraw || canClearMiniDraw);
+
+    let canDrawOnMiniDraw = false;
+    if (isUnlocked && enabled && isParticipant && isRoomActive(room)) {
+        switch (accessPolicy) {
+            case MINI_DRAW_ACCESS_POLICIES.HOST_ADMIN:
+                canDrawOnMiniDraw = isAdmin;
+                break;
+            case MINI_DRAW_ACCESS_POLICIES.VIEW_ONLY:
+                canDrawOnMiniDraw = false;
+                break;
+            case MINI_DRAW_ACCESS_POLICIES.ALL_PARTICIPANTS:
+            default:
+                canDrawOnMiniDraw = true;
+                break;
+        }
+    }
+
+    return {
+        isUnlocked,
+        enabled,
+        accessPolicy,
+        canUnlock,
+        canManageMiniDraw,
+        canViewMiniDraw,
+        canDrawOnMiniDraw,
+        canClearMiniDraw,
+        canUndoRedoMiniDraw: canDrawOnMiniDraw
+    };
+};
+
 const getUserRoomCapabilities = (room, userId) => {
     const effectivePermissions = getEffectiveRoomPermissions(room);
     const isOwner = isRoomOwner(room, userId);
     const isAdmin = isRoomAdmin(room, userId);
     const isSpeaker = isRoomSpeaker(room, userId);
     const isParticipant = isRoomParticipant(room, userId);
+    const miniDrawCapabilities = getUserMiniDrawCapabilities(room, userId);
 
     return {
         canOpenRoomSettings: isAdmin,
         canManageRoom: isAdmin,
-        canManageStage: isAdmin,
-        canManageSeats: isAdmin,
+        canManageStage: isAdmin && isRoomActive(room),
+        canManageSeats: isAdmin && isRoomActive(room),
         canManageSeatLocks: isOwner || (isAdmin && effectivePermissions.allowAdminSeatControl),
         canManageSafety: isAdmin,
         canManageRoomMedia: isAdmin,
@@ -244,6 +343,12 @@ const getUserRoomCapabilities = (room, userId) => {
             actorUserId: userId,
             action: ROOM_ACTIONS.JOIN_STAGE_DIRECTLY
         }),
+        canUnlockMiniDraw: miniDrawCapabilities.canUnlock,
+        canManageMiniDraw: miniDrawCapabilities.canManageMiniDraw,
+        canViewMiniDraw: miniDrawCapabilities.canViewMiniDraw,
+        canDrawOnMiniDraw: miniDrawCapabilities.canDrawOnMiniDraw,
+        canClearMiniDraw: miniDrawCapabilities.canClearMiniDraw,
+        canUndoRedoMiniDraw: miniDrawCapabilities.canUndoRedoMiniDraw,
         canRequestMic: canPerformRoomAction({
             room,
             actorUserId: userId,
@@ -254,6 +359,15 @@ const getUserRoomCapabilities = (room, userId) => {
             actorUserId: userId,
             action: ROOM_ACTIONS.RALLY_FANS
         }),
+        canActivateDragonPacket: canPerformRoomAction({
+            room,
+            actorUserId: userId,
+            action: ROOM_ACTIONS.ACTIVATE_DRAGON_PACKET
+        }),
+        hostPresent: room?.hostPresent === true,
+        adminCount: Number(room?.adminCount || 0),
+        activeControllersCount: Number(room?.activeControllersCount || 0),
+        roomActive: isRoomActive(room),
         canChangeRoomMode: isOwner,
         isOwner,
         isAdmin,
@@ -338,11 +452,23 @@ function canPerformRoomAction({
             return effectivePermissions.allowGifting;
         case ROOM_ACTIONS.JOIN_STAGE_DIRECTLY:
             if (!isParticipant) return false;
+            if (!isRoomActive(room)) return false;
             if (isAdmin) return true;
             return !effectivePermissions.lockStageJoins && !effectivePermissions.requireMicApproval;
         case ROOM_ACTIONS.REQUEST_MIC:
             if (!isParticipant) return false;
+            if (!isRoomActive(room)) return false;
             return !isAdmin && !isSpeaker;
+        case ROOM_ACTIONS.ACTIVATE_DRAGON_PACKET:
+            if (!isParticipant) return false;
+            if (!isRoomActive(room)) return false;
+            if (String(room?.type || '').trim().toLowerCase() !== 'voice') {
+                return false;
+            }
+            if (effectivePermissions.banRedPacket) {
+                return false;
+            }
+            return isAdmin;
         default:
             return false;
     }
@@ -384,6 +510,8 @@ const canJoinStageDirectly = (room, userId) =>
     canPerformRoomAction({ room, actorUserId: userId, action: ROOM_ACTIONS.JOIN_STAGE_DIRECTLY });
 const canUseRoomGifts = (room, userId) =>
     canPerformRoomAction({ room, actorUserId: userId, action: ROOM_ACTIONS.SEND_ROOM_GIFT });
+const canActivateDragonPacket = (room, userId) =>
+    canPerformRoomAction({ room, actorUserId: userId, action: ROOM_ACTIONS.ACTIVATE_DRAGON_PACKET });
 
 const sanitizeRoomUpdatePayload = (room, userId, payload = {}) => {
     if (!room || !userId || !payload || typeof payload !== 'object') return null;
@@ -431,11 +559,13 @@ module.exports = {
     ADMIN_REALTIME_SETTING_KEYS,
     ADMIN_REALTIME_THEME_KEYS,
     MAX_STAGE_SEATS,
+    MINI_DRAW_ACCESS_POLICIES,
     ROOM_ACTIONS,
     ROOM_MODES,
     assertRoomPermission,
     canEditAnnouncement,
     canEndRoom,
+    canActivateDragonPacket,
     canJoinStageDirectly,
     canManageAdmins,
     canManageGifting,
@@ -455,14 +585,17 @@ module.exports = {
     getAuthorityLevel,
     getEffectiveRoomPermissions,
     getMaxActiveSpeakers,
+    getUserMiniDrawCapabilities,
     getParticipant,
     getRoomMode,
     getUserRoomCapabilities,
     idsEqual,
+    isRoomActive,
     isSeatLocked,
     isRoomAdmin,
     isRoomOwner,
     isRoomParticipant,
     isRoomSpeaker,
+    normalizeMiniDrawAccessPolicy,
     sanitizeRoomUpdatePayload
 };
